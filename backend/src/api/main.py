@@ -13,6 +13,7 @@ from src.config import config as app_config
 from src.models.state import EngineInfo, EngineState, MarketStatus, Environment
 from .market import router as market_router, set_market_engine
 from .analysis import router as analysis_router
+from .bot import router as bot_router
 
 
 # ── Enum de acciones válidas ───────────────────────────────────────────────────
@@ -55,6 +56,7 @@ app = FastAPI(
 # Incluir routers
 app.include_router(market_router)
 app.include_router(analysis_router)
+app.include_router(bot_router)
 
 
 @app.get("/health")
