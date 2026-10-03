@@ -10,6 +10,7 @@ from fastapi import FastAPI, Body
 from src.config import config as app_config
 from src.models.state import EngineInfo, EngineState, MarketStatus, Environment
 from .market import router as market_router, set_market_engine
+from .analysis import router as analysis_router
 
 
 @asynccontextmanager
@@ -27,8 +28,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Incluir router de mercado
+# Incluir routers
 app.include_router(market_router)
+app.include_router(analysis_router)
 
 
 @app.get("/health")

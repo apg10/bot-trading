@@ -1,10 +1,11 @@
 // App principal — Terminal con gráfico de velas real + datos en tiempo real.
 
 import { useState, useEffect } from 'react'
-import type { EngineInfo, FixtureData, Position, Order } from './types'
+import type { EngineInfo, Position, Order } from './types'
 import { useMarketData } from './hooks/useMarketData'
 import { ChartPanel } from './components/ChartPanel'
 import { BottomBar } from './components/BottomBar'
+import { AnalysisPanel } from './components/AnalysisPanel'
 
 // ── Componente: Barra superior ───────────────────────────────────────────────
 
@@ -67,72 +68,6 @@ function WatchlistPanel() {
   )
 }
 
-// ── Componente: Panel de análisis ────────────────────────────────────────────
-
-function AnalysisPanel({ fixture }: { fixture: FixtureData | null }) {
-  return (
-    <aside className="analysis-panel">
-      {/* Reglas pendientes — siempre visibles */}
-      <div className="panel-section">
-        <div className="pending-rules">
-          <h4>⚠️ Reglas de estrategia pendientes</h4>
-          <ul>
-            <li>Fórmula y parámetros exactos de FYL, Keltner y MACD BB</li>
-            <li>Tipo de barras, construcción, sesiones y calentamiento</li>
-            <li>Reglas numéricas de impulso, retroceso, consolidación</li>
-            <li>Resolver 3 barras de FYL plana + consolidaciones admitidas</li>
-            <li>Fórmulas de entrada, caducidad, stop, objetivo y tamaño</li>
-            <li>Momento de confirmación de pivotes sin usar el futuro</li>
-          </ul>
-        </div>
-      </div>
-
-      {/* Zonas */}
-      {fixture?.zones && (
-        <div className="panel-section">
-          <h3>Zonas ({fixture.zones.length})</h3>
-          {fixture.zones.map(z => (
-            <div key={z.id} className="card">
-              <div className="card-title">{z.origin.toUpperCase()} — {z.status}</div>
-              <div className="card-detail">
-                {z.low.toLocaleString()} — {z.high.toLocaleString()} · {z.contacts} contactos
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Pivotes */}
-      {fixture?.pivots && (
-        <div className="panel-section">
-          <h3>Pivotes ({fixture.pivots.length})</h3>
-          {fixture.pivots.map(p => (
-            <div key={p.id} className="card">
-              <div className="card-title">{p.pivot_type.replace('_', ' ').toUpperCase()}</div>
-              <div className="card-detail">
-                Precio: {p.price.toLocaleString()} · Fuerza: {p.strength.toFixed(4)}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Anotaciones */}
-      {fixture?.annotations && (
-        <div className="panel-section">
-          <h3>Anotaciones ({fixture.annotations.length})</h3>
-          {fixture.annotations.map(a => (
-            <div key={a.id} className="card">
-              <div className="card-title">{a.annotation_type.replace('_', ' ').toUpperCase()}</div>
-              <div className="card-detail">{a.content}</div>
-            </div>
-          ))}
-        </div>
-      )}
-    </aside>
-  )
-}
-
 // ── App principal ────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -144,7 +79,6 @@ export default function App() {
     version: '0.1.0',
   })
 
-  const [fixture, setFixture] = useState<FixtureData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -157,37 +91,7 @@ export default function App() {
   const { candles, status, wsConnected, loading: marketLoading } = useMarketData('BTC/USDT')
 
   useEffect(() => {
-    // Fetch fixture data from backend
-    fetch('/api/fixture/data')
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
-      })
-      .then(data => {
-        setFixture(data as FixtureData)
-        setLoading(false)
-      })
-      .catch(err => {
-        setError(err.message)
-        // Fallback to local fixture for dev
-        import('./fixtures/synthetic').then(mod => {
-          const f = mod.getFullFixture()
-          setFixture(f as unknown as FixtureData)
-          setLoading(false)
-        }).catch(() => {
-          setLoading(false)
-        })
-      })
-
-    // Simulate engine state polling
-    const interval = setInterval(() => {
-      setEngineState(prev => ({
-        ...prev,
-        uptime_seconds: prev.uptime_seconds + 1,
-      }))
-    }, 1000)
-
-    return () => clearInterval(interval)
+    setLoading(false)
   }, [])
 
   // Combinar loading states
@@ -215,7 +119,11 @@ export default function App() {
               loading={marketLoading}
               wsConnected={wsConnected}
             />
-            <AnalysisPanel fixture={fixture} />
+            <AnalysisPanel
+              candles={candles}
+              symbol="BTC/USDT"
+              loading={marketLoading}
+            />
           </div>
           <BottomBar
             positions={positions}
