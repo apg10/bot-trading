@@ -1,0 +1,251 @@
+/* ── Layout responsive: 3 columnas desktop / móvil ─────────────────────────── */
+
+@import './tokens.css';
+
+/* Shell principal */
+.app-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Barra superior */
+.header-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  height: var(--header-height);
+  padding: 0 var(--space-lg);
+  background-color: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.header-bar .env-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.env-badge.paper { background: rgba(63, 185, 80, 0.15); color: var(--color-green); }
+.env-badge.demo { background: rgba(79, 140, 255, 0.15); color: var(--color-primary); }
+
+.header-bar .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--color-text-muted);
+}
+
+.status-dot.connected { background-color: var(--color-green); box-shadow: 0 0 4px var(--color-green); }
+.status-dot.disconnected { background-color: var(--color-red); }
+.status-dot.reconnecting { background-color: var(--color-yellow); animation: pulse 1.5s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Cuerpo principal */
+.main-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Columna izquierda — watchlist */
+.watchlist-panel {
+  width: 200px;
+  min-width: 160px;
+  background-color: var(--color-bg-secondary);
+  border-right: 1px solid var(--color-border);
+  padding: var(--space-md);
+  overflow-y: auto;
+}
+
+/* Panel central — gráfico */
+.chart-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chart-area {
+  flex: 1;
+  position: relative;
+  background-color: var(--color-bg);
+}
+
+/* Placeholder del gráfico */
+.chart-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  gap: var(--space-md);
+}
+
+.chart-placeholder .icon {
+  font-size: 48px;
+  opacity: 0.3;
+}
+
+/* Columna derecha — análisis */
+.analysis-panel {
+  width: 320px;
+  min-width: 260px;
+  background-color: var(--color-bg-secondary);
+  border-left: 1px solid var(--color-border);
+  padding: var(--space-md);
+  overflow-y: auto;
+}
+
+/* Franja inferior — posiciones */
+.bottom-bar {
+  height: var(--bottom-bar-height);
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: 0 var(--space-lg);
+  background-color: var(--color-bg-secondary);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  flex-shrink: 0;
+}
+
+/* Paneles internos */
+.panel-section {
+  margin-bottom: var(--space-lg);
+}
+
+.panel-section h3 {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-sm);
+  padding: 0 var(--space-xs);
+}
+
+/* Lista de activos */
+.asset-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-sm) var(--space-xs);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
+.asset-item:hover {
+  background-color: var(--color-surface);
+}
+
+/* Tarjetas de zona / pivote */
+.card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-sm);
+}
+
+.card .card-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.card .card-detail {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/* Panel de reglas pendientes */
+.pending-rules {
+  background-color: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.3);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+}
+
+.pending-rules h4 {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--color-yellow);
+  margin-bottom: var(--space-sm);
+}
+
+.pending-rules ul {
+  list-style: none;
+  padding: 0;
+}
+
+.pending-rules li {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  padding: 2px 0;
+  padding-left: 14px;
+  position: relative;
+}
+
+.pending-rules li::before {
+  content: '—';
+  position: absolute;
+  left: 0;
+  color: var(--color-text-muted);
+}
+
+/* ── Responsive: tablet ─────────────────────────────────────────────────────── */
+
+@media (max-width: 1024px) {
+  .watchlist-panel { width: 160px; min-width: 120px; }
+  .analysis-panel { width: 260px; min-width: 200px; }
+}
+
+/* ── Responsive: móvil ──────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .main-body {
+    flex-direction: column;
+  }
+
+  .watchlist-panel,
+  .analysis-panel {
+    width: 100%;
+    min-width: unset;
+    max-height: 200px;
+    border-right: none;
+    border-left: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .chart-area {
+    min-height: 300px;
+  }
+
+  .bottom-bar {
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+}
+
+/* ── Responsive: móvil muy pequeño ──────────────────────────────────────────── */
+
+@media (max-width: 480px) {
+  .header-bar { padding: 0 var(--space-md); gap: var(--space-sm); }
+  .watchlist-panel,
+  .analysis-panel { padding: var(--space-sm); }
+}
