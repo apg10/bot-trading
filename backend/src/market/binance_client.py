@@ -156,48 +156,49 @@ class BinanceWSClient:
         self._on_disconnect = handler
 
     async def start(self, symbol: str):
-        """Inicia el streaming de klines para un símbolo."""
+        """Inicia el streaming de klines para un símbolo.
+
+        Maneja reconexión con backoff exponencial automático.
+        Este método es bloqueante (no retorna hasta que se llame stop()).
+        """
+        import websockets as _websockets
+
         self._running = True
         attempt = 0
 
         while self._running:
             try:
-                url = f"{self.config.ws_url}/ws/{symbol.lower()}@kline_{self.config.kline_interval}"
-                async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as ws_client:
-                    # Usar websockets library instead
-                    import websockets
-                    uri = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{self.config.kline_interval}"
-                    async with websockets.connect(uri) as ws:
-                        self._ws = ws
-                        attempt = 0
-                        if self._on_connect:
-                            self._on_connect()
+                uri = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{self.config.kline_interval}"
+                async with _websockets.connect(uri) as ws:
+                    self._ws = ws
+                    attempt = 0
+                    if self._on_connect:
+                        self._on_connect()
 
-                        while self._running:
-                            try:
-                                msg_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
-                                msg = __import__("json").loads(msg_raw)
-                                if "k" in msg:  # kline message
-                                    kline = msg["k"]
-                                    normalized = {
-                                        "symbol": symbol,
-                                        "open_time": kline["t"],
-                                        "close_time": kline["T"],
-                                        "open": float(kline["o"]),
-                                        "high": float(kline["h"]),
-                                        "low": float(kline["l"]),
-                                        "close": float(kline["c"]),
-                                        "volume": float(kline["v"]),
-                                        "is_closed": kline["x"],
-                                        "is_new_bar": kline["x"],  # True cuando la barra se cierra
-                                    }
-                                    if self._on_message:
-                                        self._on_message(normalized)
-                            except asyncio.TimeoutError:
-                                # Pong timeout, keep alive
-                                pass
-                            except websockets.exceptions.ConnectionClosed:
-                                break
+                    while self._running:
+                        try:
+                            msg_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                            msg = __import__("json").loads(msg_raw)
+                            if "k" in msg:  # kline message
+                                kline = msg["k"]
+                                normalized = {
+                                    "symbol": symbol,
+                                    "open_time": kline["t"],
+                                    "close_time": kline["T"],
+                                    "open": float(kline["o"]),
+                                    "high": float(kline["h"]),
+                                    "low": float(kline["l"]),
+                                    "close": float(kline["c"]),
+                                    "volume": float(kline["v"]),
+                                    "is_closed": kline["x"],
+                                }
+                                if self._on_message:
+                                    self._on_message(normalized)
+                        except asyncio.TimeoutError:
+                            # Pong timeout, keep alive
+                            pass
+                        except _websockets.exceptions.ConnectionClosed:
+                            break
 
             except Exception as e:
                 logger.warning("WebSocket error: %s", e)
@@ -215,7 +216,13 @@ class BinanceWSClient:
                 await asyncio.sleep(delay)
 
     async def stop(self):
-        """Detiene el streaming."""
+        """Detiene el streaming y cierra la conexión WebSocket."""
         self._running = False
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
         if self._on_disconnect:
             self._on_disconnect()

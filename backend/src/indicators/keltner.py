@@ -1,36 +1,18 @@
 # Keltner Channels indicator — EMA + bandas basadas en ATR.
 
-import numpy as np
 from dataclasses import dataclass
 from typing import List
+
+from . import ema
 
 
 @dataclass
 class KeltnerPoint:
     time_ms: int
-    ema: float
+    ema_val: float  # Renamed to avoid conflict with function name
     upper: float
     lower: float
     atr: float
-
-
-def _ema(series: List[float], period: int) -> List[float]:
-    """Calcula EMA (Exponential Moving Average)."""
-    if len(series) < period:
-        return series[:]
-
-    result = [0.0] * len(series)
-    multiplier = 2.0 / (period + 1)
-
-    # Primer valor: SMA
-    sma = sum(series[:period]) / period
-    result[period - 1] = sma
-
-    # Resto: EMA
-    for i in range(period, len(series)):
-        result[i] = (series[i] * multiplier) + (result[i - 1] * (1 - multiplier))
-
-    return result
 
 
 def _atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> List[float]:
@@ -80,17 +62,17 @@ def calculate_keltner(
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
 
-    ema = _ema(closes, ema_period)
-    atr = _atr(highs, lows, closes, atr_period)
+    ema_vals = ema(closes, ema_period)
+    atr_vals = _atr(highs, lows, closes, atr_period)
 
     result = []
     for i in range(ema_period + atr_period - 1, len(candles)):
         result.append(KeltnerPoint(
             time_ms=candles[i]["open_time"],
-            ema=ema[i],
-            upper=ema[i] + multiplier * atr[i],
-            lower=ema[i] - multiplier * atr[i],
-            atr=atr[i],
+            ema_val=ema_vals[i],
+            upper=ema_vals[i] + multiplier * atr_vals[i],
+            lower=ema_vals[i] - multiplier * atr_vals[i],
+            atr=atr_vals[i],
         ))
 
     return result

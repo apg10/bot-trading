@@ -3,14 +3,38 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from typing import Any, AsyncGenerator
 
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, HTTPException, Body
+from pydantic import BaseModel
 
 from src.config import config as app_config
 from src.models.state import EngineInfo, EngineState, MarketStatus, Environment
 from .market import router as market_router, set_market_engine
 from .analysis import router as analysis_router
+
+
+# ── Enum de acciones válidas ───────────────────────────────────────────────────
+
+class EngineAction(StrEnum):
+    """Acciones válidas para el motor de trading."""
+    PAUSE = "pause"
+    RESUME = "resume"
+    STOP = "stop"
+
+
+class _EngineActionRequest(BaseModel):
+    action: EngineAction
+
+
+# ── Transiciones válidas de estado ─────────────────────────────────────────────
+
+_VALID_TRANSITIONS: dict[EngineState, set[EngineAction]] = {
+    EngineState.STOPPED: {EngineAction.RESUME},
+    EngineState.PAUSED:  {EngineAction.RESUME, EngineAction.STOP},
+    EngineState.RUNNING: {EngineAction.PAUSE, EngineAction.STOP},
+}
 
 
 @asynccontextmanager
@@ -62,7 +86,24 @@ async def fixture_data() -> dict[str, Any]:
 
 
 @app.post("/engine/action")
-async def engine_action(action: str = Body(..., embed=True)) -> dict[str, str]:
-    """Endpoint placeholder para comandos del motor (pausar, reanudar, detener)."""
-    # En fases posteriores se validará el action y actualizará EngineState
-    return {"status": "accepted", "action": action}
+async def engine_action(request: _EngineActionRequest) -> dict[str, str]:
+    """Endpoint para comandos del motor (pausar, reanudar, detener).
+
+    Valida que la acción esté en el enum EngineAction y que sea legal
+    según el estado actual del motor. En fases posteriores se ejecutará
+    la transición real.
+    """
+    current_state = EngineState.STOPPED  # Placeholder: leer de MarketEngine real
+    allowed = _VALID_TRANSITIONS.get(current_state, set())
+
+    if request.action not in allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Acción '{request.action}' no permitida en estado '{current_state}'. "
+                f"Acciones válidas: {', '.join(sorted(a.value for a in allowed)) or 'ninguna'}."
+            ),
+        )
+
+    # Placeholder: ejecutar la transición real cuando el motor esté disponible
+    return {"status": "accepted", "action": request.action}

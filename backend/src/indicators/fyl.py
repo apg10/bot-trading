@@ -1,4 +1,11 @@
 # FYL (First Yellow Line) indicator — Detección de pivotes y zonas de consolidación.
+"""
+AVISO IMPORTANTE: La detección incremental (default) solo mira hacia atrás, por lo que
+los pivotes confirmados pueden refinarse en barras posteriores. Las señales basadas en
+pivotes retrospectivos (modo batch) son TEST_ONLY y NO deben usarse para operaciones en vivo.
+
+Según el plan (sección 3, requisito #6): los pivotes solo pueden confirmarse sin usar datos futuros.
+"""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -20,11 +27,16 @@ class ConsolidationStatus(str, Enum):
 
 @dataclass
 class PivotPoint:
-    """Un punto de pivote detectado."""
+    """Un punto de pivote detectado.
+
+    Si confirmada=True, el pivote fue verificado con datos retrospectivos
+    (modo batch TEST_ONLY). Si confirmada=False, es provisional y puede refinarse.
+    """
     time_ms: int
     price: float
     pivot_type: PivotType
     strength: float  # Fuerza del pivote (0-1)
+    confirmed: bool = False  # True si fue verificado retrospectivamente
 
 
 @dataclass
@@ -46,20 +58,84 @@ class FYLResult:
     pivots: List[PivotPoint]
     zones: List[ConsolidationZone]
     annotations: List[dict]  # Anotaciones de análisis
+    mode: str = "incremental"  # "incremental" | "batch_test_only"
 
 
-def _detect_pivots(
+def _detect_pivots_incremental(
     highs: List[float],
     lows: List[float],
-    closes: List[float],
     lookback: int = 5,
     min_strength: float = 0.01,
 ) -> List[PivotPoint]:
-    """Detecta pivotes (máximos y mínimos locales) en los datos."""
-    pivots = []
+    """Detecta pivotes de forma INCREMENTAL (seguro para tiempo real).
+
+    Un punto se considera máximo/mínimo local solo mirando hacia ATRÁS:
+    es mayor/menor que los `lookback` puntos anteriores. No mira al futuro.
+
+    Los pivotes detectados son PROVISIONALES y pueden ser refinados en barras posteriores.
+    """
+    pivots: List[PivotPoint] = []
+
+    for i in range(lookback, len(highs)):
+        # ── Verificar si es un máximo local (solo mirando atrás) ──
+        is_high = True
+        for j in range(i - lookback, i):
+            if highs[j] >= highs[i]:
+                is_high = False
+                break
+
+        if is_high:
+            # Calcular fuerza basada en los vecinos anteriores
+            left_range = max(highs[max(0, i - lookback):i]) - highs[i]
+            strength = left_range / highs[i] if highs[i] > 0 else 0.0
+            if strength >= min_strength:
+                pivots.append(PivotPoint(
+                    time_ms=i * 60_000,
+                    price=highs[i],
+                    pivot_type=PivotType.HIGH,
+                    strength=round(strength, 4),
+                    confirmed=False,
+                ))
+
+        # ── Verificar si es un mínimo local (solo mirando atrás) ──
+        is_low = True
+        for j in range(i - lookback, i):
+            if lows[j] <= lows[i]:
+                is_low = False
+                break
+
+        if is_low:
+            left_range = lows[i] - min(lows[max(0, i - lookback):i])
+            strength = left_range / abs(lows[i]) if lows[i] != 0 else 0.0
+            if strength >= min_strength:
+                pivots.append(PivotPoint(
+                    time_ms=i * 60_000,
+                    price=lows[i],
+                    pivot_type=PivotType.LOW,
+                    strength=round(strength, 4),
+                    confirmed=False,
+                ))
+
+    return pivots
+
+
+def _detect_pivots_batch(
+    highs: List[float],
+    lows: List[float],
+    lookback: int = 5,
+    min_strength: float = 0.01,
+) -> List[PivotPoint]:
+    """Detecta pivotes retrospectivamente (TEST_ONLY — usa datos futuros).
+
+    UNO SOLO debe usar este modo para backtesting por lotes con datos históricos.
+    Los pivotes marcados como confirmados pueden ser revisados en tiempo real.
+
+    WARNING: lookahead bias — no usar para señales en vivo ni replay.
+    """
+    pivots: List[PivotPoint] = []
 
     for i in range(lookback, len(highs) - lookback):
-        # Verificar si es un máximo local
+        # Verificar si es un máximo local (ambos lados)
         is_high = True
         for j in range(i - lookback, i + lookback + 1):
             if j != i and highs[j] >= highs[i]:
@@ -67,7 +143,6 @@ def _detect_pivots(
                 break
 
         if is_high:
-            # Calcular fuerza del pivote (basada en la diferencia con los vecinos)
             strength = max(
                 (highs[i] - min(highs[max(0, i - lookback):i])) / highs[i],
                 (highs[i] - min(highs[i + 1:min(len(highs), i + lookback + 1)])) / highs[i],
@@ -77,10 +152,11 @@ def _detect_pivots(
                     time_ms=i * 60_000,
                     price=highs[i],
                     pivot_type=PivotType.HIGH,
-                    strength=strength,
+                    strength=round(strength, 4),
+                    confirmed=True,
                 ))
 
-        # Verificar si es un mínimo local
+        # Verificar si es un mínimo local (ambos lados)
         is_low = True
         for j in range(i - lookback, i + lookback + 1):
             if j != i and lows[j] <= lows[i]:
@@ -97,7 +173,8 @@ def _detect_pivots(
                     time_ms=i * 60_000,
                     price=lows[i],
                     pivot_type=PivotType.LOW,
-                    strength=strength,
+                    strength=round(strength, 4),
+                    confirmed=True,
                 ))
 
     return pivots
@@ -107,8 +184,11 @@ def _detect_consolidation_zones(
     pivots: List[PivotPoint],
     candles: List[dict],
 ) -> List[ConsolidationZone]:
-    """Detecta zonas de consolidación entre pivotes consecutivos."""
-    zones = []
+    """Detecta zonas de consolidación entre pivotes consecutivos del mismo tipo.
+
+    Los contactos se cuentan con timestamps, no índices, para evitar desalineación.
+    """
+    zones: List[ConsolidationZone] = []
     zone_id = 0
 
     for i in range(len(pivots) - 1):
@@ -120,15 +200,18 @@ def _detect_consolidation_zones(
             continue
 
         # Calcular zona de consolidación
-        low = min(pivot_a.price, pivot_b.price)
-        high = max(pivot_a.price, pivot_b.price)
+        zone_low = min(pivot_a.price, pivot_b.price)
+        zone_high = max(pivot_a.price, pivot_b.price)
 
-        # Contar contactos con los bordes
+        # Contar contactos con los bordes usando timestamps (no índices)
         contacts = 0
-        for j in range(i + 1, len(candles)):
-            if candles[j]["open_time"] >= pivot_b.time_ms:
+        for candle in candles:
+            ot = candle["open_time"]
+            if ot <= pivot_a.time_ms:
+                continue
+            if ot >= pivot_b.time_ms:
                 break
-            if (candles[j]["high"] >= high - 0.01 or candles[j]["low"] <= low + 0.01):
+            if (candle["high"] >= zone_high - 0.01 or candle["low"] <= zone_low + 0.01):
                 contacts += 1
 
         zones.append(ConsolidationZone(
@@ -136,8 +219,8 @@ def _detect_consolidation_zones(
             start_time_ms=pivot_a.time_ms,
             end_time_ms=pivot_b.time_ms,
             origin=pivot_a.pivot_type,
-            low=low,
-            high=high,
+            low=round(zone_low, 2),
+            high=round(zone_high, 2),
             contacts=contacts,
         ))
         zone_id += 1
@@ -152,28 +235,29 @@ def calculate_fyl(
 ) -> FYLResult:
     """Calcula el indicador FYL (First Yellow Line).
 
+    Por defecto usa detección INCREMENTAL (solo mirando hacia atrás), segura para señales en vivo.
+    Los pivotes incrementales son PROVISIONALES y pueden refinarse en barras posteriores.
+
+    Para backtesting retrospectivo, usar `calculate_fyl_batch` (TEST_ONLY).
+
     Args:
         candles: Lista de dicts con keys: open_time, high, low, close
         lookback: Número de barras para buscar pivotes
         min_strength: Fuerza mínima para considerar un pivote
 
     Returns:
-        FYLResult con pivots, zones y annotations
+        FYLResult con pivots, zones y annotations. mode indica el modo usado.
     """
-    if len(candles) < lookback * 2 + 2:
-        return FYLResult(pivots=[], zones=[], annotations=[])
+    if len(candles) < lookback + 1:
+        return FYLResult(pivots=[], zones=[], annotations=[], mode="incremental")
 
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
-    closes = [c["close"] for c in candles]
 
-    # Detectar pivotes
-    pivots = _detect_pivots(highs, lows, closes, lookback, min_strength)
-
-    # Detectar zonas de consolidación
+    # ── Modo incremental (default, seguro para tiempo real) ──
+    pivots = _detect_pivots_incremental(highs, lows, lookback, min_strength)
     zones = _detect_consolidation_zones(pivots, candles)
 
-    # Generar anotaciones de análisis
     annotations = []
     for zone in zones:
         if zone.contacts >= 2:
@@ -184,4 +268,48 @@ def calculate_fyl(
                 "zone_id": zone.id,
             })
 
-    return FYLResult(pivots=pivots, zones=zones, annotations=annotations)
+    return FYLResult(
+        pivots=pivots,
+        zones=zones,
+        annotations=annotations,
+        mode="incremental",
+    )
+
+
+def calculate_fyl_batch(
+    candles: List[dict],
+    lookback: int = 5,
+    min_strength: float = 0.01,
+) -> FYLResult:
+    """Versión retrospectiva de calculate_fyl — TEST_ONLY para backtesting por lotes.
+
+    Usa lookahead bias (mira hacia adelante), por lo que los pivotes confirmados
+    NO pueden replicarse en tiempo real. Marcados con confirmed=True.
+
+    WARNING: lookahead bias — no usar para señales en vivo ni replay.
+    """
+    if len(candles) < lookback * 2 + 2:
+        return FYLResult(pivots=[], zones=[], annotations=[], mode="batch_test_only")
+
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+
+    pivots = _detect_pivots_batch(highs, lows, lookback, min_strength)
+    zones = _detect_consolidation_zones(pivots, candles)
+
+    annotations = []
+    for zone in zones:
+        if zone.contacts >= 2:
+            annotations.append({
+                "id": f"ann_{zone.id}",
+                "annotation_type": "consolidation_zone",
+                "content": f"Zona de consolidación {zone.origin} con {zone.contacts} contactos",
+                "zone_id": zone.id,
+            })
+
+    return FYLResult(
+        pivots=pivots,
+        zones=zones,
+        annotations=annotations,
+        mode="batch_test_only",
+    )

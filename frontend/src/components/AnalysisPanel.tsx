@@ -47,6 +47,7 @@ interface ConsolidationZone {
 interface AnalysisData {
   symbol: string
   timeframe: string
+  data_source: "provided" | "synthetic_test"
   keltner: { points: KeltnerPoint[] }
   macd: { points: MACDPoint[] }
   fyl: {
@@ -56,7 +57,9 @@ interface AnalysisData {
   }
 }
 
-// Hook para obtener datos de análisis desde el backend
+// Hook para obtener datos de análisis desde el backend.
+// Envía las velas reales del mercado; si el backend no tiene ninguna,
+// usa fixture sintética marcada TEST_ONLY (sección 3 del plan).
 function useAnalysis(symbol: string, candles: CandleData[]) {
   const [analysis, setAnalysis] = useState<AnalysisData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -67,16 +70,27 @@ function useAnalysis(symbol: string, candles: CandleData[]) {
     const fetchAnalysis = async () => {
       try {
         setLoading(true)
+        // Enviar las velas reales al backend para análisis.
+        const payload = {
+          symbol,
+          timeframe: "15m",
+          candles_count: Math.min(candles.length, 200),
+          candles: candles.slice(-200).map(c => ({
+            open_time: c.open_time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+          })),
+        }
+
         const resp = await fetch(
           `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/analysis`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              symbol,
-              timeframe: "15m",
-              candles_count: Math.min(candles.length, 200),
-            }),
+            body: JSON.stringify(payload),
           },
         )
 

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Optional
+from typing import Any, Optional
 
 from .binance_client import BinanceHTTPClient, BinanceWSClient, BinanceConfig
 from .candle_builder import CandleBuilder, BarEvent, BarEventType
@@ -27,10 +26,10 @@ class MarketState:
 
 
 class MarketEngine:
-    """Motor que orquesta BinanceClient + CandleBuilder.
+    """Motor que orquesta Binance HTTP + WS + CandleBuilder.
 
     Responsabilidades:
-    - Iniciar/detener conexión a Binance
+    - Iniciar/detener conexión a Binance (HTTP para histórico, WS para streaming)
     - Gestionar reconexión con backoff
     - Orquestar eventos del builder y propagarlos
     - Mantener estado actualizado
@@ -38,11 +37,12 @@ class MarketEngine:
 
     def __init__(self, config: BinanceConfig):
         self.config = config
-        self._client: Optional[BinanceHTTPClient] = None
+        # Separar HTTP (para histórico) y WS (para streaming en vivo).
+        self._http_client: Optional[BinanceHTTPClient] = None
+        self._ws_client: Optional[BinanceWSClient] = None
         self._builder: Optional[CandleBuilder] = None
         self._state = MarketState(symbol="")
         self._running = False
-        self._reconnect_task: Optional[asyncio.Task] = None
 
         # Handlers de eventos del motor
         self._on_bar_closed: list[Any] = []
@@ -63,30 +63,58 @@ class MarketEngine:
         self._on_state_change.append(handler)
 
     async def start(self, symbol: str):
-        """Inicia el motor para un símbolo dado."""
+        """Inicia el motor para un símbolo dado.
+
+        1. Crea cliente HTTP (para histórico).
+        2. Crea cliente WS y conecta streaming a Binance.
+        3. Conecta builder al client WS para recibir eventos.
+        """
         if self._running:
             await self.stop()
 
         self._state = MarketState(symbol=symbol)
         self._running = True
 
-        # Crear componentes
-        self._client = BinanceHTTPClient(self.config)
+        # ── Cliente HTTP (solo para consultas de histórico, no streaming) ──
+        self._http_client = BinanceHTTPClient(self.config)
+
+        # ── Cliente WS (streaming en vivo) ──
+        self._ws_client = BinanceWSClient(self.config)
+
+        # Conectar builder al client WS para recibir mensajes normalizados
         self._builder = CandleBuilder(symbol, interval_ms=60_000)
 
-        # Conectar builder al client
-        self._builder.on_event(self._handle_bar_event)
+        def _on_ws_message(msg: dict[str, Any]) -> None:
+            """Middleware: convierte mensaje WS en kline y lo pasa al builder."""
+            if "k" in msg:
+                kline = msg["k"]
+                normalized = {
+                    "symbol": symbol,
+                    "open_time": kline["t"],
+                    "close_time": kline["T"],
+                    "open": float(kline["o"]),
+                    "high": float(kline["h"]),
+                    "low": float(kline["l"]),
+                    "close": float(kline["c"]),
+                    "volume": float(kline["v"]),
+                    "is_closed": kline["x"],
+                }
+                self._builder.process_kline(normalized)  # type: ignore[arg-type]
 
-        # Iniciar streaming
-        await self._client.start(symbol)
+        self._ws_client.on_message(_on_ws_message)
+
+        # Iniciar streaming WebSocket (maneja reconexión interna)
+        await self._ws_client.start(symbol)
         self._state.connected = True
         self._emit_state_change()
 
     async def stop(self):
-        """Detiene el motor."""
+        """Detiene el motor y libera recursos."""
         self._running = False
-        if self._client:
-            await self._client.stop()
+        if self._ws_client:
+            await self._ws_client.stop()
+        if self._http_client:
+            await self._http_client.close()
         self._state.connected = False
         self._state.reconnecting = False
         self._emit_state_change()

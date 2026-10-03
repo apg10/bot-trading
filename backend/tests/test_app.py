@@ -44,7 +44,18 @@ class TestFixtureData:
 
 class TestEngineAction:
     def test_engine_action_accepted(self, client: TestClient):
-        resp = client.post("/engine/action", json={"action": "pause"})
+        # Desde estado STOPPED (placeholder), solo "resume" es legal
+        resp = client.post("/engine/action", json={"action": "resume"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "accepted"
+
+    def test_engine_action_rejected_invalid_state(self, client: TestClient):
+        # Desde estado STOPPED (placeholder), "pause" no es legal
+        resp = client.post("/engine/action", json={"action": "pause"})
+        assert resp.status_code == 409
+
+    def test_engine_action_rejected_unknown(self, client: TestClient):
+        # Acción no en el enum debe ser rechazada por Pydantic (422)
+        resp = client.post("/engine/action", json={"action": "unknown_action"})
+        assert resp.status_code == 422
