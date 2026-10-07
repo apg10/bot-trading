@@ -1,6 +1,7 @@
 // Panel de análisis con IA — visualización y control para Ollama.
 
 import { useState, useEffect } from "react"
+import { getApiUrl } from "../api/market"
 
 interface AIAnalysisPanelProps {
   symbol: string
@@ -26,7 +27,7 @@ function useAIAnalysis(symbol: string) {
       setError(null)
 
       const resp = await fetch(
-        `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/bot/ai/analyze`,
+        getApiUrl("/api/bot/ai/analyze"),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

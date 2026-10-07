@@ -1,4 +1,4 @@
-"""CandleBuilder — construye barras a partir de ticks/klines.
+"""CandleBuilder — procesa snapshots kline acumulados de Binance.
 
 Maneja:
 - Detección de duplicados
@@ -28,7 +28,11 @@ class BarEventType(enum.StrEnum):
 
 @enum_dataclass
 class BarEvent:
-    """Evento emitido por CandleBuilder."""
+    """Evento del builder. Los gaps indican un intervalo [inicio, fin).
+
+    previous_close_time es el cierre recibido de la última vela confirmada,
+    o None si aún no existe ninguna. No confirma una vela parcial.
+    """
 
     event_type: BarEventType
     symbol: str
@@ -36,6 +40,8 @@ class BarEvent:
     gap_ms: Optional[int] = None
     previous_close_time: Optional[int] = None
     raw_message: Optional[dict[str, Any]] = None
+    gap_start_time: Optional[int] = None
+    gap_end_time: Optional[int] = None
 
 
 @enum_dataclass
@@ -45,6 +51,7 @@ class CurrentBar:
     symbol: str
     open_time: int
     open: float
+    close_time: int
     high: float = 0.0
     low: float = float("inf")
     close: float = 0.0
@@ -58,10 +65,12 @@ class CandleBuilder:
     """Construye barras (velas) a partir de mensajes de Binance kline/streaming.
 
     Reglas:
-    - Ignora duplicados (misma open_time que la barra actual)
+    - Una kline es un snapshot con volumen acumulado, no un tick incremental
+    - Ignora snapshots idénticos y barras ya cerradas o fuera de orden
+    - Acepta el cierre definitivo de la misma barra en formación
     - Detecta huecos entre barras consecutivas
-    - Detecta eventos fuera de orden (open_time < expected_next_open_time)
-    - Emite evento BAR_CLOSED cuando una barra se cierra
+    - Solo emite BAR_CLOSED cuando recibe is_closed=True
+    - Un cierre perdido requiere recuperación; nunca se fabrica una vela cerrada
     - Emite BAR_UPDATED con la barra en formación
     """
 
@@ -93,15 +102,18 @@ class CandleBuilder:
             gap_ms=gap_ms,
             previous_close_time=previous_close_time,
             raw_message=raw_message,
+            gap_start_time=kwargs.get("gap_start_time"),
+            gap_end_time=kwargs.get("gap_end_time"),
         )
         if self._on_event:
             self._on_event(event)
 
-    def _start_new_bar(self, open_time: int, open_p: float) -> CurrentBar:
+    def _start_new_bar(self, open_time: int, open_p: float, close_time: int) -> CurrentBar:
         bar = CurrentBar(
             symbol=self.symbol,
             open_time=open_time,
             open=open_p,
+            close_time=close_time,
             high=open_p,
             low=open_p,
             close=open_p,
@@ -110,20 +122,28 @@ class CandleBuilder:
         self._current_bar = bar
         return bar
 
+    def _current_candle(self) -> dict[str, Any]:
+        """Snapshot independiente de la barra provisional, sin confirmar cierre."""
+        bar = self._current_bar
+        assert bar is not None
+        return {
+            "open_time": bar.open_time,
+            "close_time": bar.close_time,
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+            "is_closed": False,
+        }
+
     def _close_current_bar(self) -> Optional[dict[str, Any]]:
         if not self._current_bar or self._current_bar.is_closed:
             return None
 
-        closed = {
-            "open_time": self._current_bar.open_time,
-            "close_time": self._current_bar.open_time + self.interval_ms,
-            "open": self._current_bar.open,
-            "high": self._current_bar.high,
-            "low": self._current_bar.low,
-            "close": self._current_bar.close,
-            "volume": self._current_bar.volume,
-            "is_closed": True,
-        }
+        # Solo se llama tras recibir y aplicar el mensaje definitivo de Binance.
+        closed = self._current_candle()
+        closed["is_closed"] = True
 
         self._closed_candles.append(closed)
         if len(self._closed_candles) > self._max_closed_buffer:
@@ -134,6 +154,9 @@ class CandleBuilder:
 
     def process_kline(self, message: dict[str, Any]) -> list[BarEvent]:
         """Procesa un mensaje kline de Binance y retorna lista de eventos.
+
+        Los gaps requieren backfill separado: un cierre de un intervalo anterior
+        a la barra vigente no se inserta por este flujo de streaming.
 
         Formato esperado de `message`:
         {
@@ -156,42 +179,18 @@ class CandleBuilder:
 
         open_time = message["open_time"]
         is_closed = message.get("is_closed", False)
+        same_bar = (
+            self._current_bar is not None
+            and open_time == self._current_bar.open_time
+        )
 
-        # ── Caso 1: Actualización de barra en formación (streaming, mismo open_time) ─
-        if self._current_bar and not is_closed and open_time == self._current_bar.open_time:
-            bar = self._current_bar
-            bar.high = max(bar.high, message["high"])
-            bar.low = min(bar.low, message["low"])
-            bar.close = message["close"]
-            bar.volume += message.get("volume", 0.0)
-
-            events.append(BarEvent(
-                event_type=BarEventType.BAR_UPDATED,
-                symbol=self.symbol,
-                candle={
-                    "open_time": bar.open_time,
-                    "close_time": bar.open_time + self.interval_ms,
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume,
-                    "is_closed": False,
-                },
-            ))
-            return events
-
-        # ── Caso 2: Duplicado (mismo open_time que barra en formación) ──
-        if self._current_bar and open_time == self._current_bar.open_time:
-            events.append(BarEvent(
-                event_type=BarEventType.DUPLICATE,
-                symbol=self.symbol,
-                raw_message=message,
-            ))
-            return events
-
-        # ── Caso 3: Fuera de orden (open_time < esperado) ──────────────
-        if self._expected_next_open_time and open_time < self._expected_next_open_time:
+        # La vela actual es la excepción: sus actualizaciones/cierre son válidos
+        # aunque su open_time sea anterior al siguiente intervalo esperado.
+        if (
+            not same_bar
+            and self._expected_next_open_time is not None
+            and open_time < self._expected_next_open_time
+        ):
             logger.warning(
                 "Evento fuera de orden: expected >= %d, got %d",
                 self._expected_next_open_time,
@@ -200,93 +199,82 @@ class CandleBuilder:
             events.append(BarEvent(
                 event_type=BarEventType.DUPLICATE,
                 symbol=self.symbol,
-                raw_message=message,
+                raw_message=dict(message),
             ))
             return events
 
-        # ── Caso 4: Hueco detectado ─────────────────────────────────────
-        if self._expected_next_open_time and open_time > self._expected_next_open_time:
-            gap = open_time - self._expected_next_open_time
+        candle = {
+            "open_time": open_time,
+            "close_time": message["close_time"],
+            "open": message["open"],
+            "high": message["high"],
+            "low": message["low"],
+            "close": message["close"],
+            "volume": message["volume"],
+            "is_closed": is_closed,
+        }
+        if same_bar and candle == self._current_candle():
             events.append(BarEvent(
-                event_type=BarEventType.GAP_DETECTED,
+                event_type=BarEventType.DUPLICATE,
                 symbol=self.symbol,
-                gap_ms=gap,
-                previous_close_time=self._expected_next_open_time - self.interval_ms,
+                raw_message=dict(message),
             ))
+            return events
 
-        # ── Caso 5: Cerrar barra anterior si existe ─────────────────────
-        if self._current_bar and not self._current_bar.is_closed:
-            closed = self._close_current_bar()
-            if closed:
+        if not same_bar:
+            # Si la barra anterior sigue abierta, incluirla entera en el gap:
+            # cambiar de intervalo no constituye una confirmación de cierre.
+            gap_start = (
+                self._current_bar.open_time
+                if self._current_bar is not None
+                else self._expected_next_open_time
+            )
+            if gap_start is not None and open_time > gap_start:
                 events.append(BarEvent(
-                    event_type=BarEventType.BAR_CLOSED,
+                    event_type=BarEventType.GAP_DETECTED,
                     symbol=self.symbol,
-                    candle=closed,
+                    gap_ms=open_time - gap_start,
+                    previous_close_time=(
+                        self._closed_candles[-1]["close_time"]
+                        if self._closed_candles else None
+                    ),
+                    gap_start_time=gap_start,
+                    gap_end_time=open_time,
+                    raw_message=dict(message),
                 ))
+            self._start_new_bar(open_time, candle["open"], candle["close_time"])
+            self._expected_next_open_time = open_time + self.interval_ms
 
-        # ── Caso 6: Barra ya cerrada por la API ─────────────────────────
+        # Cada mensaje contiene OHLCV acumulado. El cierre definitivo es
+        # autoritativo incluso si corrige un snapshot provisional anterior.
+        bar = self._current_bar
+        assert bar is not None
+        bar.open = candle["open"]
+        bar.close_time = candle["close_time"]
+        bar.high = candle["high"]
+        bar.low = candle["low"]
+        bar.close = candle["close"]
+        bar.volume = candle["volume"]
+
         if is_closed:
-            closed_candle = {
-                "open_time": open_time,
-                "close_time": open_time + self.interval_ms,
-                "open": message["open"],
-                "high": message["high"],
-                "low": message["low"],
-                "close": message["close"],
-                "volume": message["volume"],
-                "is_closed": True,
-            }
+            closed_candle = self._close_current_bar()
+            assert closed_candle is not None
             events.append(BarEvent(
                 event_type=BarEventType.BAR_CLOSED,
                 symbol=self.symbol,
                 candle=closed_candle,
             ))
-            # Agregar al buffer de cerradas (también para barras API)
-            self._closed_candles.append(closed_candle)
-            if len(self._closed_candles) > self._max_closed_buffer:
-                self._closed_candles.pop(0)
-            self._expected_next_open_time = open_time + self.interval_ms
-
-        # ── Caso 7: Nueva barra (streaming) ─────────────────────────────
-        elif self._current_bar is None:
-            bar = self._start_new_bar(open_time, message["open"])
-            self._expected_next_open_time = open_time + self.interval_ms
-            events.append(BarEvent(
-                event_type=BarEventType.NEW_BAR_STARTED,
-                symbol=self.symbol,
-                candle={
-                    "open_time": open_time,
-                    "close_time": open_time + self.interval_ms,
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume,
-                    "is_closed": False,
-                },
-            ))
-
-        # ── Caso 8: Actualizar barra en formación (después de cerrar anterior) ─
-        if self._current_bar and not is_closed:
-            bar = self._current_bar
-            bar.high = max(bar.high, message["high"])
-            bar.low = min(bar.low, message["low"])
-            bar.close = message["close"]
-            bar.volume += message.get("volume", 0.0)
-
+        else:
+            if not same_bar:
+                events.append(BarEvent(
+                    event_type=BarEventType.NEW_BAR_STARTED,
+                    symbol=self.symbol,
+                    candle=dict(candle),
+                ))
             events.append(BarEvent(
                 event_type=BarEventType.BAR_UPDATED,
                 symbol=self.symbol,
-                candle={
-                    "open_time": bar.open_time,
-                    "close_time": bar.open_time + self.interval_ms,
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume,
-                    "is_closed": False,
-                },
+                candle=dict(candle),
             ))
 
         return events

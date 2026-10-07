@@ -1,11 +1,9 @@
 import './styles/layout.css'
 import App from './App'
+import { createRoot } from 'react-dom/client'
 
 const rootEl = document.getElementById('root')
 if (rootEl) {
-  rootEl.innerHTML = ''
-  // Simple mount — React will hydrate in next step
-  const placeholder = document.createElement('div')
-  placeholder.textContent = 'Cargando terminal...'
-  rootEl.appendChild(placeholder)
+  const root = createRoot(rootEl)
+  root.render(<App />)
 }

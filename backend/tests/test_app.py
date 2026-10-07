@@ -31,6 +31,9 @@ class TestEngineState:
         data = resp.json()
         assert data["state"] == "stopped"
         assert data["environment"] == "paper"
+        assert data["implementation_status"] == "not_implemented"
+        assert data["execution_available"] is False
+        assert data["portfolio_available"] is False
 
 
 class TestFixtureData:
@@ -40,20 +43,21 @@ class TestFixtureData:
         data = resp.json()
         assert "snapshot" in data
         assert "candles" in data
+        assert data["data_source"] == "TEST_ONLY"
+        assert data["interval"] == "1m"
 
 
 class TestEngineAction:
-    def test_engine_action_accepted(self, client: TestClient):
-        # Desde estado STOPPED (placeholder), solo "resume" es legal
-        resp = client.post("/engine/action", json={"action": "resume"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "accepted"
-
-    def test_engine_action_rejected_invalid_state(self, client: TestClient):
-        # Desde estado STOPPED (placeholder), "pause" no es legal
-        resp = client.post("/engine/action", json={"action": "pause"})
-        assert resp.status_code == 409
+    @pytest.mark.parametrize("action", ["pause", "resume", "stop"])
+    def test_engine_action_not_implemented(self, client: TestClient, action: str):
+        before = client.get("/engine/state").json()
+        resp = client.post("/engine/action", json={"action": action})
+        assert resp.status_code == 501
+        detail = resp.json()["detail"]
+        assert detail["code"] == "ENGINE_NOT_IMPLEMENTED"
+        assert detail["action"] == action
+        assert detail["executed"] is False
+        assert client.get("/engine/state").json() == before
 
     def test_engine_action_rejected_unknown(self, client: TestClient):
         # Acción no en el enum debe ser rechazada por Pydantic (422)

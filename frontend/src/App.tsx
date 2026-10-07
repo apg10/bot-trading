@@ -1,29 +1,32 @@
-// App principal — Terminal con gráfico de velas real + datos en tiempo real.
+// Terminal de desarrollo: procedencia explícita y ejecución/cartera no implementadas.
 
-import { useState, useEffect } from 'react'
-import type { EngineInfo, Position, Order } from './types'
+import type { MarketDataSource, MarketStatus } from './types/market'
 import { useMarketData } from './hooks/useMarketData'
 import { ChartPanel } from './components/ChartPanel'
-import { BottomBar } from './components/BottomBar'
 import { AnalysisPanel } from './components/AnalysisPanel'
 
 // ── Componente: Barra superior ───────────────────────────────────────────────
 
-function HeaderBar({ engineState }: { engineState: EngineInfo }) {
-  const envClass = engineState.environment === 'paper' ? 'paper' : 'demo'
-  const dotClass = engineState.market_status === 'connected' ? 'connected'
-    : engineState.market_status === 'disconnected' ? 'disconnected'
-    : 'reconnecting'
+function HeaderBar({ status, dataSource, wsConnected }: {
+  status: MarketStatus | null
+  dataSource: MarketDataSource
+  wsConnected: boolean
+}) {
+  const marketConnected = dataSource === 'market_engine' && wsConnected
+  const dotClass = marketConnected ? 'connected' : status?.reconnecting ? 'reconnecting' : ''
+  const marketLabel = dataSource === 'TEST_ONLY' ? 'TEST_ONLY: datos sintéticos'
+    : marketConnected ? 'Motor de mercado conectado; frescura no validada'
+    : 'Conexión de mercado no verificada'
 
   return (
     <header className="header-bar">
-      <span className={`env-badge ${envClass}`}>{engineState.environment}</span>
-      <div className={`status-dot ${dotClass}`} title={engineState.market_status} />
+      <span className="env-badge paper">Sin ejecución</span>
+      <div className={`status-dot ${dotClass}`} title={marketLabel} />
       <span style={{ fontSize: '13px', color: 'var(--color-text-muted)' }}>
-        {engineState.state.toUpperCase()}
+        Bot: no implementado
       </span>
       <span style={{ marginLeft: 'auto', fontSize: '11px', color: 'var(--color-text-muted)' }}>
-        v{engineState.version} · Uptime: {Math.round(engineState.uptime_seconds)}s
+        v0.1.0 · Terminal de desarrollo
       </span>
     </header>
   )
@@ -32,35 +35,16 @@ function HeaderBar({ engineState }: { engineState: EngineInfo }) {
 // ── Componente: Watchlist ────────────────────────────────────────────────────
 
 function WatchlistPanel() {
-  const [assets, setAssets] = useState([
-    { symbol: 'BTC/USDT', price: '—', change: '—', positive: true },
-    { symbol: 'ETH/USDT', price: '—', change: '—', positive: false },
-  ])
-
-  // Simular precios de watchlist (en fase posterior se conecta a Binance)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setAssets(prev => prev.map(a => ({
-        ...a,
-        price: (parseFloat(a.price.replace(',', '')) + (Math.random() - 0.5) * 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','),
-        change: `${(Math.random() * 4 - 2).toFixed(2)}%`,
-        positive: Math.random() > 0.5,
-      })))
-    }, 3000)
-
-    return () => clearInterval(interval)
-  }, [])
+  const symbols = ['BTC/USDT', 'ETH/USDT']
 
   return (
     <aside className="watchlist-panel">
       <div className="panel-section">
         <h3>Watchlist</h3>
-        {assets.map(a => (
-          <div key={a.symbol} className="asset-item">
-            <span>{a.symbol}</span>
-            <span className={a.positive ? 'text-green' : 'text-red'}>
-              {a.change}
-            </span>
+        {symbols.map(symbol => (
+          <div key={symbol} className="asset-item">
+            <span>{symbol}</span>
+            <span style={{ color: 'var(--color-text-muted)' }}>Sin datos</span>
           </div>
         ))}
       </div>
@@ -71,67 +55,44 @@ function WatchlistPanel() {
 // ── App principal ────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [engineState, setEngineState] = useState<EngineInfo>({
-    state: 'stopped',
-    environment: 'paper',
-    market_status: 'disconnected',
-    uptime_seconds: 0,
-    version: '0.1.0',
-  })
-
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  // Posiciones y órdenes (simuladas — en fases posteriores se conectan al backend)
-  const [positions] = useState<Position[]>([])
-  const [orders] = useState<Order[]>([])
-  const [activityLog] = useState<Array<{ id: string; timestamp_ms: number; type: "order_created" | "order_filled" | "order_cancelled" | "position_opened" | "position_closed" | "analysis"; symbol: string; description: string }>>([])
-
   // Hook de datos de mercado (HTTP histórico + WebSocket streaming)
-  const { candles, status, wsConnected, loading: marketLoading } = useMarketData('BTC/USDT')
-
-  useEffect(() => {
-    setLoading(false)
-  }, [])
-
-  // Combinar loading states
-  const isLoading = loading || marketLoading
+  const { candles, status, wsConnected, loading: marketLoading, error, dataSource, interval } = useMarketData('BTC/USDT')
 
   return (
     <div className="app-layout">
-      <HeaderBar engineState={engineState} />
+      <HeaderBar status={status} dataSource={dataSource} wsConnected={wsConnected} />
 
-      {isLoading ? (
-        <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <span>Cargando terminal...</span>
+      {error && (
+        <div role="alert" style={{ padding: '8px 16px', color: 'var(--color-red)' }}>
+          Error de datos de mercado: {error}
         </div>
-      ) : error ? (
-        <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: 'var(--color-red)' }}>
-          Error: {error}
-        </div>
-      ) : (
-        <>
-          <div className="main-body">
-            <WatchlistPanel />
-            <ChartPanel
-              candles={candles}
-              symbol="BTC/USDT"
-              loading={marketLoading}
-              wsConnected={wsConnected}
-            />
-            <AnalysisPanel
-              candles={candles}
-              symbol="BTC/USDT"
-              loading={marketLoading}
-            />
-          </div>
-          <BottomBar
-            positions={positions}
-            orders={orders}
-            activityLog={activityLog}
-          />
-        </>
       )}
+      <div className="main-body">
+        <WatchlistPanel />
+        <ChartPanel
+          candles={candles}
+          symbol="BTC/USDT"
+          loading={marketLoading}
+          wsConnected={wsConnected}
+          dataSource={dataSource}
+          interval={interval}
+        />
+        <AnalysisPanel
+          candles={candles}
+          symbol="BTC/USDT"
+          loading={marketLoading}
+          dataSource={dataSource}
+          interval={interval}
+        />
+      </div>
+      <footer className="bottom-bar" style={{ flexWrap: 'wrap' }}>
+        <span>Posiciones: no consultadas</span>
+        <span>Órdenes: no consultadas</span>
+        <span>P&amp;L: no disponible</span>
+        <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)' }}>
+          Cartera y simulador PAPER: no implementados
+        </span>
+      </footer>
     </div>
   )
 }

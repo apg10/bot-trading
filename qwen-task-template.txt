@@ -1,0 +1,256 @@
+PLANTILLA DE TASK PARA QWEN — BOT_TRADING
+=======================================
+
+INSTRUCCIONES PARA QUIEN PREPARA EL TASK
+--------------------------------------
+- Copiar desde TASK hasta el final y completar todos los campos <...>.
+- Esta plantilla no autoriza ejecutar trabajo por sí misma.
+- Un envío = un microtask. El plan técnico no autoriza una fase completa.
+- Obtener rama, SHA completo y estado de Git del repo real antes del envío.
+- No inventar revisiones, aprobaciones, rutas, comandos ni resultados.
+- Elegir UNA política de estado inicial: CLEAN o BASELINE_AUTORIZADA.
+  CLEAN es la opción predeterminada. El repo puede tener cambios pendientes:
+  no enviar una condición de árbol limpio sabiendo que no se cumple.
+- BASELINE_AUTORIZADA requiere aprobación explícita y evidencia completa del
+  estado inicial: status, diffs tracked/staged y contenido de archivos nuevos.
+  Una lista de nombres o un SHA de HEAD no identifica cambios sin confirmar.
+- Ningún archivo con cambios previos puede editarse sin propiedad y alcance
+  autorizados explícitamente. No pedir a Qwen que limpie o esconda esos cambios.
+- Si no se puede fijar una base inequívoca, no emitir un task de implementación.
+- Autorizar por separado código, tests y cualquier informe escrito al repo.
+- En CLOUD REVIEW indicar NO REALIZADA cuando no exista revisión real.
+- Sustituir los campos no aplicables por NO APLICA con explicación, sin dejar
+  decisiones de alcance a criterio de Qwen. Eliminar alternativas no elegidas.
+- No enviar placeholders pendientes ni comandos genéricos como validación.
+
+
+TASK: <TRADING-AREA-OBJETIVO-001>
+
+WORKSPACE
+=========
+/home/adrian10/bot_trading
+
+
+BRANCH
+======
+<RAMA_AUTORIZADA> only
+
+
+PRECONDITIONS
+=============
+Desde la raíz del repositorio, comprobar antes de editar:
+- git branch --show-current debe devolver: <RAMA_AUTORIZADA>
+- git rev-parse HEAD debe devolver: <SHA_COMPLETO_DE_40_CARACTERES>
+- git status --short --untracked-files=all debe cumplir la política indicada.
+
+Política de estado inicial: <CLEAN_O_BASELINE_AUTORIZADA>
+Resultado exacto esperado de status:
+<SALIDA_COMPLETA_ESPERADA_O_VACIA_PARA_CLEAN>
+
+Solo para BASELINE_AUTORIZADA:
+- Autorización y referencia de la evidencia inicial: <REFERENCIA_REAL>
+- Diff inicial unstaged: <DIFF_COMPLETO_O_REFERENCIA_INEQUIVOCA>
+- Diff inicial staged: <DIFF_COMPLETO_O_VACIO>
+- Archivos untracked y contenido inicial: <EVIDENCIA_COMPLETA>
+- Cambios previos que este task puede tocar: <LISTA_Y_LIMITES_O_NINGUNO>
+- Todo cambio previo no autorizado debe permanecer intacto.
+- Comprobar coincidencia de contenido, no únicamente nombres del status.
+
+Si falla una precondición: STOP / BLOCKED.
+No crear ni cambiar ramas, worktrees, clones o repositorios.
+No corregir precondiciones mediante reset, clean, stash, commit u otros cambios.
+Si aparece actividad concurrente que impide identificar la base o la propiedad
+de los cambios: STOP / BLOCKED.
+
+
+CONTEXT
+========
+Estado real actual:
+<QUE_EXISTE_Y_COMO_FUNCIONA_HOY_CON_REFERENCIAS>
+
+Problema concreto:
+<DEFECTO_O_NECESIDAD_DE_ESTE_MICROTASK>
+
+Relación con el plan:
+<FASE_Y_APARTADO_RELEVANTE_SIN_AUTORIZAR_LA_FASE_COMPLETA>
+
+Este task NO implementa:
+<FUNCIONALIDADES_FUTURAS_QUE_PODRIAN_CONFUNDIRSE_CON_EL_OBJETIVO>
+
+
+CLOUD REVIEW
+============
+Estado: <NO_REALIZADA_O_VEREDICTO_REAL>
+Informe: <RUTA_O_REFERENCIA_REAL_O_NO_APLICA>
+Base revisada: <SHA_COMPLETO_O_NO_APLICA>
+Restricciones de la revisión: <RESTRICCIONES_EXACTAS_O_NO_APLICA>
+Cambios entre la base revisada y la base requerida:
+<DESCRIPCION_VERIFICADA_O_NO_APLICA>
+
+No afirmar APPROVED ni APPROVED_WITH_CONSTRAINTS sin evidencia real.
+Si una revisión es precondición obligatoria y falta: STOP / BLOCKED.
+
+
+REQUIRED CONTEXT
+================
+Antes de editar, leer las instrucciones AGENTS.md aplicables y respetar el
+orden de contexto del repo si existe. No inventar archivos de instrucciones.
+
+También leer:
+- trading-bot-development-plan.md: <APARTADOS_RELEVANTES>
+- trading-console-visual-brief.md: <APARTADOS_RELEVANTES_O_NO_APLICA>
+- <ARCHIVOS_ACTUALES_IMPLICADOS>
+- <TESTS_EXISTENTES_RELEVANTES>
+- <DOCUMENTACION_OFICIAL_Y_VERSION_EXACTA_SI_ES_NECESARIA>
+
+No leer .env, credenciales o secretos para completar el contexto.
+Si falta una especificación necesaria o hay contratos contradictorios que
+requieren una decisión: STOP / BLOCKED, no resolverlos silenciosamente.
+
+
+AUTHORIZED IMPLEMENTATION FILES ONLY
+===================================
+- <RUTA_RELATIVA_ARCHIVO_EXISTENTE_1>
+- <RUTA_RELATIVA_ARCHIVO_EXISTENTE_2>
+- <RUTA_RELATIVA_ARCHIVO_NUEVO> (NEW)
+- <RUTA_TEST_AUTORIZADO_Y_TIPO_DE_CAMBIO_SI_APLICA>
+- <RUTA_INFORME_AUTORIZADO_SI_SE_REQUIERE_ESCRIBIRLO>
+
+La lista es exhaustiva. No modificar, crear, eliminar ni renombrar archivos
+fuera de ella. No crear documentación o reports por iniciativa propia.
+Si hace falta otro archivo: STOP / BLOCKED y pedir ampliación del alcance.
+
+
+GOAL
+====
+<UN_RESULTADO_CONCRETO_OBSERVABLE_Y_VERIFICABLE>
+
+
+IMPLEMENTATION CONTRACT
+=======================
+1. Cambio permitido por archivo
+   - <ARCHIVO>: <CAMBIO_EXACTO>
+   - <ARCHIVO>: <CAMBIO_EXACTO>
+
+2. Contrato de datos/comportamiento
+   - Entrada: <CAMPOS_TIPOS_Y_VALIDACIONES_O_NO_APLICA>
+   - Salida: <CAMPOS_TIPOS_Y_ESTADOS_O_NO_APLICA>
+   - Errores/cancelación: <SEMANTICA_EXACTA_O_NO_APLICA>
+   - Compatibilidad: <CONTRATOS_QUE_NO_DEBEN_CAMBIAR>
+
+3. Preservar exactamente
+   - <COMPORTAMIENTO_ESTADO_LIFECYCLE_API_O_ESTILO_A_PRESERVAR>
+   - <IDENTIDAD_PROCEDENCIA_INTERVALO_Y_SEMANTICA_TEMPORAL_SI_APLICA>
+   - <CAMBIOS_PREEXISTENTES_AUTORIZADOS_A_CONSERVAR>
+
+4. Criterios de aceptación
+   - <CRITERIO_MEDIBLE_1>
+   - <CRITERIO_MEDIBLE_2>
+   - <PRUEBA_QUE_DEMUESTRA_LA_CORRECCION>
+
+5. Esto es un cambio acotado, no limpieza general
+   - No refactorizar ni simplificar código ajeno al objetivo.
+   - No eliminar imports/variables ni reformatear archivos oportunísticamente.
+   - No añadir hooks, helpers, wrappers, abstracciones o dependencias fuera
+     del contrato explícito.
+   - Si el contrato no basta para cumplir la aceptación: STOP / BLOCKED.
+
+
+HARD EXCLUSIONS
+===============
+No modificar:
+- <ARCHIVOS_Y_SUBSISTEMAS_EXCLUIDOS_EXPLICITAMENTE>
+- Dependencias, lockfiles y configuración, salvo permiso en la allowlist.
+- Plan, brief, plantilla, docs, reports o cola, salvo autorización explícita.
+
+No implementar:
+- <FUNCIONES_CERCANAS_PERO_FUERA_DEL_TASK>
+- LIVE, dinero real, depósitos, retiros, margin, derivados o apertura de cortos.
+- Fórmulas desconocidas de FYL/MACD BB/T1/V1/V2 por suposición.
+- Métricas, precios, fills, progreso o estados ficticios para aparentar capacidad.
+- Ejecución de propuestas si el backend no la soporta y confirma.
+- Promoción automática o cambios de estrategia/modelo/prompt evaluados sin
+  una tarea y versión explícitas.
+
+No reemplazar React, FastAPI, Lightweight Charts ni importar una reescritura
+de Stitch. Una tarea visual debe adaptar la base existente.
+
+No instalar dependencias, iniciar servicios, usar Stitch ni conectar con
+Binance/Ollama u otros servicios externos, salvo autorización específica
+incluida en este task. Las pruebas serán offline con fixtures etiquetadas/mocks.
+
+
+VALIDATION
+==========
+Ejecutar únicamente los checks especificados, desde sus directorios exactos.
+Usar dependencias existentes; no instalar nada para hacer pasar un check.
+
+Desde <DIRECTORIO_RELATIVO_DE_TESTS_FOCALIZADOS>:
+<COMANDO_EXACTO_TEST_FOCALIZADO>
+
+Desde <DIRECTORIO_RELATIVO_DE_SUITE>:
+<COMANDO_EXACTO_SUITE_RELEVANTE_O_NO_APLICA_JUSTIFICADO>
+
+Desde <DIRECTORIO_RELATIVO_DE_TYPECHECK>:
+<COMANDO_EXACTO_TYPECHECK_O_NO_APLICA_JUSTIFICADO>
+
+Desde la raíz del repo:
+git diff --check
+git diff --cached --check
+git status --short --untracked-files=all
+
+Revisar el diff completo y el contenido completo de cada archivo nuevo.
+Un git diff normal no incluye archivos untracked: incluirlos en la entrega.
+En BASELINE_AUTORIZADA, separar el delta del task de los cambios iniciales;
+no atribuirse trabajo previo ni omitir cambios fuera de alcance.
+
+Política de tests existentes:
+<SIN_MODIFICACIONES_O_CAMBIOS_EXACTOS_AUTORIZADOS_EN_ALLOWLIST>
+
+Los tests exigidos deben pasar sin debilitar assertions ni introducir skips
+para ocultar fallos. Si falla un check requerido, detenerse y reportar el
+fallo; no iniciar otro task ni ampliar el alcance para ocultarlo.
+Si falta una herramienta o prueba requerida: STOP / BLOCKED.
+
+Verificación visual/navegador requerida:
+<PROCEDIMIENTO_DISPOSITIVOS_Y_EVIDENCIA_O_NO_APLICA_JUSTIFICADO>
+
+No afirmar QA visual, rendimiento o integración real si no se realizaron.
+No tratar un typecheck o un test mock como prueba de operación financiera.
+
+
+GIT SAFETY
+==========
+No commit, amend, push ni PR. No cambiar configuración de Git.
+
+No usar:
+- git add .
+- git add -A
+- git reset
+- git clean
+- git stash
+- git rebase
+- force push
+
+No hacer staging, revertir cambios ajenos ni alterar el índice existente.
+No borrar archivos o historial para satisfacer las precondiciones.
+
+
+HANDOFF
+========
+Entregar en la respuesta, sin escribir archivos no autorizados:
+1. Estado final: COMPLETED o BLOCKED, con motivo concreto.
+2. Rama, SHA completo de base y política de estado inicial.
+3. Unified diff completo del task, incluidos archivos nuevos.
+4. Lista de archivos cambiados por el task, separada de cambios preexistentes.
+5. Resultado del test focalizado: comando, exit code y resumen.
+6. Resultado de suite relevante: comando, exit code y resumen.
+7. Resultado de typecheck: comando, exit code y resumen.
+8. Resultado de diff-check y salida completa de git status.
+9. Verificación de cada criterio de aceptación y límites no comprobados.
+10. Confirmación de no commit/push/staging y conservación de cambios previos.
+11. Confirmación de que no se inició otro task ni conexiones no autorizadas.
+
+Para checks no ejecutados, indicar NO EJECUTADO y el motivo; no afirmar éxito.
+Si BLOCKED, reportar qué falló, qué cambios quedaron y la decisión requerida.
+Al terminar la validación y entrega, detenerse. No comenzar el siguiente task.

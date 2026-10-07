@@ -1,11 +1,12 @@
 # API endpoints para análisis técnico (indicadores FYL, Keltner, MACD).
 """
 IMPORTANTE: Este endpoint NO genera datos de mercado. Recibe velas como input
-desde el cliente. Si no se proporcionan velas, usa fixture sintética determinista
-marcada TEST_ONLY (sección 3 del plan).
+desde el cliente. Si no se proporcionan al menos 50 velas, se rechaza con 422.
 
 NUNCA usar para decisiones operacionales sin verificar procedencia de datos.
 """
+
+import math
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -34,7 +35,7 @@ class AnalysisRequest(BaseModel):
     timeframe: str = Field("15m", description="Temporalidad de las velas")
     candles_count: int = Field(200, ge=50, le=500, description="Cantidad de velas a usar")
     # Velas proporcionadas por el cliente (reales o simuladas).
-    # Si se omiten, se usa fixture sintética TEST_ONLY.
+    # Se requieren al menos 50 velas; de lo contrario se rechaza con 422.
     candles: Optional[List[CandleInput]] = None
 
 
@@ -59,7 +60,7 @@ class AnalysisResponse(BaseModel):
     """Respuesta completa de análisis técnico."""
     symbol: str
     timeframe: str
-    data_source: str  # "provided" | "synthetic_test"
+    data_source: str  # "provided"
     keltner: KeltnerResponse
     macd: MACDResponse
     fyl: FYLResponse
@@ -110,39 +111,31 @@ def _zone_to_dict(z: ConsolidationZone) -> dict:
 def _resolve_candles(request: AnalysisRequest) -> tuple[List[dict], str]:
     """Resuelve las velas a usar para análisis.
 
-    Returns:
-        Tupla (candles_dict, source_label) donde source_label es
-        'provided' si el cliente envió velas, o 'synthetic_test' si se usó fixture.
-    """
-    if request.candles is not None and len(request.candles) >= 50:
-        candles = [
-            {
-                "open_time": c.open_time,
-                "open": c.open,
-                "high": c.high,
-                "low": c.low,
-                "close": c.close,
-                "volume": c.volume,
-            }
-            for c in request.candles[:request.candles_count]
-        ]
-        return candles, "provided"
+    Raises:
+        HTTPException 422 si se reciben menos de 50 velas.
 
-    # Fallback: fixture sintética determinista (TEST_ONLY)
-    from src.fixtures.synthetic import generate_candles
-    synthetic = generate_candles(request.candles_count)
+    Returns:
+        Tupla (candles_dict, source_label) donde source_label es 'provided'.
+    """
+    if request.candles is None or len(request.candles) < 50:
+        received = 0 if request.candles is None else len(request.candles)
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INSUFFICIENT_CANDLES", "received": received, "required": 50},
+        )
+
     candles = [
         {
-            "open_time": c.timestamp_ms,
+            "open_time": c.open_time,
             "open": c.open,
             "high": c.high,
             "low": c.low,
             "close": c.close,
             "volume": c.volume,
         }
-        for c in synthetic
+        for c in request.candles[:request.candles_count]
     ]
-    return candles, "synthetic_test"
+    return candles, "provided"
 
 
 @router.post("", response_model=AnalysisResponse)
@@ -154,14 +147,42 @@ async def analyze(request: AnalysisRequest):
 
     Returns:
         Análisis completo con Keltner, MACD y FYL.
-        data_source indica si se usaron velas proporcionadas o fixture sintética TEST_ONLY.
+        data_source indica que se usaron velas proporcionadas por el cliente.
     """
-    # Validar que high >= low en todas las velas
+    # Validar que todos los valores OHLCV son finitos
+    for i, candle in enumerate(request.candles or []):
+        for field_name in ("open", "high", "low", "close", "volume"):
+            if not math.isfinite(getattr(candle, field_name)):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "NON_FINITE_CANDLE_VALUE", "index": i, "field": field_name},
+                )
+
+    # Validar que high >= low en todas las velas y open/close dentro de [low,high]
     for i, candle in enumerate(request.candles or []):
         if candle.high < candle.low:
             raise HTTPException(
                 status_code=422,
                 detail=f"Candle {i}: high ({candle.high}) debe ser >= low ({candle.low})",
+            )
+        # open y close deben estar dentro del intervalo inclusivo [low,high]
+        if not (candle.low <= candle.open <= candle.high):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "CANDLE_PRICE_OUT_OF_RANGE", "index": i, "field": "open"},
+            )
+        if not (candle.low <= candle.close <= candle.high):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "CANDLE_PRICE_OUT_OF_RANGE", "index": i, "field": "close"},
+            )
+
+    # Validar open_time estrictamente creciente en el orden proporcionado
+    for i in range(1, len(request.candles or [])):
+        if request.candles[i].open_time <= request.candles[i - 1].open_time:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "NON_INCREASING_CANDLE_TIME", "index": i},
             )
 
     candles, data_source = _resolve_candles(request)

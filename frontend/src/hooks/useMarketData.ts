@@ -1,11 +1,11 @@
 // Hook para datos de mercado: carga histórico por HTTP y recibe streaming por WebSocket.
+// HTTP y WS resuelven su origen mediante el cliente común de mercado.
 
-import { useEffect, useRef, useState, useCallback } from "react"
-import type { CandleData, MarketStatus } from "../types/market"
-import type { MarketWSMessage, CandleUpdate, GapEvent, StatusEvent } from "../api/market"
-import { MarketWebSocket } from "../api/market"
-
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000"
+import { useEffect, useRef, useState } from "react"
+import type { CandleData, MarketCandleEvent, MarketDataSource, MarketStatus } from "../types/market"
+import type { MarketWSMessage } from "../api/market"
+import { getCandles, MarketWebSocket } from "../api/market"
+import { MAX_CANDLES, mergeHistoricalCandles, upsertCandle } from "../market/candle_store"
 
 interface UseMarketDataResult {
   candles: CandleData[]
@@ -13,6 +13,9 @@ interface UseMarketDataResult {
   wsConnected: boolean
   loading: boolean
   error: string | null
+  dataSource: MarketDataSource
+  interval: string | null
+  degraded: boolean
 }
 
 export function useMarketData(
@@ -21,11 +24,32 @@ export function useMarketData(
   const [candles, setCandles] = useState<CandleData[]>([])
   const [status, setStatus] = useState<MarketStatus | null>(null)
   const [wsConnected, setWsConnected] = useState(false)
+  const [socketOpen, setSocketOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [dataSource, setDataSource] = useState<MarketDataSource>("unknown")
+  const [candleInterval, setCandleInterval] = useState<string | null>(null)
+  const [degraded, setDegraded] = useState(false)
 
   const wsRef = useRef<MarketWebSocket | null>(null)
   const candleHistoryRef = useRef<CandleData[]>([])
+  const originRef = useRef<{ dataSource: MarketDataSource; interval: string | null }>({
+    dataSource: "unknown", interval: null,
+  })
+
+  // Escribir la referencia antes de publicar, nunca dentro de un updater React.
+  function publishCandles(next: CandleData[]): void {
+    candleHistoryRef.current = next
+    setCandles(next)
+  }
+
+  function markDegraded(message: string): void {
+    // Latch por símbolo: ni transporte abierto, status ni barras prueban backfill.
+    // La recuperación verificada corresponde a una tarea posterior.
+    setDegraded(true)
+    setError(message)
+    setWsConnected(false)
+  }
 
   // Cargar histórico por HTTP
   useEffect(() => {
@@ -35,22 +59,39 @@ export function useMarketData(
       try {
         setLoading(true)
         setError(null)
+        publishCandles([])
+        originRef.current = { dataSource: "unknown", interval: null }
+        setDataSource("unknown")
+        setCandleInterval(null)
+        setStatus(null)
+        setWsConnected(false)
+        setDegraded(false)
 
-        const resp = await fetch(
-          `${API_BASE}/api/market/candles?symbol=${encodeURIComponent(symbol)}&limit=200`,
-        )
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-
-        const data: CandleData[] = await resp.json()
+        const data = await getCandles(symbol, MAX_CANDLES)
 
         if (!cancelled) {
-          candleHistoryRef.current = data
-          setCandles(data)
+          // Una fixture tardía nunca reemplaza datos ya recibidos del motor.
+          if (!(data.data_source === "TEST_ONLY" && originRef.current.dataSource === "market_engine")) {
+            const origin = originRef.current
+            if (
+              origin.dataSource === "market_engine" && data.data_source === "market_engine"
+              && origin.interval !== data.interval
+            ) {
+              markDegraded("Histórico de otro intervalo; recuperación de datos pendiente")
+            } else {
+              const sameOrigin = origin.dataSource === data.data_source && origin.interval === data.interval
+              const next = mergeHistoricalCandles(sameOrigin ? candleHistoryRef.current : [], data.candles)
+              originRef.current = { dataSource: data.data_source, interval: data.interval }
+              publishCandles(next)
+              setDataSource(data.data_source)
+              setCandleInterval(data.interval)
+            }
+          }
           setLoading(false)
         }
       } catch (e: unknown) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : "Unknown error")
+          markDegraded(e instanceof Error ? e.message : "Histórico inválido o no disponible")
           setLoading(false)
         }
       }
@@ -65,71 +106,106 @@ export function useMarketData(
 
   // Conectar WebSocket para streaming en vivo
   useEffect(() => {
+    let cancelled = false
     const ws = new MarketWebSocket()
     wsRef.current = ws
 
+    // Informar al hook cuando el socket se abre realmente (no solo conecta).
+    ws.onOpen(() => {
+      if (cancelled) return
+      setSocketOpen(true)
+      // Abrir el enlace con el backend no acredita la conexión de Binance.
+      // Esperar un estado nuevo, no reutilizar el recibido antes del corte.
+      setStatus(null)
+      setWsConnected(false)
+    })
+
+    ws.onClose(() => {
+      if (cancelled) return
+      setSocketOpen(false)
+      setStatus(null)
+      setWsConnected(false)
+    })
+
     ws.onMessage((msg: MarketWSMessage) => {
+      if (cancelled) return
       if (msg.type === "subscribed") return
       if (msg.type === "pong") return
 
       // Actualizar status
       if (msg.type === "status") {
-        const s = msg as unknown as StatusEvent
+        const s = msg as unknown as MarketStatus
+        if (s.symbol !== symbol) return
+        if (s.data_source !== "market_engine" && s.data_source !== "unavailable") {
+          setWsConnected(false)
+          return
+        }
         setStatus(s)
-        setWsConnected(s.connected)
+        setWsConnected(ws.isOpen && s.data_source === "market_engine" && s.connected === true)
         return
       }
 
       // Actualizar candle actual o agregar nueva barra
       if (msg.type === "bar_updated" || msg.type === "bar_closed") {
-        const update = msg as unknown as CandleUpdate
-        const candle = update.candle
-
-        setCandles(prev => {
-          const hist = candleHistoryRef.current
-          const lastCandle = hist[hist.length - 1]
-
-          // Si es bar_closed y no coincide con la última vela del histórico, agregar nueva
-          if (msg.type === "bar_closed" && (!lastCandle || lastCandle.open_time !== candle.open_time)) {
-            const newHistory = [...hist, candle]
-            candleHistoryRef.current = newHistory
-            return newHistory.slice(-200) // Mantener últimas 200 velas
+        const update = msg as unknown as MarketCandleEvent
+        if (
+          update.symbol !== symbol || update.data_source !== "market_engine"
+          || typeof update.interval !== "string" || !update.interval
+        ) return
+        if (
+          originRef.current.dataSource === "market_engine"
+          && originRef.current.interval !== update.interval
+        ) {
+          markDegraded("Evento de otro intervalo; recuperación de datos pendiente")
+          return
+        }
+        const sameOrigin = originRef.current.dataSource === update.data_source
+          && originRef.current.interval === update.interval
+        let next: CandleData[]
+        try {
+          if (typeof update.candle?.is_closed !== "boolean"
+            || update.candle.is_closed !== (msg.type === "bar_closed")) {
+            throw new Error("Evento de vela con confirmación de cierre incoherente")
           }
-
-          // Si es bar_updated o bar_closed con misma open_time, actualizar la última vela
-          if (lastCandle && lastCandle.open_time === candle.open_time) {
-            const updated = [...hist]
-            updated[updated.length - 1] = candle
-            return updated
-          }
-
-          // Si no hay coincidencia, agregar como nueva vela en formación
-          const newHistory = [...hist, candle]
-          candleHistoryRef.current = newHistory
-          return newHistory.slice(-200)
-        })
+          next = upsertCandle(sameOrigin ? candleHistoryRef.current : [], update.candle)
+        } catch (e: unknown) {
+          markDegraded(e instanceof Error ? e.message : "Vela inválida recibida")
+          return
+        }
+        if (!sameOrigin) {
+          // No mezclar la fixture o una temporalidad distinta con el stream.
+          originRef.current = { dataSource: update.data_source, interval: update.interval }
+          setDataSource(update.data_source)
+          setCandleInterval(update.interval)
+        }
+        publishCandles(next)
+        return
       }
 
       // Notificar gaps
       if (msg.type === "gap") {
-        const gap = msg as unknown as GapEvent
-        console.log(`[Market] Gap detected: ${gap.gap_ms}ms`)
+        if (
+          msg.symbol !== symbol || msg.data_source !== "market_engine"
+          || typeof msg.interval !== "string" || !msg.interval
+          || typeof msg.gap_ms !== "number" || !Number.isFinite(msg.gap_ms) || msg.gap_ms <= 0
+        ) return
+        if (originRef.current.dataSource === "market_engine" && originRef.current.interval !== msg.interval) return
+        markDegraded("Hueco detectado en el mercado; recuperación de datos pendiente")
       }
     })
 
+    // El cliente conserva y restaura estas suscripciones una vez por sesión.
+    for (const channel of ["candles", "updates", "status", "gaps"]) {
+      ws.subscribe(channel)
+    }
     ws.connect()
-    setWsConnected(true)
-
-    // Suscribirse a canales
-    setTimeout(() => {
-      ws.subscribe("candles")
-      ws.subscribe("status")
-      ws.subscribe("gaps")
-    }, 500)
 
     return () => {
+      cancelled = true
       ws.disconnect()
       wsRef.current = null
+      setSocketOpen(false)
+      setStatus(null)
       setWsConnected(false)
     }
   }, [symbol])
@@ -142,5 +218,9 @@ export function useMarketData(
     return () => clearInterval(interval)
   }, [])
 
-  return { candles, status, wsConnected, loading, error }
+  return {
+    candles, status,
+    wsConnected: dataSource === "market_engine" && socketOpen && wsConnected && !degraded,
+    loading, error, dataSource, interval: candleInterval, degraded,
+  }
 }
