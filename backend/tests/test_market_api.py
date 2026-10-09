@@ -302,6 +302,86 @@ class TestMarketWebSocket:
             assert websocket.receive_json() == {"type": "pong"}
 
 
+# ── Validación de sintaxis de símbolo (REF-BASE master/4383372) ─────────────
+
+_INVALID_SYMBOLS = [
+    # Componentes vacíos / separadores extra
+    "BTC//USDT",
+    "BTC/",
+    "/USDT",
+    "BTC/USDT/ETH",
+    # Puntuación en componentes
+    "BTC.USDT",
+    "BTC-USDT",
+    "BTC@USDT",
+    # Caracteres no ASCII
+    "BTC/US\u00c1DT",
+    "\u0411\u0422\u0426/USDT",
+]
+
+
+@pytest.mark.parametrize("invalid_symbol", _INVALID_SYMBOLS)
+def test_status_rejects_invalid_symbols_422(invalid_symbol: str):
+    """Ambos endpoints deben rechazar símbolos con sintaxis inválida con 422."""
+    with _isolated_market_client() as tc:
+        resp = tc.get(f"/api/market/status?symbol={invalid_symbol}")
+        assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("invalid_symbol", _INVALID_SYMBOLS)
+def test_candles_rejects_invalid_symbols_422(invalid_symbol: str):
+    """candles nunca devuelve envelope TEST_ONLY para entrada inválida."""
+    with _isolated_market_client() as tc:
+        resp = tc.get(f"/api/market/candles?symbol={invalid_symbol}")
+        assert resp.status_code == 422
+
+
+# ── Corrección close_time inclusivo (REF-BASE master/4383372) ─────────────
+
+class TestFixtureCloseTimeInclusive:
+    """Verificar que las velas del fallback TEST_ONLY usan close_time inclusivo."""
+
+    def test_fallback_without_engine_close_time_inclusive(self, client: TestClient):
+        """Sin motor: cada vela debe tener close_time = open_time + 59_999."""
+        data = client.get("/api/market/candles").json()
+        assert data["data_source"] == "TEST_ONLY"
+        assert data["interval"] == "1m"
+        for candle in data["candles"]:
+            assert candle["is_closed"] is True
+            assert candle["close_time"] == candle["open_time"] + 59_999
+
+    def test_fallback_without_engine_all_fields(self, client: TestClient):
+        """Sin motor: verificar is_closed=True y procedencia TEST_ONLY."""
+        data = client.get("/api/market/candles").json()
+        assert data["data_source"] == "TEST_ONLY"
+        assert data["interval"] == "1m"
+        for candle in data["candles"]:
+            assert candle["is_closed"] is True
+
+    def test_empty_engine_fallback_close_time_inclusive(self, client: TestClient, monkeypatch):
+        """Con motor pero buffer vacío: close_time inclusivo en todas las velas."""
+        engine = FakeMarketEngine()
+        engine.closed_candles = []
+        monkeypatch.setattr(market_api, "_market_engine", engine)
+        data = client.get("/api/market/candles").json()
+        assert data["data_source"] == "TEST_ONLY"
+        assert data["interval"] == "1m"
+        for candle in data["candles"]:
+            assert candle["is_closed"] is True
+            assert candle["close_time"] == candle["open_time"] + 59_999
+
+    def test_empty_engine_fallback_all_fields(self, client: TestClient, monkeypatch):
+        """Con motor vacío: verificar is_closed=True y procedencia TEST_ONLY."""
+        engine = FakeMarketEngine()
+        engine.closed_candles = []
+        monkeypatch.setattr(market_api, "_market_engine", engine)
+        data = client.get("/api/market/candles").json()
+        assert data["data_source"] == "TEST_ONLY"
+        assert data["interval"] == "1m"
+        for candle in data["candles"]:
+            assert candle["is_closed"] is True
+
+
 # ── Regresión de aislamiento ────────────────────────────────────────────────
 
 def test_isolation_no_engine_without_fake(client):

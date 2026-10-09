@@ -89,7 +89,10 @@ async def _stop(engine, task):
     await asyncio.wait_for(task, timeout=1)
 
 
-def _kline(open_time=1_700_000_000_000, volume=10.0, is_closed=False,
+_BASE_MS = (1_700_000_000_000 // 60_000) * 60_000
+
+
+def _kline(open_time=_BASE_MS, volume=10.0, is_closed=False,
            interval_ms=60_000, symbol="BTC/USDT"):
     return {
         "symbol": symbol,

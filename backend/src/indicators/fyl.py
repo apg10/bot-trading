@@ -66,6 +66,8 @@ def _detect_pivots_incremental(
     lows: List[float],
     lookback: int = 5,
     min_strength: float = 0.01,
+    *,
+    open_times: Optional[List[int]] = None,
 ) -> List[PivotPoint]:
     """Detecta pivotes de forma INCREMENTAL (seguro para tiempo real).
 
@@ -75,6 +77,7 @@ def _detect_pivots_incremental(
     Los pivotes detectados son PROVISIONALES y pueden ser refinados en barras posteriores.
     """
     pivots: List[PivotPoint] = []
+    times = open_times if open_times is not None else [i * 60_000 for i in range(len(highs))]
 
     for i in range(lookback, len(highs)):
         # ── Verificar si es un máximo local (solo mirando atrás) ──
@@ -90,7 +93,7 @@ def _detect_pivots_incremental(
             strength = left_range / highs[i] if highs[i] > 0 else 0.0
             if strength >= min_strength:
                 pivots.append(PivotPoint(
-                    time_ms=i * 60_000,
+                    time_ms=times[i],
                     price=highs[i],
                     pivot_type=PivotType.HIGH,
                     strength=round(strength, 4),
@@ -109,7 +112,7 @@ def _detect_pivots_incremental(
             strength = left_range / abs(lows[i]) if lows[i] != 0 else 0.0
             if strength >= min_strength:
                 pivots.append(PivotPoint(
-                    time_ms=i * 60_000,
+                    time_ms=times[i],
                     price=lows[i],
                     pivot_type=PivotType.LOW,
                     strength=round(strength, 4),
@@ -124,6 +127,8 @@ def _detect_pivots_batch(
     lows: List[float],
     lookback: int = 5,
     min_strength: float = 0.01,
+    *,
+    open_times: Optional[List[int]] = None,
 ) -> List[PivotPoint]:
     """Detecta pivotes retrospectivamente (TEST_ONLY — usa datos futuros).
 
@@ -133,6 +138,7 @@ def _detect_pivots_batch(
     WARNING: lookahead bias — no usar para señales en vivo ni replay.
     """
     pivots: List[PivotPoint] = []
+    times = open_times if open_times is not None else [i * 60_000 for i in range(len(highs))]
 
     for i in range(lookback, len(highs) - lookback):
         # Verificar si es un máximo local (ambos lados)
@@ -149,7 +155,7 @@ def _detect_pivots_batch(
             )
             if strength >= min_strength:
                 pivots.append(PivotPoint(
-                    time_ms=i * 60_000,
+                    time_ms=times[i],
                     price=highs[i],
                     pivot_type=PivotType.HIGH,
                     strength=round(strength, 4),
@@ -170,7 +176,7 @@ def _detect_pivots_batch(
             )
             if strength >= min_strength:
                 pivots.append(PivotPoint(
-                    time_ms=i * 60_000,
+                    time_ms=times[i],
                     price=lows[i],
                     pivot_type=PivotType.LOW,
                     strength=round(strength, 4),
@@ -253,9 +259,10 @@ def calculate_fyl(
 
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
+    open_times = [c["open_time"] for c in candles]
 
     # ── Modo incremental (default, seguro para tiempo real) ──
-    pivots = _detect_pivots_incremental(highs, lows, lookback, min_strength)
+    pivots = _detect_pivots_incremental(highs, lows, lookback, min_strength, open_times=open_times)
     zones = _detect_consolidation_zones(pivots, candles)
 
     annotations = []
@@ -293,8 +300,9 @@ def calculate_fyl_batch(
 
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
+    open_times = [c["open_time"] for c in candles]
 
-    pivots = _detect_pivots_batch(highs, lows, lookback, min_strength)
+    pivots = _detect_pivots_batch(highs, lows, lookback, min_strength, open_times=open_times)
     zones = _detect_consolidation_zones(pivots, candles)
 
     annotations = []

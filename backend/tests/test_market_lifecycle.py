@@ -1386,3 +1386,258 @@ def test_cancelled_browser_removes_handlers_and_collects_writer(fake_clients, mo
         assert asyncio.all_tasks() == {asyncio.current_task()}
 
     asyncio.run(scenario())
+
+
+# ============================================================
+# TASK 01 — WS 1m GRID VALIDATION
+# ============================================================
+
+def test_ws_misaligned_1m_candle_is_rejected(fake_clients):
+    engine = _engine(fake_clients)
+    row = {
+        "open_time": BASE_MS + 30_000,
+        "close_time": BASE_MS + 30_000 + MINUTE_MS - 1,
+        "open": 100.0, "high": 102.0, "low": 99.0,
+        "close": 101.0, "volume": 10.0, "is_closed": True,
+    }
+    assert engine._validated_candle(row, streaming=True) is None
+
+
+def test_ws_aligned_1m_candle_behaves_normally(fake_clients):
+    engine = _engine(fake_clients)
+    row = {
+        "open_time": BASE_MS,
+        "close_time": BASE_MS + MINUTE_MS - 1,
+        "open": 100.0, "high": 102.0, "low": 99.0,
+        "close": 101.0, "volume": 10.0, "is_closed": True,
+    }
+    result = engine._validated_candle(row, streaming=True)
+    assert result is not None
+    assert result["open_time"] == BASE_MS
+
+
+def test_non_1m_ws_intervals_are_unaffected_by_grid_check(fake_clients):
+    engine = _engine(fake_clients)
+    engine.config.kline_interval = "5m"
+    open_time = BASE_MS + MINUTE_MS
+    assert open_time % (5 * MINUTE_MS) != 0
+    row = {
+        "open_time": open_time,
+        "close_time": open_time + 5 * MINUTE_MS - 1,
+        "open": 100.0, "high": 102.0, "low": 99.0,
+        "close": 101.0, "volume": 10.0, "is_closed": False,
+    }
+    assert engine._validated_candle(row, streaming=True) is not None
+
+
+# ============================================================
+# TASK 02 — WS EVENT STATE REGRESSION (MKT-WSTG-002)
+# ============================================================
+
+def test_ws_misaligned_closed_candle_does_not_affect_engine_state(fake_clients):
+    """Vela WS cerrada off-grid: no se añade a closed_candles, no cambia estado global."""
+    async def scenario():
+        rig = fake_clients
+        engine = _engine(rig, margin=120.0)
+        bar_events = []
+
+        async def on_closed(payload):
+            bar_events.append(("closed", payload["open_time"]))
+
+        async def on_updated(payload):
+            bar_events.append(("updated", payload["open_time"]))
+
+        off_closed = engine.on_bar_closed(on_closed)
+        off_updated = engine.on_bar_updated(on_updated)
+        async with _running(engine, rig) as (task, ws):
+            # Llegar a estado listo.
+            state = await _connect_ready(engine, ws)
+            assert state["complete"] and state["entries_allowed"]
+
+            baseline_closed = list(engine.closed_candles)
+            baseline_last_close = engine.state.last_closed_close_time
+            baseline_pending = engine.snapshot()["pending_gaps"]
+            baseline_entries = engine.snapshot()["entries_allowed"]
+
+            # Avanzar el reloj al siguiente intervalo esperado +30_000.
+            rig.clock.now = BASE_MS + 6 * MINUTE_MS + 31_000
+
+            # Inyectar una vela WS cerrada off-grid con duración correcta.
+            misaligned_open = BASE_MS + 5 * MINUTE_MS + 30_000
+            ws.message({
+                "open_time": misaligned_open,
+                "close_time": misaligned_open + MINUTE_MS - 1,
+                "open": 200.0, "high": 202.0, "low": 199.0,
+                "close": 201.0, "volume": 50.0, "is_closed": True,
+            })
+
+            await asyncio.sleep(0)
+
+            # No debe añadirse a closed_candles.
+            assert engine.closed_candles == baseline_closed
+
+            # last_closed_close_time no cambia.
+            assert engine.state.last_closed_close_time == baseline_last_close
+
+            # pending_gaps y entries_allowed sin cambios.
+            assert engine.snapshot()["pending_gaps"] == baseline_pending
+            assert engine.snapshot()["entries_allowed"] == baseline_entries
+            assert bar_events == []
+
+        off_closed()
+        off_updated()
+
+    asyncio.run(scenario())
+
+
+def test_ws_aligned_closed_candle_preserves_normal_flow(fake_clients):
+    """Vela WS cerrada aligned: se añade a closed_candles y avanza last_closed_close_time."""
+    async def scenario():
+        rig = fake_clients
+        engine = _engine(rig)
+        closed_events = []
+
+        async def on_closed(payload):
+            closed_events.append(payload["open_time"])
+
+        off_closed = engine.on_bar_closed(on_closed)
+        async with _running(engine, rig) as (task, ws):
+            state = await _connect_ready(engine, ws)
+            assert state["complete"] and state["entries_allowed"]
+
+            baseline_closed = list(engine.closed_candles)
+            baseline_last_close = engine.state.last_closed_close_time
+            baseline_pending = engine.snapshot()["pending_gaps"]
+
+            # Avanzar el reloj al siguiente intervalo esperado.
+            rig.clock.now = BASE_MS + 6 * MINUTE_MS
+
+            # Enviar la vela siguiente, con open_time aligned.
+            aligned_open = BASE_MS + 5 * MINUTE_MS
+            ws.message({
+                "open_time": aligned_open,
+                "close_time": aligned_open + MINUTE_MS - 1,
+                "open": 300.0, "high": 302.0, "low": 299.0,
+                "close": 301.0, "volume": 60.0, "is_closed": True,
+            })
+
+            await asyncio.sleep(0)
+
+            # El buffer de 500 velas rueda; la nueva vela queda al final.
+            assert len(engine.closed_candles) == len(baseline_closed)
+            assert engine.closed_candles[-1]["open_time"] == aligned_open
+            assert engine.closed_candles[0]["open_time"] > baseline_closed[0]["open_time"]
+
+            # last_closed_close_time se actualiza.
+            assert engine.state.last_closed_close_time == aligned_open + MINUTE_MS - 1
+
+            # No se crean gaps.
+            assert engine.snapshot()["pending_gaps"] == baseline_pending
+            assert closed_events == [aligned_open]
+
+        off_closed()
+
+    asyncio.run(scenario())
+
+
+# ============================================================
+# TASK 03 — REST BOOTSTRAP GRID (MKT-RESTG-003)
+# ============================================================
+
+def test_bootstrap_with_misaligned_1m_candle_does_not_merge_or_mark_history_loaded(fake_clients):
+    """Bootstrap REST con vela desalineada: no se fusiona, history_loaded/entries_allowed permanecen false."""
+    async def scenario():
+        rig = fake_clients
+        # Inyectar una vela desalineada en el bootstrap.
+        misaligned_open = BASE_MS + 30_000  # Fuera de la rejilla 1m
+        misaligned = {
+            "open_time": misaligned_open,
+            "close_time": misaligned_open + MINUTE_MS - 1,
+            "open": 200.0, "high": 202.0, "low": 199.0,
+            "close": 201.0, "volume": 50.0,
+        }
+        # Reemplazar una vela alineada por la desalineada en el bootstrap.
+        rig.history = [dict(row) for row in rig.rows]
+        for i, row in enumerate(rig.history):
+            if row["open_time"] == _rest_candle(2)["open_time"]:
+                rig.history[i] = misaligned
+                break
+        delay = DelayedHTTP(rig)
+        rig.responder = delay
+
+        engine = _engine(rig)
+        async with _running(engine, rig) as (_task, ws):
+            ws.connect()
+            await asyncio.wait_for(delay.entered.wait(), timeout=1)
+            # Antes de liberar: bootstrap pendiente.
+            state = _snapshot(engine)
+            assert state["connected"] and not state["history_loaded"] and state["recovering"]
+            delay.release.set()
+            await _spin(lambda: not engine.snapshot()["recovering"])
+            state = _snapshot(engine)
+            assert state["pending_gaps"] > 0
+            assert not state["history_loaded"]
+            assert not state["complete"] and not state["entries_allowed"]
+            assert not state["recovering"]
+            # La vela desalineada no se fusiona.
+            assert misaligned_open not in {row["open_time"] for row in engine.closed_candles}
+
+    asyncio.run(scenario())
+
+
+# ============================================================
+# TASK 04 — REST GAP-RANGE GRID (MKT-RESTG-004)
+# ============================================================
+
+def test_gap_recovery_with_misaligned_1m_candle_does_not_clear_gap_or_advance_readiness(fake_clients):
+    """Gap recovery REST con vela desalineada: gap persiste, readiness bloqueada."""
+    async def scenario():
+        rig = fake_clients
+        # Eliminar una vela del histórico para forzar un gap.
+        missing_index = 3
+        rig.history = [dict(row) for row in rig.rows
+                       if row["open_time"] != _rest_candle(missing_index)["open_time"]]
+        delay_gap = DelayedHTTP(rig, ranged_only=True)
+
+        async def responder(request):
+            if request["start_ts"] is None:
+                # Bootstrap normal sin delay.
+                return rig.history
+            return await delay_gap(request)
+
+        rig.responder = responder
+        engine = _engine(rig)
+        async with _running(engine, rig) as (_task, ws):
+            ws.connect()
+            # Esperar a que se detecte el gap durante bootstrap y se inicie la recuperación ranged.
+            await _spin(lambda: len(rig.requests) > 1)
+            await asyncio.wait_for(delay_gap.entered.wait(), timeout=1)
+            state = _snapshot(engine)
+            assert state["recovering"] and state["pending_gaps"] > 0
+            assert not state["complete"] and not state["entries_allowed"]
+            # Inyectar una vela desalineada en la respuesta del gap (rig.rows se usa para ranged).
+            misaligned_open = _rest_candle(missing_index)["open_time"] + 30_000
+            misaligned = {
+                "open_time": misaligned_open,
+                "close_time": misaligned_open + MINUTE_MS - 1,
+                "open": 200.0, "high": 202.0, "low": 199.0,
+                "close": 201.0, "volume": 50.0,
+            }
+            # Reemplazar la vela faltante en rig.rows para que el ranged responder la devuelva.
+            for i, row in enumerate(rig.rows):
+                if row["open_time"] == _rest_candle(missing_index)["open_time"]:
+                    rig.rows[i] = misaligned
+                    break
+
+            delay_gap.release.set()
+            await _spin(lambda: not engine.snapshot()["recovering"])
+            state = _snapshot(engine)
+            # El gap persiste porque la vela desalineada no se fusiona.
+            assert state["pending_gaps"] > 0
+            assert not state["complete"] and not state["entries_allowed"]
+            # La respuesta ranged sí contiene la vela desalineada, pero no aparece en closed_candles.
+            ranged_rows = [row for req, rows in rig.responses if req.get("start_ts") is not None for row in (rows if isinstance(rows, list) else [rows])]
+            assert any(r["open_time"] == misaligned_open for r in ranged_rows)
+            assert misaligned_open not in {row["open_time"] for row in engine.closed_candles}
+
+    asyncio.run(scenario())

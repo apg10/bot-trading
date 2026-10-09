@@ -437,6 +437,8 @@ class MarketEngine:
         start, end = row["open_time"], row["close_time"]
         if type(start) is not int or type(end) is not int or end != start + interval - 1:
             raise ValueError("Timestamps de vela inválidos")
+        if streaming and self.config.kline_interval == "1m" and start % interval:
+            return None
         if streaming and type(row.get("is_closed")) is not bool:
             raise ValueError("Confirmación de cierre inválida")
         closed = row.get("is_closed", False) if streaming else end < self._clock_ms()

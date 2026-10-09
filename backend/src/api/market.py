@@ -8,10 +8,10 @@ import logging
 from typing import Any, AsyncGenerator, Literal
 
 import anyio
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from src.market.binance_client import BinanceConfig
+from src.market.binance_client import BinanceConfig, _normalize_symbol
 from src.market.candle_builder import CandleBuilder, BarEvent, BarEventType
 from src.models.state import Environment
 
@@ -80,6 +80,14 @@ def set_market_engine(engine: Any):
     _market_engine = engine
 
 
+def _validate_symbol(symbol: str) -> None:
+    """Validate symbol syntax using Spot rules; raise 422 on invalid input."""
+    try:
+        _normalize_symbol(symbol)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid symbol syntax")
+
+
 def _engine_for_symbol(symbol: str) -> Any:
     state = getattr(_market_engine, "state", None)
     return _market_engine if state is not None and state.symbol == symbol else None
@@ -97,6 +105,7 @@ def _engine_metadata(engine: Any) -> dict[str, Any]:
 @router.get("/status", response_model=MarketStatusResponse)
 async def get_market_status(symbol: str = "BTC/USDT") -> MarketStatusResponse:
     """Devuelve el estado actual del mercado para un símbolo."""
+    _validate_symbol(symbol)
     engine = _engine_for_symbol(symbol)
     if engine is None:
         return MarketStatusResponse(
@@ -123,6 +132,7 @@ async def get_candles(
     limit: int = Query(100, ge=1, le=500),
 ):
     """Devuelve un histórico identificado; el fallback siempre es TEST_ONLY/1m."""
+    _validate_symbol(symbol)
     candles = []
     engine = _engine_for_symbol(symbol)
     metadata = {"symbol": symbol, "interval": "1m", "data_source": "TEST_ONLY"}
@@ -140,7 +150,7 @@ async def get_candles(
         candles = [
             {
                 "open_time": c.timestamp_ms,
-                "close_time": c.timestamp_ms + 60_000,
+                "close_time": c.timestamp_ms + 59_999,
                 "open": c.open,
                 "high": c.high,
                 "low": c.low,

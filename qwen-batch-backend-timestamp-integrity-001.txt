@@ -1,0 +1,200 @@
+QWEN BATCH: BACKEND-TIMESTAMP-INTEGRITY-001
+============================================================
+
+USO
+Qwen recibe exactamente el bloque del task actual, no el archivo completo. Cada
+task verificado ordena leer el siguiente bloque. Si un gate falla, STOP; no
+continuar. ACT-S-002 sigue diferido. BATCH COMPLETADO; no hay task siguiente.
+
+REF-BASE
+master / 4383372b846ca019cd8008f96b464dd82aa3e49e
+Árbol después de los dos tasks de mercado aceptados y TASK 01–04 verificados:
+99 passed en test_market_lifecycle.py + test_market_engine.py. TASK 05 también
+verificado: 19 passed en test_fyl.py + test_analysis_market_api.py. TASK 06
+final: 20 passed en ese gate; gates del batch y diff checks limpios. Preservar
+los seis deltas. `test_market_engine.py` forma
+parte de esa baseline porque su helper usa timestamps 1m alineados. Preservar
+también todos los demás cambios previos.
+
+
+TASK 01 — WS GRID VALIDATOR
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: BACKEND-MARKET-WS-TIMESTAMP-GRID-001 / RUN: REV-001
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO.
+
+OBJETIVO
+Completar solo la validación WS 1m ya empezada y su unidad de regresión.
+
+ARCHIVOS EDITABLES
+1. backend/src/market/engine.py
+2. backend/tests/test_market_lifecycle.py
+3. backend/tests/test_market_engine.py
+
+DESDE EL ESTADO ACTUAL
+- En `_validated_candle`, conservar rechazo solo para streaming 1m desalineado;
+  no extenderlo a otros intervalos.
+- Conservar/ajustar las pruebas directas aligned, misaligned y non-1m existentes.
+- Alinear el helper `_kline` modificado en test_market_engine.
+- Restaurar a su comportamiento previo los cambios parciales REST: bootstrap
+  vuelve a su raise `Histórico fuera de los intervalos Binance`, reconexión a su
+  return False sin warning y ranged gap a su raise `Recuperación fuera de los
+  intervalos Binance`. Se tratarán de nuevo en TASK 03/04.
+- Retirar el test directo `_validated_candle` que afirma que una fila REST pasa;
+  TASK 03/04 prueban los caminos REST reales.
+
+GATE
+Diff solo en los 3 archivos permitidos; ejecutar desde backend:
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_market_lifecycle.py tests/test_market_engine.py
+También `git diff --check` y `git diff --cached --check`.
+Si pasa, registrar handoff breve y leer solo TASK 02. Si falla, STOP.
+
+EXCLUSIONES
+No REST, API, otros intervalos, docs, fixture generador, ni cambios a reconexión.
+Sin staging, commit, push, red ni servicios externos.
+
+
+TASK 02 — WS EVENT STATE REGRESSION
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: BACKEND-MARKET-WS-GRID-STATE-002 / RUN: REV-001
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO.
+PRECONDICIÓN: TASK 01 verificado. Preservar su delta.
+
+OBJETIVO
+Probar el efecto del rechazo 1m en el flujo WS completo, no solo en el validador.
+
+ARCHIVOS EDITABLES
+1. backend/tests/test_market_lifecycle.py
+
+ACEPTACIÓN
+- Con motor listo, inyectar una vela WS cerrada off-grid con duración correcta.
+- No debe añadirse a closed_candles, emitirse como cierre/update, ni cambiar
+  last_closed_close_time, pending_gaps o entries_allowed.
+- Control alineado conserva el flujo existente.
+- Reutilizar helpers/eventos existentes; no crear infraestructura de delays nueva.
+
+GATE
+Ejecutar exactamente el comando CHECK de TASK 01 y checks de diff.
+Si pasa, leer solo TASK 03; si falla, STOP.
+
+EXCLUSIONES
+No tocar producción, REST, otros intervalos o archivos fuera de la allowlist.
+
+
+TASK 03 — REST BOOTSTRAP GRID
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: BACKEND-MARKET-REST-BOOTSTRAP-GRID-003 / RUN: REV-001
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO.
+PRECONDICIÓN: TASK 02 verificado. Preservar sus cambios.
+
+OBJETIVO
+En bootstrap REST 1m, impedir que una vela off-grid se fusione o marque el
+histórico como listo.
+
+ARCHIVOS EDITABLES
+1. backend/src/market/engine.py
+2. backend/tests/test_market_lifecycle.py
+
+ACEPTACIÓN
+- Integrar una respuesta bootstrap con vela off-grid pero close_time válido.
+- No fusionar esa página; history_loaded/entries_allowed permanecen false y los
+  gaps siguen pendientes.
+- Mantener un control de bootstrap alineado existente o añadirlo si falta.
+- Usar `fake_clients`, `rig.history` y `DelayedHTTP` existentes; no calcular a
+  mano coverage_start ni duplicar el harness.
+
+GATE
+Ejecutar exactamente el comando CHECK de TASK 01 y checks de diff. Si pasa,
+leer solo TASK 04; si falla, STOP.
+
+EXCLUSIONES
+No modificar el WS grid aceptado, gap-range recovery, APIs o intervalos != 1m.
+
+
+TASK 04 — REST GAP-RANGE GRID
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: BACKEND-MARKET-REST-GAP-GRID-004 / RUN: REV-001
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO.
+PRECONDICIÓN: TASK 03 verificado. Preservar sus cambios.
+
+OBJETIVO
+Rechazar páginas REST off-grid durante recuperación de un gap antes de merge/cursor.
+
+ARCHIVOS EDITABLES
+1. backend/src/market/engine.py
+2. backend/tests/test_market_lifecycle.py
+
+ACEPTACIÓN
+- Adaptar `test_gap_inside_or_at_end_of_bootstrap_is_recovered_before_ready`:
+  quitar un índice interior de `rig.history` y usar su `DelayedHTTP(ranged_only=True)`.
+- Al entrar la request ranged, desplazar el open_time de esa fila en `rig.rows`
+  +30_000 y ajustar close_time = open_time + 59_999; después liberar el único delay.
+- No fusionarla ni avanzar el cursor/limpiar el gap; market readiness sigue false.
+- Página alineada conserva recuperación normal.
+- No calcular manualmente coverage_start ni crear dos responders/delays.
+- Un warning sin return/rechazo explícito antes de merge NO satisface aceptación.
+
+GATE
+Ejecutar exactamente el comando CHECK de TASK 01 y checks de diff. Si pasa,
+leer solo TASK 05; si falla, STOP.
+
+EXCLUSIONES
+No modificar WS, bootstrap, fixture data, API o intervalos != 1m.
+
+
+TASK 05 — FYL INCREMENTAL SOURCE TIMESTAMP
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-007
+TASK: BACKEND-FYL-INCREMENTAL-TIMESTAMP-005 / RUN: REV-001
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO.
+PRECONDICIÓN: TASK 04 verificado. Preservar sus cambios.
+
+OBJETIVO
+Los pivotes incremental deben usar el open_time real de su vela; hoy usan i*60_000.
+
+ARCHIVOS EDITABLES
+1. backend/src/indicators/fyl.py
+2. backend/tests/test_fyl.py (crear archivo focalizado)
+
+ACEPTACIÓN
+- Caso incremental con timestamp inicial no cero e intervalos irregulares.
+- Cada pivote detectado conserva el open_time de su índice de origen.
+- No cambiar selección, lookback, price, strength, confirmed ni mode.
+
+GATE
+Desde backend ejecutar:
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_fyl.py tests/test_analysis_market_api.py
+Más checks de diff. Si pasa, leer solo TASK 06; si falla, STOP.
+
+EXCLUSIONES
+No tocar detector batch, API, fuerza/fórmulas, ni claims causales.
+
+
+TASK 06 — FYL BATCH SOURCE TIMESTAMP
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-007
+TASK: BACKEND-FYL-BATCH-TIMESTAMP-006 / RUN: REV-001
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO.
+PRECONDICIÓN: TASK 05 verificado. Preservar su delta.
+
+OBJETIVO
+Los pivotes batch TEST_ONLY deben usar el open_time real de su vela; hoy usan i*60_000.
+
+ARCHIVOS EDITABLES
+1. backend/src/indicators/fyl.py
+2. backend/tests/test_fyl.py
+
+ACEPTACIÓN
+- Caso batch con timestamp inicial no cero e intervalos irregulares.
+- Cada pivote y las zonas derivadas conservan los timestamps de origen.
+- Mantener mode `batch_test_only`, confirmed y el lookahead/test-only actual.
+- No cambiar selección de pivotes, strength ni fórmulas.
+
+GATE FINAL
+Desde backend ejecutar los dos comandos definidos en TASK 01 y TASK 05.
+Desde raíz: `git diff --check`, `git diff --cached --check`,
+`git status --short --untracked-files=all`. Entregar handoff único separando
+cada delta. No leer ni empezar otro task.
