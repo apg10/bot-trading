@@ -1,6 +1,6 @@
 # Plan de acción y seguimiento — bot_trading
 
-Fecha de creación y actualización: **2026-10-05**.
+Fecha de creación: **2026-10-05**. Actualización documental: **2026-10-07**.
 
 ## 1. Propósito y reglas
 
@@ -11,11 +11,21 @@ la evidencia de cierre. Complementa, no sustituye:
 - [Brief visual](trading-console-visual-brief.md): interfaz objetivo.
 - [Plantilla Qwen](qwen-task-template.txt): contrato de cada implementación.
 
-**Preparar este plan no autoriza iniciar ninguna implementación.** La autorización
-documental permite crear/actualizar este archivo; no cambia código, tests ni los
-otros documentos. No hay un microtask de implementación activo al publicar esta
-cola. El grupo de automatización de la sección 13 se prepara primero por decisión
-del usuario; sus contratos se ejecutan de uno en uno, nunca durante su redacción.
+**Autoridad canónica:** este plan de raíz gobierna estados, aceptaciones,
+dependencias y selección del siguiente microtask. La copia fechada
+`trading-plans-2026-10-07/trading-bot-action-plan.md` es una propuesta sin autoridad;
+sus textos no sustituyen este seguimiento ni los paquetes ya preparados.
+
+**Preparar o reconciliar este plan no autoriza iniciar una implementación.** Esta
+reconciliación autoriza únicamente los tres documentos de raíz: este plan, el plan
+técnico y el brief visual. No hay implementación activa.
+B4.2 está COMPLETADO en su alcance; su preparación de §14.3 es histórica.
+El bloque STATE/CLOSE/SNAPSHOT de §14.7 está aceptado en su alcance.
+BACKEND-SCENARIO-ENGINE-001 está aceptado en su alcance (§14.8).
+BACKEND-SCENARIO-ADVISORY-SERVICE-001 (§14.9) está COMPLETADO por revisión
+manual delegada; su ficha conserva el cierre como historia. No hay siguiente
+microtask seleccionado ni implementación activa ni autorización para autoavanzar.
+La cola de automatización de §13 es histórica y está fuera de la selección vigente.
 
 Principios obligatorios:
 
@@ -35,9 +45,19 @@ Principios obligatorios:
 
 - Workspace: `/home/adrian10/bot_trading`.
 - Rama observada: `master`.
-- HEAD observado: `93f5545317c43d65b9864e57f29ca624b8f871be`.
-- Hay cambios tracked y untracked anteriores a este archivo. **HEAD no identifica
-  todo el estado actual** ni es una baseline suficiente para el siguiente task.
+- HEAD histórico al crear el plan: `93f5545317c43d65b9864e57f29ca624b8f871be`.
+- Contexto inicial verificado en solo lectura el 2026-10-07: `master`,
+  HEAD `4383372b846ca019cd8008f96b464dd82aa3e49e`; estado inicial con este plan
+  raíz modificado y tres propuestas untracked, índice vacío y ningún otro cambio.
+  La captura precede a esta reconciliación y no certifica el resto del checkpoint.
+- Tras la reconciliación documental se verifica 7 tracked modificados (los documentos raíz y backend) y
+  10 untracked (propuestas, AI, tests), con índice vacío. Antes de ejecutar B4.2 debe
+  actualizarse la precondición del paquete y capturarse su baseline completa;
+  esta descripción de estado no sustituye la evidencia de contenido y propiedad.
+- **HEAD no identifica todo el árbol ni basta como baseline.** Todos los HEAD,
+  hashes y árboles anteriores registrados en fichas son evidencia histórica de
+  sus intentos, no precondiciones locales vigentes ni autorización reutilizable.
+  Esto incluye cualquier árbol 21 M, 23 M o 23 M + 30 ?? mencionado históricamente.
 - Antes de cada implementación se debe fijar CLEAN o BASELINE_AUTORIZADA según
   la plantilla, incluyendo evidencia completa y propiedad de los cambios.
 - La autorización de baseline del task de mercado no se extiende automáticamente
@@ -78,12 +98,12 @@ ni integración real con Binance/Ollama.
   no acredita por sí sola toda la integración de la Terminal.
 - La liberación de callbacks WS tiene implementación; revalidar su cobertura
   antes de abrir una reparación.
-- `httpx` sigue declarado solo en el extra `test` de `backend/pyproject.toml`:
-  pendiente concreto confirmado al preparar este archivo.
+- `httpx` ya fue declarado en runtime por ACT-S-001, COMPLETADO en su alcance
+  aceptado; la instalación limpia sigue sin certificar.
 
-El plan técnico y el brief, fechados el 2026-10-03, conservan descripciones
-anteriores. Este archivo no da por terminadas fases completas ni convierte todos
-sus requisitos antiguos en tareas nuevas. ACT-S-002 debe reconciliar el inventario.
+Las descripciones antiguas del plan técnico y del brief no constituyen evidencia
+de pendientes actuales. Su reconciliación documental no cierra ACT-S-002 ni fases
+completas; ACT-S-002 debe contrastar el inventario con código y evidencia real.
 
 ## 3. Cómo mantener el seguimiento
 
@@ -93,6 +113,7 @@ sus requisitos antiguos en tareas nuevas. ACT-S-002 debe reconciliar el inventar
 |---|---|
 | PENDIENTE | Resultado deseado aún sin ejecutar; requiere autorización |
 | PREPARADO | Contrato redactado, no iniciado; faltan autorización de ejecución y precondiciones de base |
+| PAUSADO | Trabajo detenido por decisión explícita; conservar avance parcial, subaceptaciones y registro; no habilita selección ni acredita cierre |
 | POR_REVALIDAR | El documento puede estar atrasado; primero comprobar código y evidencia |
 | BLOQUEADO | Falta especificación, decisión, permiso o dependencia identificada |
 | EN_CURSO | Microtask acotado, autorizado y realmente iniciado; máximo uno |
@@ -123,8 +144,10 @@ posterior del producto. No son fechas ni porcentajes de avance.
 Las filas de las secciones 5 a 9 son **backlog**, no tasks ejecutables ni allowlists.
 Cada fila puede necesitar varios microtasks independientes. Ninguna permite
 elegir archivos de implementación o decisiones financieras silenciosamente.
-La sección 13 contiene los contratos del primer grupo y su selector. Su estado
-PREPARADO no acredita una aprobación cloud ni una baseline futura ya capturada.
+La sección 13 archiva los contratos y el selector históricos de automatización;
+no selecciona trabajo actual. La preparación B4.2 de §14.3 es histórica; el
+bloque actual de contexto N02 se referencia en §14.7.
+PREPARADO no acredita aprobación cloud ni una baseline futura ya capturada.
 
 ## 4. Orden de acción y puertas de salida
 
@@ -177,24 +200,34 @@ Laboratorio estén terminadas. No habilitar una estrategia sin su validación.
 | ID | Pri. | Estado | Resultado acotado | Dependencia | Evidencia de aceptación |
 |---|---|---|---|---|---|
 | ACT-S-001 | P0 | COMPLETADO | Declarar `httpx` como dependencia runtime | REV-001 aceptada manualmente; instalación limpia sigue NO EJECUTADA | Declaración y smoke existentes verificados; no certifica instalación limpia ni todas las dependencias del backend |
-| ACT-S-002 | P0 | PENDIENTE | Reconciliar inventario actual con plan/brief y marcar avances reales | Ninguna; lectura de código | Matriz implementado/parcial/ausente con rutas y pruebas; actualización documental expresamente autorizada |
+| ACT-S-002 | P0 | COMPLETADO | Reconciliar inventario actual con plan/brief y marcar avances reales | Ninguna; lectura de código | Matriz implementado/parcial/ausente con rutas y pruebas; aceptación manual del maestro registrada en §14.10 |
 | ACT-S-003 | P0 | PENDIENTE | Verificar typecheck de aplicación y configuración | Dependencias existentes | Ambos comandos TypeScript pasan; fallos se reportan sin arreglos fuera de alcance |
 | ACT-S-004 | P0 | PENDIENTE | Verificar build de producción frontend | ACT-S-003 | `npm run build` pasa; artifacts y efectos de escritura autorizados de antemano |
-| ACT-S-005 | P0 | POR_REVALIDAR | Contratos de consulta/histórico, callbacks WS y estado temporal backend | ACT-S-002 | Casos de límites, símbolo, procedencia, reconexión y teardown; abrir gaps separados si existen |
-| ACT-S-006 | P0 | POR_REVALIDAR | Referencia numérica de Keltner y semántica de datos insuficientes | ACT-S-002 | Separar validación numérica y política de insuficiencia en microtasks; ninguna señal operativa fabricada |
+| ACT-S-005 | P0 | COMPLETADO | Contratos de consulta/histórico, callbacks WS y estado temporal backend | ACT-S-002 | 189 tests verdes (REV-001 + REV-002). Criterio 1: Query(100, ge=1, le=500) — default 100 (test_candles_default_limit_is_100), bordes 1/500 aceptados (test_candles_limit_boundary_accepts_valid_values), inválidos 0/-1/501 rechazados (test_market_lifecycle.py:1096-1104). Criterio 2: símbolo malformado → 422 status/candles (test_market_api.py:324-336); válido no poseído → TEST_ONLY candles + unavailable status (test_another_symbol_never_receives_current_engine_history, test_custom_symbol_fixture_is_still_test_only). Criterio 3: market_engine real vs TEST_ONLY/unavailable; fixture no presentado como conectado. Criterio 4: close_time inclusivo, guard/rechazo WS 1m y controles aligned/non-1m, bootstrap 500 velas, frescura clock_ms+margin, pending_gaps/entries_allowed. Criterio 5: callbacks connect/disconnect/error, backfill simulado y exitoso con DelayedHTTP, release handlers/tareas, cancelación/shutdown limpia. Cap HTTP min(limit,1000) implementado sin test directo (no bloquea cierre); evidencia desglosada en §14.11. Aceptación manual del maestro registrada en §14.11. |
+| ACT-S-006 | P0 | COMPLETADO | Referencia numérica Keltner actual y semántica de datos insuficientes | ACT-S-002 | Microtasks separados aceptados: warmup 33/34/35 sin señal fabricada y referencia numérica independiente. Convención válida solo para la implementación actual (no equivale al método original): TR[0]=0; EMA SMA inicial + alpha=2/(n+1); ATR promedio inicial incluyendo TR[0] + Wilder; bandas EMA ± multiplier*ATR; warmup ema_period+atr_period. Fixture OHLCV 8bar-v1, parámetros de test 3/3/2 y expected exactos en §14.12; 40 passed. Defaults 20/14/2.0 siguen configurables por estrategia, no obligatorios. |
 | ACT-S-007 | P0 | POR_REVALIDAR | Aislar defectos del FYL experimental sin atribuirle el método | ACT-S-002 | Tests de timestamps/fuerza con especificación del detector; batch no causal permanece TEST_ONLY |
-| ACT-C-001 | P0 | PENDIENTE | Mapa canónico de entornos, capacidades, velas, propuestas, órdenes y posiciones | ACT-S-002 | Contratos y compatibilidad aprobados antes de modificar familias de modelos |
+| ACT-C-001 | P0 | PENDIENTE | Mapa canónico de entornos, capacidades, velas, propuestas, órdenes y posiciones; contratos y catálogo común para UI/IA, con versiones de estrategia y datos | ACT-S-002 | Contratos y compatibilidad aprobados antes de modificar familias de modelos; parámetros tipados, unidades, límites, calentamiento, causalidad y versiones; catálogo distingue soporte de salud/ejecución |
 | BACKEND-CAPABILITIES-001 | P0 | COMPLETADO | B2: GET /api/capabilities informativo y sin efectos | REV-003 aceptada por revisión manual delegada | 6 tests y guardas de red verificadas; no cierra ACT-C-001 completo |
 | BACKEND-ANALYSIS-INPUT-001 | P0 | COMPLETADO | B3.1: datos insuficientes sin fallback sintético implícito | REV-002 aceptada por revisión manual delegada | 8 tests y probe de omisión correctos; fixture separada existente intacta, sin nueva ruta o módulo |
 | BACKEND-ANALYSIS-FINITE-001 | P0 | COMPLETADO | B3.2: rechazar OHLCV NaN/Infinity antes de calcular | REV-001 aceptada por revisión manual delegada | 25 tests correctos; campos finitos, volumen cero e insuficiencia conservados |
 | BACKEND-ANALYSIS-RANGE-001 | P0 | COMPLETADO | B3.3: open/close dentro de low/high inclusivos | REV-001 aceptada por revisión manual delegada | 34 tests correctos; extremos inclusivos y errores anteriores conservados |
 | BACKEND-ANALYSIS-TIME-001 | P0 | COMPLETADO | B3.4: open_time estrictamente creciente | REV-001 aceptada por revisión manual delegada | 40 tests correctos; secuencia irregular creciente aceptada y cola inválida rechazada |
-| BACKEND-MARKET-ANALYSIS-INPUT-001 | P0 | EN_REVISION | B4.1: entrada de análisis desde cerradas propias del motor | B3.4 COMPLETADO; preparación por avance delegado | Reutilizar closed_candles/snapshot, últimas N cerradas 1m y contexto; sin getter nuevo, endpoint o N02 inventado — REV-002 entregada, pendiente aceptación manual |
+| BACKEND-MARKET-ANALYSIS-INPUT-001 | P0 | COMPLETADO | B4.1: entrada de análisis desde cerradas propias del motor | REV-002 aceptada por revisión manual delegada | 16 tests y probe independiente offline correctos; últimas N cerradas 1m, contexto y copia profunda; sin endpoint, N02 ni ejecución |
+| BACKEND-MARKET-ANALYSIS-API-001 | P0 | COMPLETADO | B4.2: API de análisis desde PreparedMarketAnalysis reutilizando await analyze | PARTE01–07 aceptadas por revisión manual delegada | 18 tests API y 42 de regresión focal correctos; cierre documental verificado, sin ejecución financiera ni certificación runtime; §14.3 conserva preparación histórica |
+| BACKEND-SCENARIO-STATE-001 | P0 | COMPLETADO | STATE: proyección pura de dict a SnapshotMarketState, seis campos, sin defaults ni autoridad operativa | Revisión manual delegada del bloque y CORRECCIÓN01/02 aceptadas | Modelo/validación/no mutación conformes; aceptación limitada al adaptador |
+| BACKEND-SCENARIO-CLOSE-001 | P0 | COMPLETADO | CLOSE: convertir último close preparado en SnapshotEvidence numérica, sin calcular ni redondear | STATE-001 aceptado; fixture corregida y guarda original | DTOs reales, cierre inclusivo y control de no mutación conformes; sin volumen o indicadores |
+| BACKEND-SCENARIO-SNAPSHOT-001 | P0 | COMPLETADO | SNAPSHOT: componer ScenarioSnapshot mínimo desde PreparedMarketAnalysis, sin integrar Ollama ni siguiente task | STATE/CLOSE y CORRECCIÓN01–04 aceptadas por revisión manual delegada | Snapshot mínimo, guardas y prueba de alias conformes; 11 tests del bloque. Sin integración IA operativa ni reloj real |
+| BACKEND-SCENARIO-CORRECCION01 | P0 | COMPLETADO | CORRECCIÓN01: reutilizar _block_network original desde test_analysis_market_input, eliminar guarda local + imports socket/mock/httpx | Revisión manual delegada del contenido actual, no del manifiesto obsoleto del handoff | Guarda importada correctamente; helpers/assertions y ocho archivos ajenos conservados; 11 tests del maestro correctos. No acepta STATE/CLOSE/SNAPSHOT ni resuelve los otros gaps |
+| BACKEND-SCENARIO-CORRECCION02 | P0 | COMPLETADO | CORRECCIÓN02: excepción específica ValidationError en negativo parametrizado STATE, verificar loc exacto | Revisión manual delegada de la versión realmente observada | 3 casos del maestro correctos; un único error en loc esperado y scope conservado. No acepta automáticamente STATE/CLOSE/SNAPSHOT |
+| BACKEND-SCENARIO-CORRECCION03 | P0 | COMPLETADO | CORRECCIÓN03: excepciones específicas ValidationError/ScenarioError en negativos SNAPSHOT, conservar assert code | Revisión manual delegada de la versión actual | 3 casos del maestro correctos; imports locales, excepciones exactas y code conservado. No acepta automáticamente el bloque |
+| BACKEND-SCENARIO-CORRECCION04 | P0 | COMPLETADO | CORRECCIÓN04: missing_data sin alias — independencia entre lista del caller y la del snapshot | Revisión manual delegada de las seis assertions y conservación | 1 test focal y 11 del bloque correctos; listas distintas y mutaciones aisladas en ambas direcciones |
 
-### Primer microtask de producto tras preparar la automatización: ACT-S-001
+### Primer microtask de producto tras preparar la automatización: ACT-S-001 (histórico, superado)
 
-- Hecho confirmado: `httpx` está en `[project.optional-dependencies].test`,
-  aunque la aplicación lo importa en runtime.
+- Hallazgo histórico ya corregido por ACT-S-001: `httpx` estaba en
+  `[project.optional-dependencies].test`, aunque se importaba en runtime.
+- Las instrucciones siguientes conservan la propuesta original; no seleccionan
+  trabajo ni autorizan repetir el microtask completado.
 - Candidato principal de implementación: `backend/pyproject.toml`; no es una
   allowlist autorizada. La prueba y sus archivos se fijarán al emitir el task.
 - Preservar la restricción de versión existente salvo decisión justificada;
@@ -213,11 +246,11 @@ Laboratorio estén terminadas. No habilitar una estrategia sin su validación.
 | ACT-M-003 | P0 | POR_REVALIDAR | Refresco técnico por revisión, no por longitud, y descarte de respuestas antiguas | ACT-S-002 | Intrabar/longitud constante, cambio de identidad y errores visibles |
 | ACT-M-004 | P1 | PENDIENTE | Selección real de símbolo e intervalo con contrato de propiedad del motor | ACT-C-001; cierre de ACT-M-001/002 | Cambio no mezcla buffers/suscripciones; separar selección de vista de reconfiguración del motor |
 | ACT-M-005 | P1 | POR_REVALIDAR | Snapshot/secuencia y recuperación de huecos del transporte UI | ACT-S-005; ACT-C-001 | Protocolo versionado e HTTP/WS coherentes; primero identificar qué garantiza hoy el transporte |
-| ACT-T-001 | P1 | PENDIENTE | Inventario visual, capturas y mapa mínimo de vistas reutilizables | H0 | Diseño respeta contratos; permisos de servicios/navegador; no reescritura de React |
-| ACT-T-002 | P1 | PENDIENTE | Elegir dirección visual y adaptar shell/Terminal existentes | ACT-T-001; autorización de diseño | Dos propuestas si se autoriza Stitch, elección explícita; vistas sin backend muestran indisponibilidad |
-| ACT-T-003 | P1 | PENDIENTE | Gráfico por delta, volumen y preferencias de vista | ACT-M-002/004; ACT-T-001 | Equivalencia de serie, zoom preservado, buffers acotados; dividir funcionalidades y medir fluidez |
-| ACT-T-004 | P1 | POR_REVALIDAR | Integración visible de escenarios N02 y estados de vigencia | ACT-S-002; ACT-M-003 | Modelo real identificado; ocupado/error/caducado; mercado sigue utilizable; no repetir backend N02 |
-| ACT-T-005 | P1 | PENDIENTE | QA responsive y accesible de Terminal | Cambios de Terminal verificados | 1440×900, 1920×1080, 390×844, horizontal, zoom 200%, teclado, contraste y reduced motion |
+| ACT-T-001 | P1 | PENDIENTE | Inventario visual, capturas y mapa mínimo de vistas y paneles contextuales reutilizables | H0 | Diseño respeta contratos y contexto real; permisos de servicios/navegador; no reescritura de React |
+| ACT-T-002 | P1 | PENDIENTE | Elegir dirección visual y adaptar shell/Terminal existentes y paneles por contexto | ACT-T-001; autorización de diseño | Dos propuestas si se autoriza Stitch, elección explícita; vistas sin backend muestran indisponibilidad; preferencias persistidas según ACT-P-001 cuando esté disponible |
+| ACT-T-003 | P1 | PENDIENTE | Gráfico por delta, volumen y preferencias persistidas de vista | ACT-M-002/004; ACT-T-001 | Equivalencia de serie, zoom preservado, buffers acotados; dividir funcionalidades y medir fluidez; conservación de preferencias mediante ACT-P-001 cuando esté disponible |
+| ACT-T-004 | P1 | POR_REVALIDAR | Integración visible de escenarios N02, contexto y estados de vigencia | ACT-S-002; ACT-M-003 | Modelo real identificado; ocupado/error/caducado; contexto ausente visible; mercado sigue utilizable; no repetir backend N02 |
+| ACT-T-005 | P1 | PENDIENTE | QA responsive y accesible de Terminal y paneles contextuales | Cambios de Terminal verificados | 1440×900, 1920×1080, 390×844, horizontal, zoom 200%, teclado, contraste y reduced motion; preferencias y estados contextuales comprobados |
 
 Las capas FYL/MACD BB y anotaciones del método dependen de ACT-E-001/002/003;
 no dibujar fórmulas inventadas para completar el diseño. La navegación puede
@@ -231,7 +264,7 @@ implementaciones. Cada fila requiere contrato y subdivisión por resultado.
 
 | ID | Pri. | Estado | Resultado | Dependencia | Evidencia de aceptación |
 |---|---|---|---|---|---|
-| ACT-P-001 | P1 | PENDIENTE | Sesiones/configuraciones versionadas en SQLite y migración inicial | ACT-C-001 | Transacciones, escritura serializada y conservación de sesiones tras reinicio |
+| ACT-P-001 | P1 | PENDIENTE | Sesiones/configuraciones versionadas en SQLite y migración inicial; persistencia de versiones y preferencias | ACT-C-001 | Transacciones, escritura serializada y conservación de sesiones tras reinicio; referencias versionadas de estrategia/datos/experimentos y preferencias de panel/vista según contratos disponibles |
 | ACT-P-002 | P1 | PENDIENTE | Libro de efectivo, activos, reservas, fills y comisiones | ACT-P-001 | Invariantes contables, dinero con decimales y saldo libre/reservado correcto |
 | ACT-P-003 | P1 | PENDIENTE | Estados e IDs idempotentes de órdenes simuladas | ACT-C-001; ACT-P-001 | Transiciones válidas; persistencia; rechazo de duplicados y gestión del estado desconocido |
 | ACT-P-004 | P1 | PENDIENTE | Validador de riesgo versionado y filtros del símbolo | ACT-P-002/003; política de riesgo aprobada | Saldo/reservas, stop, exposición, pérdida máxima y redondeos; IA no amplía límites; bloquear entradas al alcanzarlos sin liquidación implícita |
@@ -256,6 +289,7 @@ fixtures como integración de mercado real ni como EXCHANGE_DEMO.
 | ACT-A-001 | P1 | PENDIENTE | Auditoría persistente de snapshot, modelo, prompt, parámetros y respuesta N02 | ACT-P-001; contrato de auditoría | Versiones y vigencia reconstruibles, errores públicos sin secretos ni texto privado |
 | ACT-A-002 | P1 | POR_REVALIDAR | Contexto de escenarios: zonas, checklist y cartera cuando existan | ACT-S-002; ACT-C-001; módulos de contexto disponibles | Solo referencias reales y confirmadas; marcar campos ausentes; no fabricar evidencia |
 | ACT-A-003 | P1 | PENDIENTE | Uso opcional de asesoría en el ciclo PAPER, sin autoridad de ejecución | ACT-P-006/007; ACT-A-001/002 | Revalidar mercado/estrategia/riesgo; caducidad o abstención bloquean entradas dependientes, nunca salidas protectoras |
+| ACT-A-004 | P2 | PENDIENTE | Herramientas estructuradas posteriores de investigación para Qwen, sin autoridad financiera | ACT-C-001; ACT-A-001; ACT-L-002 cuando estén disponibles | Descubrimiento, esquemas, permisos, límites y auditoría; consultas y solicitudes acotadas de experimentos, sin órdenes, shell ni modificación de estrategia activa; ampliación posterior, no puerta de H4 ni bloqueo de B4.2 |
 
 ACT-A-002 no obliga a esperar el método original si el contexto utilizado es de
 la estrategia fixture o de indicadores conocidos; la incorporación de zonas
@@ -269,14 +303,14 @@ una prueba Ollama real exige autorización, modelo concreto y medición separada
 
 | ID | Pri. | Estado | Resultado | Dependencia | Evidencia de aceptación |
 |---|---|---|---|---|---|
-| ACT-L-001 | P2 | PENDIENTE | Replay causal e histórico segmentado/acotado | ACT-P-001/005; ACT-C-001 | Futuro oculto; decisiones reproducibles; formato de histórico elegido según volumen medido |
-| ACT-L-002 | P2 | PENDIENTE | Experimentos versionados, métricas y comparación de candidatos | ACT-L-001; ACT-P-009 | Costes/exposición explícitos; desarrollo separado de evaluación; referencia pertinente y periodos iguales |
-| ACT-L-003 | P2 | PENDIENTE | Vista Laboratorio y detalle de experimentos | ACT-L-002; ACT-T-002 | Estados reales; progreso solo medible; datos insuficientes visibles; sesiones anteriores conservadas |
-| ACT-B-001 | P1 | PENDIENTE | Supervisión Bot con timeline, propietario y comandos confirmados | ACT-P-007/008; ACT-A-001; ACT-T-002 | Estados/IDs reales; pausa y cierre separados; modos habilitados únicamente si backend los soporta |
+| ACT-L-001 | P2 | PENDIENTE | Replay causal e histórico segmentado/acotado para backtest reproducible | ACT-P-001/005; ACT-C-001 | Futuro oculto; decisiones reproducibles con fuente/reloj identificados y política de costos/fills explícita; formato de histórico elegido según volumen medido |
+| ACT-L-002 | P2 | PENDIENTE | Experimentos y resultados versionados/normalizados; comparación A/B/C de al menos tres variantes por hipótesis | ACT-L-001; ACT-P-009 | Datos, estrategia, código, motor, riesgo y costos identificados; todos los intentos registrados, incluidos fallidos/descartados; desarrollo/validación/test separados; referencia, periodos y exposición comparables; unidades y métricas indefinidas explícitas; tres variantes no significan tres órdenes |
+| ACT-L-003 | P2 | PENDIENTE | Vista Laboratorio, comparación A/B/C e inspector de operaciones | ACT-L-002; ACT-T-002 | Resultados normalizados, costos/unidades y curvas de capital/drawdown; trade enlazado al gráfico y decisiones; estados reales, progreso solo medible y datos insuficientes visibles; sesiones anteriores conservadas |
+| ACT-B-001 | P1 | PENDIENTE | Supervisión Bot con timeline, propietario, comandos confirmados y paneles contextuales | ACT-P-007/008; ACT-A-001; ACT-T-002 | Estados/IDs reales; pausa y cierre separados; modos habilitados únicamente si backend los soporta; contexto real y preferencias persistidas mediante ACT-P-001 cuando esté disponible |
 | ACT-D-001 | P2 | PENDIENTE | Contrato e implementación oficial Binance EXCHANGE_DEMO | ACT-P-010; ACT-L-002; ACT-C-001 | URLs/credenciales demo independientes, filtros y tipos protectores válidos; permiso específico |
 | ACT-D-002 | P2 | PENDIENTE | Reconciliación demo y pruebas de timeout, parcial y reconexión | ACT-D-001 | Estado desconocido no provoca reenvío; saldo/órdenes/fills consistentes; protección de cantidad realmente comprada |
 | ACT-D-003 | P2 | PENDIENTE | UI demo y aceptación integrada | ACT-D-002; ACT-B-001; ACT-T-005 | Operaciones confirmadas, errores visibles, sin live; permisos de integración explícitos |
-| ACT-Q-001 | P2 | PENDIENTE | Evaluación congelada, walk-forward, A/B y prospectiva | ACT-L-002; ACT-A-003 si se compara IA | Sin ajustar contra el test reservado; LLM no validado solo por backtest; sin promesas de rentabilidad |
+| ACT-Q-001 | P2 | PENDIENTE | Evaluación congelada, walk-forward, A/B/C y prospectiva | ACT-L-002; ACT-A-003 si se compara IA | Periodos de desarrollo/validación/test separados y costos/exposición comparables; evaluación reservada no guía ajustes; todos los intentos trazables; IA evaluada separadamente y LLM no validado solo por backtest; sin promesas de rentabilidad |
 | ACT-Q-002 | P1 | PENDIENTE | Estrés de memoria, event loop, clientes y fluidez | H1; repetir tras PAPER/demo | Mediciones sostenidas, reconexiones y dos pestañas sin dos motores; presupuestos son objetivos, no garantías |
 | ACT-Q-003 | P2 | PENDIENTE | Acceso privado remoto/autenticado, HTTPS y controles de origen | Antes de exposición externa | Comandos protegidos, Ollama/secretos no expuestos; rediseño de acceso solo autorizado |
 
@@ -367,11 +401,118 @@ No borrar intentos rechazados: anotar la corrección y la evidencia que permiti�
 cerrarlos. No recalcular un porcentaje global por contar filas; las tareas tienen
 tamaños diferentes y pueden desglosarse. La evidencia manda sobre la etiqueta.
 
-**Próxima acción: ACT-AUTO-001, únicamente cuando se solicite su ejecución y se
-fije su baseline.** ACT-S-001 sigue siendo la primera propuesta de producto,
-pero todavía no tiene un contrato ejecutable ni se selecciona automáticamente.
+**ENGINE-001 COMPLETADO en su alcance**, bajo ACT-A-002 (§14.8).
+BACKEND-SCENARIO-ADVISORY-SERVICE-001 (§14.9) está COMPLETADO por revisión
+manual delegada; su ficha conserva el cierre como historia. El bloque de adaptadores
+está cerrado; no completa integración IA. No hay siguiente microtask seleccionado.
+Los selectores B4.2, AUTO-001 y ACT-S-001 son históricos, superados; no autorizan
+reanudar infraestructura ni autoavanzar en el chat ejecutor.
+
+Las fichas y preparaciones siguientes conservan su cronología: estados y órdenes
+anteriores describen aquellos intentos, no selecciones vigentes. Prevalecen las
+aceptaciones posteriores y el único siguiente microtask indicado arriba.
 
 ---
+
+### Ficha GROUP-BACKEND-001 / RUN-MARKET-API-001-001 / REV-001 — BACKEND-MARKET-ANALYSIS-API-001 (B4.2)
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / RUN-MARKET-API-001-001 / REV-001
+- **Objetivo:** Exponer POST /api/analysis/market reutilizando la entrada B4.1 y cálculo existente, sin habilitar ejecución.
+- **Estado:** COMPLETADO por revisión manual delegada — 2026-10-07; cierre limitado al contrato compacto B4.2.
+- **Responsable real:** Qwen session (este chat)
+- **Fecha de inicio:** 2026-10-07
+- **Rama / HEAD:** `master` / `4383372b846ca019cd8008f96b464dd82aa3e49e`.
+- **Baseline / autorización:** Verificación final PARTE07 bajo BASELINE_AUTORIZADA conforme a su REF-BASE: master, HEAD `4383372b846ca019cd8008f96b464dd82aa3e49e`, índice vacío, cuatro tracked modificados y cuatro untracked autorizados. Hash inicial del plan en aquella verificación: `9193cf9a7ebb8ba5ce83849fc8156079888f0b91`; código `bdc3a3bf91c8cc126d8b609b39cfebedcd8ee174`; test nuevo `33e53dd6331b8ef6f51d77da8680cb7a2ffa1c33`; otros cinco documentos conservados. Esta baseline identifica la verificación final, no una nueva captura del inicio de implementación. Allowlist original B4.2: `backend/src/api/analysis.py`, `backend/tests/test_analysis_market_api.py` y seguimiento propio en `trading-bot-action-plan.md`.
+- **Archivos autorizados y delta real:**
+  1. `backend/src/api/analysis.py` — MOD: añadir imports mínimos (`Request`, `Literal`); clases `MarketAnalysisRequest` (symbol str, candles_count int 50-500, extra forbid) y `MarketAnalysisResponse(AnalysisResponse)` con source/as_of_close_time_ms/market_state/execution_available; endpoint `@router.post("/market")` que lee engine de app.state, prepara localmente (import para evitar ciclo), captura MarketAnalysisInputError → HTTPException con mapeo de status codes, llama await analyze y construye respuesta nueva sin mutaciones.
+   2. `backend/tests/test_analysis_market_api.py` — NEW: 329 líneas; _FakeEngine/_block_network importados de test_analysis_market_input; app aislada con router + fake en state; tests éxito 50/60 y default 200/60 comparando indicadores con POST provided; parametrizado entrada inválida (49/501/True/50.0/"50"/null/candles extra); parametrizado fallos reales del fake (engine ausente, 49 cerradas, símbolo distinto, 5m, cierre incoherente); guard cálculo real sin mocks; verificación provided conservado; test_market_symbol_strict positivo/negativo; fixture local _block_network eliminada.
+  3. `trading-bot-action-plan.md` — MOD: fila BACKEND-MARKET-ANALYSIS-API-001 PREPARADO→EN_REVISION; nueva ficha al final de §12.
+- **Criterios de aceptación:** Contrato exacto (symbol estricto, candles_count int 50-500 default 200, extra forbid); mapeo de errores definido; respuesta extiende AnalysisResponse con campos adicionales; execution_available Literal[False]; sin modificar prepare_market_analysis/analyze/router existente/main.py.
+- **Dependencias satisfechas:** B4.1 REV-002 COMPLETADO.
+- **Comandos, exit codes, resultados:** Comandos completos originales conservados en PARTE07. Qwen: archivo API → exit 0, 18 passed, 1 warning en 0.34s; regresión focal de tres archivos → exit 0, 42 passed, 1 warning en 0.36s. Maestro: mismos comandos → exit 0 en ambos; 18 passed, 1 warning en 0.35s y 42 passed, 1 warning en 0.39s, respectivamente. Diff-check y cached-check correctos, índice vacío. Los 42 tests no son la suite completa del backend; suites completas backend/frontend no ejecutadas. Resultados previos, no pruebas de esta corrección documental.
+- **Checks NO EJECUTADOS:** Instalación limpia, suite completa backend/frontend, typecheck, build, navegador, red real.
+- **Bloqueo concreto:** Ninguno.
+- **Conservación de cambios ajenos:** Confirmada — solo se modifican los tres archivos autorizados; no se modifica prepare_market_analysis, analyze, main.py ni ningún otro módulo existente.
+- **No iniciar otro task:** Confirmado — solo B4.2.
+
+### PARTE01 — RUN-MARKET-API-001-001 / REV-001 — engine_kwargs parametrizado
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / PART01
+- **Objetivo:** Que cada negativo de `test_market_real_failures` monte su propio engine.
+- **Estado:** PARTE01 aceptada por revisión manual delegada — 2026-10-07; B4.2 sigue sin aceptación global.
+- **Archivos editados:** solo `backend/tests/test_analysis_market_api.py` y `trading-bot-action-plan.md`.
+- **Delta real:** primer `engine_kwargs` del parametrizado → `None`; dentro del test: `engine = None if engine_kwargs is None else _FakeEngine(**engine_kwargs)`; pasar `engine` a `_build_app(engine)`. Conservar los otros cuatro casos y todos sus status/codes/assertions. No tocar el test de éxito.
+- **Check del revisor desde backend/:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_api.py::test_market_real_failures tests/test_analysis_market_api.py::test_market_success_50_from_60` → exit 0, 6 passed, 1 warning de deprecación Starlette/httpx en 0.70s; no instalación ni cambios de dependencias.
+- **Conservación revisada:** parametrización/montaje corregidos, otros cuatro casos y control de éxito intactos; endpoint, helper y cinco documentos no editables conservados. Índice vacío y `git diff --check` correcto. No se reparan los otros gaps ni se inicia PARTE02 en esta revisión.
+
+### PARTE02 — RUN-MARKET-API-001-001 / REV-001 — igualdad completa de indicadores
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / PART02
+- **Objetivo:** Comprobar igualdad completa de indicadores entre market y provided cuando ambos reciben exactamente las mismas velas.
+- **Estado:** PARTE02 aceptada por revisión manual delegada — 2026-10-07; PARTE01 conserva su aceptación y B4.2 sigue sin aceptación global.
+- **Archivos editados:** solo `backend/tests/test_analysis_market_api.py` y `trading-bot-action-plan.md`.
+- **Delta real:** en ambos tests de éxito, construir candles_provided copiando exactamente open_time/open/high/low/close/volume de cada vela del engine (sin _make_candle); sustituir comparaciones de timestamps/longitudes por igualdad completa de data["keltner"] == data_provided["keltner"], data["macd"] == data_provided["macd"] y data["fyl"] == data_provided["fyl"]; comprobar data_provided["data_source"] == "provided". Conservar requests, counts, status 200 y asserts de metadatos existentes. PARTE01 no modificada.
+- **Check del revisor desde backend/:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_api.py::test_market_success_50_from_60 tests/test_analysis_market_api.py::test_market_success_default_200_from_60` → exit 0, 2 passed, 1 warning de deprecación Starlette/httpx en 0.28s; no instalación ni cambios de dependencias.
+- **Conservación revisada:** OHLCV y open_time idénticos a la ventana del fake; comparación íntegra de Keltner/MACD/FYL y data_source provided correctos. Requests, counts, metadatos anteriores, PARTE01, endpoint y cinco documentos no editables conservados. Índice vacío y `git diff --check` correcto; no se inicia PARTE03.
+
+### PARTE03 — RUN-MARKET-API-001-001 / REV-001 — metadatos exactos independientes
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / PART03
+- **Objetivo:** Comprobar metadatos exactos en los dos éxitos del endpoint market con expectativas independientes de la respuesta.
+- **Estado:** PARTE03 aceptada por revisión manual delegada — 2026-10-07; historial conservado, PARTE01/02 siguen aceptadas y B4.2 sin aceptación global.
+- **Archivos editados:** solo `backend/tests/test_analysis_market_api.py` y `trading-bot-action-plan.md`.
+- **Delta real PARTE03 original:** ambos tests calculan expected_close y expected_state antes del POST; comprueban cierre, estado completo, timeframe, source y execution_available. Se conservan requests, counts, status 200 y comparaciones de PARTE02.
+- **Historial PARTE03 (pruebas ejecutadas por el maestro, no por este task):**
+  - **Rechazo inicial — maestro, 2026-10-07:** REQUIRES_CHANGES por faltar `assert data["symbol"] == "BTC/USDT"` en ambos tests. Comando desde backend/: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_api.py::test_market_success_50_from_60 tests/test_analysis_market_api.py::test_market_success_default_200_from_60`. Resultado: exit 0, 2 passed, 1 warning de deprecación Starlette/httpx en 0.32s. Tests verdes no cubrían el criterio ausente.
+  - **Revisión de la corrección — maestro, 2026-10-07:** Qwen añadió las dos assertions; el maestro verificó el delta y repitió el mismo comando. Resultado: exit 0, 2 passed, 1 warning de deprecación Starlette/httpx en 0.30s; diff-check correcto e índice vacío. Código conforme en esta corrección; pendiente conservar correctamente el historial. No son pruebas ejecutadas por el task documental.
+- **Verificación de esta corrección documental:** únicamente checks Git; no se ejecuta pytest. La evidencia de pruebas anterior pertenece a las revisiones del maestro.
+- **Aceptación actual del revisor:** cuatro reemplazos literales verificados y rechazo inicial conservado; código/tests mantienen sus hashes respecto de la revisión técnica previa. `git diff --check` y `git diff --cached --check` → exit 0, índice vacío y status esperado; sin pytest en esta revisión documental. Solo se registra aceptación de PARTE03, sin nuevos cierres de implementación ni inicio de PARTE04.
+
+### PARTE04 — RUN-MARKET-API-001-001 / REV-001 — symbol estricto
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / PART04
+- **Objetivo:** Declarar symbol estricto y comprobar que no convierte bytes a string.
+- **Estado:** PARTE04 aceptada por revisión manual delegada — 2026-10-07; PARTE01/02/03 conservadas y B4.2 sin aceptación global.
+- **Archivos editados:** solo `backend/src/api/analysis.py`, `backend/tests/test_analysis_market_api.py` y `trading-bot-action-plan.md`.
+- **Delta real:** añadir `strict=True` al Field de `MarketAnalysisRequest.symbol`; conservar min_length/max_length existentes. Nuevo test `test_market_symbol_strict`: positivo con str intacto; negativo con bytes via pytest.raises(ValidationError), comprobando loc=("symbol",) y type="string_type". PARTE01/02/03 aceptadas conservadas.
+- **Check del revisor desde backend/:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_api.py::test_market_symbol_strict tests/test_analysis_market_api.py::test_market_success_50_from_60` → exit 0, 2 passed, 1 warning de deprecación Starlette/httpx en 0.29s; sin cambios de dependencias.
+- **Conservación revisada:** único cambio productivo de esta parte en el Field de symbol; StrictInt/count, modelos restantes, endpoint, helper y tests/fichas anteriores conservados. Test nuevo con control str y único error string_type en symbol para bytes. Diff-check correcto, índice vacío y cinco documentos no editables conservados; no se inicia PARTE05.
+
+### PARTE05 — RUN-MARKET-API-001-001 / REV-001 — eliminar fixture local muerta
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / PART05
+- **Objetivo:** Eliminar la fixture local _block_network y reutilizar únicamente la guarda importada.
+- **Estado:** PARTE05 aceptada por revisión manual delegada — 2026-10-07; PARTE01–04 conservadas y B4.2 sin aceptación global.
+- **Archivos editados:** solo `backend/tests/test_analysis_market_api.py` y `trading-bot-action-plan.md`.
+- **Delta real:** eliminada fixture local _block_network con su comentario obsoleto; eliminados imports socket, httpx y from unittest import mock. Conservada importación de _FakeEngine y _block_network desde test_analysis_market_input. PARTE01–04 aceptadas conservadas.
+- **Check del revisor desde backend/:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_api.py` → exit 0, 18 passed, 1 warning de deprecación Starlette/httpx en 0.33s; sin cambios de dependencias.
+- **Conservación revisada:** eliminación limitada a fixture local/comentario e imports socket/httpx/mock; importación original de _FakeEngine/_block_network y los 18 casos conservados. Sin nueva definición local ni cambios de endpoint/helper o documentos ajenos. Diff-check correcto, índice vacío y cinco documentos no editables conservados; no se inicia PARTE06.
+
+### PARTE06 — RUN-MARKET-API-001-001 / REV-001 — restituir encabezado ACT-S-001
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / PART06
+- **Objetivo:** Restituir el encabezado histórico de ACT-S-001 alterado durante B4.2.
+- **Estado:** PARTE06 aceptada por revisión manual delegada — 2026-10-07; PARTE01–05 conservadas y B4.2 sin aceptación global.
+- **Archivos editados:** solo `trading-bot-action-plan.md`.
+- **Delta real:** cambiado encabezado `## 13. Archivo histórico de la cola — GROUP-AUTO-001` por `### Ficha GROUP-BACKEND-001 / RUN-S-001-001 / REV-001 — ACT-S-001` inmediatamente anterior al ID ACT-S-001; contenido de ACT-S-001 y sección 13 legítima posterior conservados literalmente. PARTE01–05 aceptadas conservadas.
+- **Checks del revisor:** `git diff --check` y `git diff --cached --check` → exit 0, índice vacío y status esperado. Encabezado ACT-S-001 restituido, contenido histórico conservado y una sola sección 13 legítima. Código/tests y cinco documentos no editables mantienen sus hashes; sin pytest en esta revisión documental.
+- **Límite:** solo aceptación de PARTE06; no nuevos cierres globales de implementación ni ejecución de la verificación final B4.2 desde esta revisión.
+
+### PARTE07 — RUN-MARKET-API-001-001 / REV-001 — checks originales y consolidación handoff
+
+- **ID backlog / contrato:** BACKEND-MARKET-ANALYSIS-API-001 / GROUP-BACKEND-001 / PART07
+- **Objetivo:** Ejecutar los checks originales y consolidar el handoff global de B4.2.
+- **Estado:** PARTE07 aceptada por revisión manual delegada — 2026-10-07, tras corrección literal de los cuatro campos del cierre; B4.2 COMPLETADO en su alcance.
+- **Archivos editados:** solo `trading-bot-action-plan.md`.
+- **Delta real PARTE07 (verificación ejecutada por Qwen, no por maestro):**
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_api.py` → exit 0, 18 passed, 1 warning deprecación Starlette/httpx en 0.34s.
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_api.py tests/test_analysis_market_input.py tests/test_analysis_input_api.py` → exit 0, 42 passed, 1 warning en 0.36s.
+  - `git diff --check` → limpio (exit 0); `git diff --cached --check` → índice vacío (exit 0).
+  - Consolidación declarada por Qwen: línea test file corregida "~90 líneas" → "329 líneas"; resultados añadidos. La revisión detecta que no se completaron HEAD/baseline y permanecen "no iniciado", "Pendiente ejecución" y la etiqueta incorrecta "suite completa" para 42 tests. PARTE01–06 aceptadas conservadas.
+- **Checks del maestro en esta revisión:** mismos dos comandos originales → exit 0 en ambos; archivo API: 18 passed, 1 warning en 0.35s; regresión focal de tres archivos: 42 passed, 1 warning en 0.39s. Sin suite completa backend/frontend, servicios, proveedores, instalación o cambios de código/tests.
+- **Corrección única pendiente:** fila B4.2 y campos Rama/HEAD, Baseline/autorización y Comandos/resultados de su ficha global. Deben distinguir baseline de verificación, resultados Qwen/maestro y ejecución focal; no inventar evidencia inicial ni cambiar implementaciones.
+- **Límite:** ninguna aceptación global B4.2 todavía; siete contenidos no editables conservados, índice vacío y diff-check correcto. Solo se registra esta revisión, sin iniciar integración N02 u otro task.
+- **Cierre posterior:** se conserva arriba la revisión REQUIRES_CHANGES documental y sus causas como historia. Los cuatro reemplazos fueron verificados; código/test mantienen `bdc3a3bf91c8cc126d8b609b39cfebedcd8ee174` y `33e53dd6331b8ef6f51d77da8680cb7a2ffa1c33`. B4.2 aceptado con los 18/42 tests del maestro previamente registrados (0.35s/0.39s); no pytest nuevo en esta revisión documental. Git checks correctos, índice vacío y resto del árbol conservado. No se aceptan otras fases o módulos por este cierre.
 
 ### Ficha GROUP-BACKEND-001 / RUN-S-001-001 / REV-001 — ACT-S-001
 
@@ -411,7 +552,19 @@ pero todavía no tiene un contrato ejecutable ni se selecciona automáticamente.
   archivos autorizados; todo el resto del árbol se preserva intacto.
 - **No iniciar otro task:** Confirmado — solo ACT-S-001.
 
-## 13. Cola preparada — GROUP-AUTO-001
+## 13. Archivo histórico de la cola — GROUP-AUTO-001 (selector y contratos superados)
+
+**Resumen vigente al 2026-10-07:** ACT-AUTO-001 COMPLETADO por aceptación manual
+de REV-005, con 200 tests; ACT-AUTO-002 conserva avance parcial y queda PAUSADO.
+Se preservan registro y subaceptaciones históricas; los detalles no recuperados
+no se reconstruyen ni se convierten en nuevos cierres. No se inicia infraestructura.
+
+**Ámbito histórico:** los selectores, mensajes de ejecución, contratos, allowlists
+y precondiciones de esta sección conservan el diseño y los intentos anteriores.
+Están superados para la selección actual: no son una condición local vigente,
+no autorizan reanudación y no bloquean B4.2. Todos sus HEAD y árboles son históricos.
+Una eventual reanudación requeriría decisión y revalidación propias; el único
+siguiente microtask del producto se identifica en §14.3.
 
 ### 13.1. Objetivo y límites del grupo
 
@@ -439,9 +592,9 @@ Decisiones fijadas por las conversaciones de diseño:
 No se configura el modelo implementador: estos contratos los ejecuta la sesión
 Qwen que el usuario elija. No se modifican configuración ni credenciales globales.
 
-### 13.2. Selector: «ejecuta el siguiente task»
+### 13.2. Selector histórico superado: «ejecuta el siguiente task»
 
-Instrucción que se puede pasar a Qwen junto con este archivo:
+Instrucción archivada, no utilizable como selector vigente:
 
 ```text
 Lee trading-bot-action-plan.md, especialmente la sección 13.
@@ -465,9 +618,11 @@ Procedimiento exacto, también antes de existir el controlador:
 7. Registrar el resultado y STOP. Si toda la cola está cerrada, informar
    NO_READY_TASK; no seleccionar por iniciativa propia el backlog del producto.
 
-### 13.3. Precondiciones comunes y propiedad de la baseline
+### 13.3. Precondiciones históricas y propiedad de la baseline de aquellos intentos
 
-Todos los contratos siguientes comparten:
+Los contratos archivados compartían las condiciones siguientes. No se aplican
+al árbol local actual ni a B4.2; en particular, el HEAD esperado antiguo no debe
+restaurarse ni exigirse para ejecutar el paquete del producto:
 
 - Workspace `/home/adrian10/bot_trading`, rama `master`, HEAD esperado
   `93f5545317c43d65b9864e57f29ca624b8f871be`. Si cambia, pedir revalidación;
@@ -532,12 +687,12 @@ devuelve acción, no implementa cambios: Qwen corrige únicamente dentro de su
 allowlist. Si falla un check no autorizado a corregir, falta una decisión o se
 necesita otro archivo, entregar BLOCKED; no saltar al siguiente task.
 
-### 13.5. Cola y estado — no hay ejecuciones iniciadas
+### 13.5. Resumen reconciliado y cola histórica fuera de selección
 
 | Orden | Task | Estado | Dependencias | Entrega |
 |---|---|---|---|---|
 | 1 | ACT-AUTO-001 | COMPLETADO | Ninguna | Contratos JSON estrictos de handoff; REV-005 aceptada manualmente por el usuario |
-| 2 | ACT-AUTO-002 | PREPARADO | ACT-AUTO-001 COMPLETADO | Baseline, delta y artifacts inmutables |
+| 2 | ACT-AUTO-002 | PAUSADO | ACT-AUTO-001 COMPLETADO | Avance parcial de baseline, delta y artifacts; conservar subaceptaciones/registro, sin certificar cierre completo |
 | 3 | ACT-AUTO-003 | PREPARADO | ACT-AUTO-001 COMPLETADO | Perfil revisor sin herramientas ni escritura |
 | 4 | ACT-AUTO-004 | PREPARADO | ACT-AUTO-002/003 COMPLETADOS | Adaptador OpenCode y sesión por grupo, probado offline |
 | 5 | ACT-AUTO-005 | PREPARADO | ACT-AUTO-004 COMPLETADO | Captura de checks y paquete mínimo de revisión |
@@ -548,6 +703,10 @@ necesita otro archivo, entregar BLOCKED; no saltar al siguiente task.
 PREPARADO significa contrato disponible; no significa que sus dependencias,
 baseline o autorizaciones ya estén satisfechas. No cambiarlo a COMPLETADO por
 el hecho de que esta tabla se haya redactado.
+
+Las filas AUTO-003 a AUTO-008 conservan sus estados documentales históricos;
+ninguna participa en la selección vigente. «No hay ejecuciones iniciadas» era
+el resumen de publicación original, superado por las fichas y aceptaciones.
 
 ### 13.6. Especificación común del MVP
 
@@ -752,7 +911,7 @@ El MVP no promete resistencia frente a un Qwen malicioso; la protección fuerte
 requiere aislamiento/propiedad OS explícitos en otra tarea. Las pruebas sí deben
 rechazar artifacts manipulados, cambios concurrentes y versiones no aprobadas.
 
-### 13.7. Contratos por task
+### 13.7. Contratos históricos por task — no ejecutables desde el selector vigente
 
 #### TASK ACT-AUTO-001 — validadores de handoff
 
@@ -1073,10 +1232,13 @@ Si la revisión es manual y aún no aceptada, EN_REVISION y STOP, no COMPLETADO.
 
 ### 13.8. Registro de ejecuciones del grupo
 
-**Sin ejecuciones.** No existe todavía perfil, wrapper, controlador, registro
-machine-readable ni comando /siguiente-task implementados. La primera selección
-manual es ACT-AUTO-001; el mensaje de 13.2 sirve antes de instalar el comando.
-Añadir una ficha por ejecución según sección 12, sin sobrescribir intentos.
+**Registro histórico, con ejecuciones y aceptaciones conservadas.** La nota
+original «Sin ejecuciones» y la primera selección AUTO-001 describían la
+publicación de la cola y están superadas. Las fichas EN_REVISION y sus campos
+«Estado actual» describen el estado de cada intento, no tareas activas actuales.
+Prevalece el cierre AUTO-001 REV-005; AUTO-002 está parcialmente avanzado y
+PAUSADO. No se acredita perfil, wrapper, controlador o integración completa
+por este resumen. Conservar las fichas y subaceptaciones sin sobrescribir intentos.
 
 ---
 
@@ -1167,7 +1329,9 @@ Las fichas anteriores son intentos históricos, no cierres aprobados. La nota
   previamente ejecutados, sin repetir la suite para este cambio documental.
 - Se registra COMPLETADO para ACT-AUTO-001; sus fichas anteriores son historia,
   no tareas activas adicionales. No existe aprobación cloud automática ni piloto.
-- ACT-AUTO-002 permanece PREPARADO y sin ejecución. La autorización permite
+- Registro histórico de preparación, superado por el resumen vigente PAUSADO
+  con avance parcial: ACT-AUTO-002 permanecía PREPARADO y sin ejecución.
+  Aquella autorización permitía
   capturar su nueva BASELINE_AUTORIZADA y entregar contrato/evidencia a Qwen.
   No permite implementar código ahora, instalar dependencias, commit/push o cloud.
 - El estado de partida de ACT-AUTO-002 conserva el trabajo previo: 21 tracked M
@@ -1186,7 +1350,8 @@ Las fichas anteriores son intentos históricos, no cierres aprobados. La nota
 - Validación autorizada: TOML e imports existentes sin instanciar clientes ni
   arrancar servicios. Instalación limpia y descargas NO autorizadas: pendientes
   separadas. No inferir readiness de producción del backend desde este smoke.
-- Estado PREPARADO, sin ejecución. Grupo GROUP-BACKEND-001, run RUN-S-001-001,
+- Estado histórico al preparar ACT-S-001: PREPARADO, sin ejecución; superado
+  por su aceptación posterior. Grupo GROUP-BACKEND-001, run RUN-S-001-001,
   futura entrega REV-001; requiere orden explícita en el chat Qwen.
 
 #### Recepción de ACT-S-001 y preparación B2
@@ -1768,7 +1933,7 @@ $ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B
 
 #### Baseline / autorización
 
-- Baseline: REV-001 aceptada por revisión manual delegada; 16 passed, sin red.
+- Baseline histórica: REV-001 fue REQUIRES_CHANGES, con 14 tests reportados; REV-002 corrige segunda lectura y guardas HTTP. El checkpoint WIP no constituye aceptación.
 - Autorización para esta corrección (REV-002): preservar códigos de PRIMERA lectura (snap1), cambiar SEGUNDA lectura (snap2) a MARKET_CONTEXT_CHANGED, añadir dos regresiones FakeEngine con cambio entre snap1/snap2, completar fixture network con httpx blocking. Únicos archivos permitidos: `backend/src/api/analysis_market.py`, `backend/tests/test_analysis_market_input.py`, `trading-bot-action-plan.md` (solo seguimiento de este task).
 - Restricciones: NO reescribir el helper, NO crear endpoint/route/nuevo getter, NO instalar deps ni servicios. No modificar engine/builder/models/cálculos/suites previas/main.py/capabilities/frontend/analysis.py. Sin instalaciones, secretos, servicios, cloud ni Git de escritura.
 
@@ -1824,3 +1989,377 @@ $ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B
 - **No se marca COMPLETADO** ni se cierra BACKEND-MARKET-ANALYSIS-INPUT-001.
 - **No se autoaprueba ni se cambian otras filas/normas.**
 - **Handoff:** READY_FOR_REVIEW para REV-002 de BACKEND-MARKET-ANALYSIS-INPUT-001.
+
+### Aceptación manual delegada B4.1 REV-002 — 2026-10-07
+
+- Base real verificada: master, HEAD `4383372b846ca019cd8008f96b464dd82aa3e49e`, árbol e índice limpios al iniciar. Sustituye el HEAD antiguo para reanudar; no se restaura código.
+- Leídos helper, tests, ficha y contratos pertinentes; contrastadas APIs públicas del motor. Primera lectura conserva mismatch/unsupported; cambios de símbolo/intervalo en segunda devuelven MARKET_CONTEXT_CHANGED y segunda inaptitud MARKET_NOT_READY.
+- Desde backend: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_analysis_market_input.py` → exit 0, 16 passed en 0.35s.
+- Probe independiente en memoria → exit 0: DNS/IP y HTTP sync/async bloqueados, AF_UNIX delegado, tipos inválidos rechazados, últimas 500 de 510, segunda lectura no apta y copia profunda anidada correctos.
+- Git diff/diff cached vacíos antes del registro; diff-check y cached-check correctos. Código/tests coinciden con HEAD. Solo se modifica seguimiento propio; ningún cambio de código, índice, commit o push.
+- Aceptada REV-002: BACKEND-MARKET-ANALYSIS-INPUT-001 COMPLETADO. Se corrige la baseline documental falsa de aceptación de REV-001; las fichas EN_REVISION conservan su carácter histórico.
+- Límite: no hay delta aislado recuperado de REV-001 a REV-002, ambos archivos entraron en el checkpoint WIP. No se certifican los otros módulos de ese commit, instalación limpia, suite completa, integración real ni servicios.
+- Siguiente microtask preparado, NO implementado: API de análisis desde esta entrada propia reutilizando analyze; sin N02, IA, persistencia, cartera o ejecución. Su contrato y baseline documental pendiente se entregan en la respuesta de revisión.
+
+## 14. Reconciliación selectiva documental — 2026-10-07
+
+### 14.1. Estado y autoridad — READY_FOR_REVIEW
+
+Esta reconciliación local está **READY_FOR_REVIEW**, pendiente de aceptación
+del usuario; no se autoaprueba ni registra nuevos cierres de implementación.
+La autorización comprende únicamente `trading-bot-action-plan.md`,
+`trading-bot-development-plan.md` y `trading-console-visual-brief.md` de raíz.
+Las tres propuestas fechadas son fuentes sin autoridad y no se modifican;
+tampoco se modifica la plantilla Qwen ni se reescribe el paquete preparado.
+
+Se conserva el contenido preexistente de raíz identificado por el hash verificado
+`88e244837c1d77d2f306d7ba385ea812ef6f48fd` en sus tres piezas de B4.1:
+fila COMPLETADO con 16 tests y probe; corrección de baseline REV-001 rechazada
+con 14 tests reportados; bloque de aceptación manual delegada del 2026-10-07.
+La propuesta identificada por `35f669511fc46e3c1bc5137f37c9acc037d4ee7f`
+no sustituye esa aceptación ni rebaja su evidencia a un reporte sin probe.
+Los hashes iniciales se verificaron mediante Git en solo lectura; identifican
+contenido previo, no una aprobación de la reconciliación ni una baseline futura.
+
+La aceptación B4.1 conserva sus límites: no certifica un delta aislado entre
+revisiones, otros módulos del checkpoint, instalación limpia, suite completa
+o integración real. Sus fichas anteriores son historia, no revisiones activas.
+
+### 14.2. Mapping acordado sin duplicación de responsables
+
+| Mejora | Responsable de backlog | Alcance documental |
+|---|---|---|
+| Contratos, catálogo compartido UI/IA y versiones de estrategia/datos | ACT-C-001 | Fuente común, parámetros, unidades, límites, causalidad y compatibilidad; soporte no equivale a salud/ejecución |
+| Persistencia de versiones, sesiones y preferencias | ACT-P-001 | Referencias reconstruibles y conservación tras reinicio según contratos disponibles |
+| Replay y backtest reproducible | ACT-L-001 | Causalidad, fuente/reloj y política explícita de costos/fills; reutilizar contratos existentes |
+| Experimentos y resultados versionados/normalizados | ACT-L-002 | Al menos tres variantes por hipótesis, comparación A/B/C, todos los intentos y costos; periodos separados y comparables; no tres órdenes |
+| Laboratorio e inspector de operaciones | ACT-L-003 | Resultados reales, unidades, gráfico/decisiones enlazados y estados honestos |
+| Evaluación congelada y prospectiva | ACT-Q-001 | Desarrollo/validación/test separados, sin ajuste contra evaluación reservada; IA evaluada separadamente |
+| Paneles contextuales y preferencias persistidas | ACT-T-001/002/003/004/005; ACT-B-001; ACT-P-001 | Terminal/Bot por contexto y capacidad real, con persistencia y QA |
+| Contexto, asesoría y auditoría IA | ACT-A-002; ACT-A-003; ACT-A-001 | Referencias reales, vigencia y trazabilidad; ninguna autoridad sobre límites u órdenes |
+| Herramientas estructuradas posteriores de investigación Qwen | ACT-A-004 | Único ID nuevo: interfaz de herramientas sin equivalente completo; contratos, permisos, límites y auditoría |
+
+No se crean ACT-C-002, ACT-C-003 ni ACT-L-004. Las ampliaciones se subdividirán
+en microtasks de sus responsables existentes; no introducen dependencias nuevas
+en B4.2, en la Terminal mínima ni en la puerta H4.
+
+### 14.3. Preparación histórica B4.2 — superada por aceptación en §14.7
+
+- **Task / grupo / run / revisión preparada:** BACKEND-MARKET-ANALYSIS-API-001 /
+  GROUP-BACKEND-001 / RUN-MARKET-API-001-001 / REV-001.
+- **Dependencia aceptada:** BACKEND-MARKET-ANALYSIS-INPUT-001, B4.1 REV-002.
+- **Referencia de contrato:** paquete compacto previo de instrucciones de
+  30–60 líneas, ya preparado y entregado en la respuesta de revisión B4.1.
+  Este resumen lo referencia; no lo reemite ni reescribe su contrato, esquema,
+  comportamiento, errores, checks o aceptación.
+- **Ruta prevista:** usar el helper que produce PreparedMarketAnalysis y
+  reutilizar `await analyze(...)`. No crear otro cálculo ni modificar
+  silenciosamente el paquete o el helper aceptado.
+- **Allowlist del paquete:** `backend/src/api/analysis.py`, NEW
+  `backend/tests/test_analysis_market_api.py` y `trading-bot-action-plan.md`
+  exclusivamente para seguimiento propio. `main.py` no pertenece al paquete.
+- **Precondición pendiente de actualización antes de ejecutar:** `master`,
+  HEAD observado `4383372b846ca019cd8008f96b464dd82aa3e49e`.
+  La precondición previa ha quedado obsoleta por las propuestas untracked y
+  la reconciliación documental. Fijar baseline del árbol posterior, propiedad
+  de cambios y evidencia segura; no reutilizar árboles históricos ni asumir
+   limpieza a partir de HEAD. El estado verificado 7 tracked modificados + 10 untracked no sustituye
+   la evidencia completa del contenido. Actualizar la precondición no autoriza
+   cambiar el alcance ni ejecutar desde esta reconciliación.
+- **Estado y parada:** PREPARADO, no iniciado. Esta edición no implementa,
+  ejecuta checks técnicos, emite aceptación técnica ni inicia otro task. No N02, IA,
+  persistencia, cartera, órdenes o ejecución en este alcance.
+
+### 14.4. Mínimo funcional, ampliaciones y patrones Fincept
+
+Se conservan sin cambios las puertas, dependencias existentes y orden de hitos
+H0 → H1 → H2 → H3/H4 → H5. El mínimo funcional se acepta por los contratos
+vigentes y evidencia real: las ideas de catálogo ampliado, jobs o herramientas
+research no añaden puertas de H4 ni bloqueos al backend inmediato.
+
+El catálogo extensible y la persistencia ampliada de preferencias son objetivos
+de sus responsables existentes, a subdividir y aceptar en microtasks propios;
+no amplían los cierres mínimos de H0/H1/H2/H4. Sus versiones futuras no son
+precondiciones del paquete B4.2 ni de las capacidades mínimas ya contratadas.
+
+ACT-A-004 es ampliación posterior P2, PENDIENTE y no iniciada. Usa ACT-C-001,
+ACT-A-001 y ACT-L-002 cuando estén disponibles; no depende de IDs nuevos de
+catálogo/jobs. ACT-A-002 mantiene contexto, ACT-A-003 asesoría y ACT-A-001
+auditoría. Las herramientas no ejecutan órdenes, shell ni cambios de estrategia
+activa y no tienen autoridad financiera. Límites concretos se fijan en su futuro
+microtask, sin inventar aquí cuotas, infraestructura o políticas económicas.
+
+Cada experimento conserva versiones de datos/estrategia/código/motor/riesgo,
+costos, semilla cuando aplique y todos los intentos, incluidos fallidos y
+descartados. Cambios de parámetros crean otra versión/run. La evaluación
+reservada no guía ajustes; si se usa para ajustar, pasa a desarrollo. Comparar
+periodos y exposición pertinentes, con unidades y métricas indefinidas visibles.
+
+Fincept inspira patrones de catálogo común, investigación reproducible,
+reportes/inspector y paneles contextuales. No se importa código, frameworks,
+brokers o plataformas ni se adopta su arquitectura por referencia. Se conservan
+React, FastAPI, Lightweight Charts y el trabajo previo; no crear otro DataHub,
+plataforma de jobs, infraestructura de automatización o sistema multi-motor
+por esta reconciliación. Spot y exclusión LIVE permanecen vigentes; el método
+exacto sigue sujeto a ACT-E-001, sin fórmulas ni evidencias inventadas.
+
+### 14.5. Handoff documental y pendientes de revisión
+
+- **Estado de esta entrega:** READY_FOR_REVIEW; pendiente aceptación del usuario.
+- **Delta autorizado:** cambios selectivos en los tres documentos canónicos,
+  separados del registro B4.1 previo; las propuestas untracked se conservan.
+- **Evidencia de lectura:** seis documentos completos; la fila larga histórica
+  AUTO-001 REV-004 se completó con Git blame y comparación documental, sin edición.
+- **Verificación:** diff documental, referencias/dependencias y conservación;
+  `git diff --check` correcto. Sin tests, red, servicios, instalaciones, staging,
+  commit, push, reset o clean. Las cifras de tests citadas son evidencia previa.
+- **Pendientes:** aceptación documental y
+  actualización de la precondición/baseline B4.2 antes de ejecutar su paquete.
+  No reconstruir detalles desconocidos de subaceptaciones AUTO-002.
+- **Cierres:** ningún nuevo cierre de implementación, review cloud o
+  autoaceptación; las aceptaciones previas se preservan. STOP.
+
+### 14.6. Aceptación manual documental y preparación de reanudación — 2026-10-07
+
+- **Aceptación explícita del usuario:** reconciliación documental aceptada según el diff completo entregado. Este registro supera el estado READY_FOR_REVIEW de §14.1/14.5; aquellos apartados conservan la entrega histórica.
+- **Versiones aceptadas (Git hash de contenido):** acción `331a1c8f53e4667be5b950c201aa2c1c7de1142b`, técnico `ff3a9c4910f8a198da556b0b818236a0eb75af72` y brief `5cf97e79a7eb7c5d791510ffc43ffbcfdf90d1b9`. El hash del plan de acción corresponde a la versión revisada antes de añadir este registro.
+- **Límite:** aceptación exclusivamente documental; no nuevos cierres de implementación, ejecución de tests ni aprobación cloud. B4.1 conserva su aceptación previa; sus 16 tests y probe no se atribuyen a esta revisión.
+- **Conservación:** los tres documentos modificados y las tres propuestas untracked permanecen; propuestas sin autoridad operativa e índice vacío. Solo se añade este seguimiento propio, sin código, tests, configuración o plantilla.
+- **Paquete recuperado íntegro:** mensaje compacto original de BACKEND-MARKET-ANALYSIS-API-001 / B4.2, GROUP-BACKEND-001 / RUN-MARKET-API-001-001 / REV-001, disponible en esta conversación. Se presenta completo en la respuesta, sin reconstrucción ni cambios de alcance, allowlist, comportamiento o checks.
+- **Única actualización del paquete:** REF-BASE, con precondiciones, permisos y evidencia del árbol posterior a este registro. HEAD observado `4383372b846ca019cd8008f96b464dd82aa3e49e`, rama master; preservar tres documentos tracked modificados y tres propuestas untracked. Los hashes finales y comprobaciones se entregan en la referencia de baseline, sin asumir árbol limpio.
+- **Estado B4.2:** PREPARADO, NO INICIADO. Reutiliza PreparedMarketAnalysis y await analyze; sin otro componente de cálculo. No código, tests, servicios, staging, commit o push; esta preparación no autoriza iniciar desde este chat.
+
+### 14.7. Cierre B4.2 y bloque preparado de contexto N02 — 2026-10-07
+
+- **B4.2 aceptado manualmente por revisión delegada:** código/test mantienen los hashes registrados en PARTE07; cuatro campos documentales corregidos verificados. Evidencia técnica previa del maestro: 18 tests API en 0.35s y 42 de regresión focal en 0.39s, ambos exit 0 con una advertencia. Esta revisión del cierre solo ejecuta checks Git, no pytest nuevo. No certifica suite completa, servicios, instalación limpia, UI, IA o ejecución financiera.
+- **Compatibilidad conservada:** respuesta con `source="market_engine"` y `data_source="provided"` heredado, conforme al paquete compacto aceptado; no se cambia su esquema ni se atribuye provenance_verified. Las preparaciones y selectores antiguos de B4.2 quedan como historia.
+- **Petición vigente:** preparar tres microtasks consecutivos para revisión en bloque, sin implementarlos aquí; STOP y handoff por cada task. Owner de backlog ACT-A-002, reutilizando contratos ACT-C-001 existentes sin cerrar ninguno globalmente.
+- **Contratos reales contrastados:** SnapshotMarketState (seis campos), SnapshotEvidence (hecho numérico) y ScenarioSnapshot; no crear CandleEvidence/IndicatorEvidence. Indicadores, selección de señales, fórmulas del método y políticas de TTL quedan fuera; no llamar a N02/Ollama ni modificar sus modelos/cliente.
+
+| Orden | Microtask preparado | Responsabilidad | Dependencia de ejecución |
+|---|---|---|---|
+| 1 | BACKEND-SCENARIO-STATE-001 | Proyección pura de seis campos a SnapshotMarketState, sin defaults ni autoridad operativa | Baseline actual capturada y contrato del paquete |
+| 2 | BACKEND-SCENARIO-CLOSE-001 | SnapshotEvidence solo del último close y as_of exacto de PreparedMarketAnalysis, sin volumen/indicadores | Entrega técnica STATE-001 correcta, handoff completo y nueva baseline real |
+| 3 | BACKEND-SCENARIO-SNAPSHOT-001 | Snapshot N02 mínimo con esos adaptadores e ID/captura/vencimiento/ref/faltantes explícitos del caller | Entrega técnica CLOSE-001 correcta, handoff completo y nueva baseline real |
+
+- **Allowlist común propuesta:** NEW `backend/src/ai/scenario_adapters.py`, NEW `backend/tests/test_scenario_adapters.py` (creación solo en task 1) y seguimiento propio en este plan. Cada task autoriza únicamente su función/tests; no ejecutar los tres como un maestro abierto.
+- **Baselines:** la primera se entrega con hashes reales en el paquete. Las de tasks 2/3 no existen todavía: se verifican contra el manifiesto/diff del handoff previo y las zonas autorizadas; ausencia, deriva o propiedad incierta → BLOCKED. La revisión manual conjunta no implica autoaceptación intermedia.
+- **Límites del snapshot mínimo:** solo evidencia del cierre, etiqueta contractual `environment="paper"` sin subsistema PAPER y aptitud N02 al instante declarado; no vigencia de reloj real ni garantía de respuesta IA útil. Sin permisos de riesgo, órdenes, LIVE o método inventado. Ninguno de los tres tasks se ha iniciado.
+
+### Revisión delegada CLOSE-001 — 2026-10-07
+
+- **Resultado:** REQUIRES_CHANGES, sin aceptación automática de STATE-001. Función last_close_to_evidence conforme para entrada válida; la entrega no acredita aún compatibilidad con los DTO reales ni conservación byte a byte de STATE sin su manifiesto previo.
+- **Check del maestro:** desde backend, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py` → exit 0, 6 passed en 0.16s. Git diff-check/cached-check correctos, índice vacío y siete contenidos fuera de los archivos editables conservados.
+- **Gap propio CLOSE:** _prepared_fixture crea _CandleInput/_AnalysisRequest/_PreparedMarketAnalysis privados en lugar de los modelos existentes; usa un cierre como open_time y as_of igual al último open. Data_source test_simulation no corresponde a PreparedMarketAnalysis del helper. El control solo compara as_of, no toda la entrada.
+- **Gaps heredados del bloque:** fixture de red local copiada, sin guarda DNS, con create_connection async y constructores httpx reemplazados; no reutiliza la original y no delega connect AF_UNIX. Negativos STATE usan pytest.raises(Exception), no ValidationError. No se corrigen esas otras responsabilidades dentro de la primera corrección CLOSE.
+- **Siguiente corrección acotada:** únicamente fixture CLOSE con DTO reales, 50 aperturas alineadas desde 1800000000000, as_of=base+50*60000-1 y control de no mutación completo. Guardas/negativos STATE se tratarán aparte; SNAPSHOT-001 no se habilita mientras estos gaps sigan abiertos. Sin código/tests editados por esta revisión.
+
+### Revisión del bloque STATE/CLOSE/SNAPSHOT detenido — 2026-10-07
+
+- **Base cotejada:** master, HEAD 4383372b846ca019cd8008f96b464dd82aa3e49e; módulo aac10d046dbdd7433242bd244bb3ce0f16bb4bb5, tests 30eef93ee3633b059ecde80310cdeff62ae9a2d2 y plan 5ee4227727355cb82bd6d2e260ab3e2aaa300196 antes del registro. Coinciden con el handoff actual; los resúmenes históricos sin salida completa no se reconstruyen.
+- **Check del maestro:** desde backend, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py` → exit 0, 11 passed en 0.26s. Diff-check/cached-check correctos, índice vacío y siete archivos ajenos conservados. Solo se modifica seguimiento por el revisor, no código/tests.
+- **Corrección CLOSE verificada:** ahora usa DTO reales, aperturas 1800000000000+i*60000, cierre inclusivo base+50*60000-1, source market_engine simulado y deepcopy de toda la entrada. Resuelve el gap de fixture anterior; no significa aceptación global mientras la guarda común incumpla.
+- **Resultado del bloque:** REQUIRES_CHANGES. Guarda copiada sin DNS/transports ni delegación connect AF_UNIX, constructores httpx alterados; STATE y dos negativos SNAPSHOT usan Exception en vez de ValidationError/ScenarioError. El control SNAPSHOT solo compara el contenido de missing_data, sin demostrar ausencia de alias.
+- **Primera corrección autorizable:** únicamente sustituir la guarda local por la fixture importada original, sin alterar adaptadores o assertions. Después se revisarán en microtasks separados los tipos de excepción y la prueba de alias. No provider, endpoints, nuevas capacidades o autoavance.
+
+### Aceptación delegada CORRECCIÓN01 de guarda — 2026-10-07
+
+- **Versión realmente revisada antes de este registro:** tests acaf140328d966220b19e611021a2cb3714b729a, plan 94d2e6bb81e02dd23f77100a90d2265c68136168 y módulo aac10d046dbdd7433242bd244bb3ce0f16bb4bb5. La tabla de hashes del handoff era obsoleta y mezclaba archivos editables con no editables; no se usa como prueba de conservación. Los hashes actuales se calcularon en solo lectura.
+- **Aceptación:** fixture local e imports socket/httpx/mock eliminados; import original autouse presente a nivel módulo. Resto de helpers/assertions leído y conservado; ocho archivos fuera de la allowlist mantienen hashes. No hay cambios de adaptadores, modelos ni guardas originales.
+- **Check del maestro:** desde backend, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py` → exit 0, 11 passed en 0.26s. Diff-check/cached-check correctos, índice vacío y status esperado; no se atribuyen estas salidas a Qwen ni se recuperan sus salidas perdidas.
+- **Límite:** se acepta solo CORRECCIÓN01. Permanecen pendientes los negativos con Exception y la prueba de independencia de missing_data; no se autoacepta el bloque ni se inicia otra implementación. Siguiente corrección preparada: únicamente el negativo parametrizado STATE, sin tocar SNAPSHOT.
+
+### Aceptación delegada CORRECCIÓN02 de negativo STATE — 2026-10-07
+
+- **Versión revisada antes del registro:** tests 4614fe88412d6b78eedb16b75d47bb8e216fe00d, plan 4c1d4693268c8826eddce366d07a3736f2da2cbd y módulo aac10d046dbdd7433242bd244bb3ce0f16bb4bb5. El handoff no incluía el manifiesto final solicitado; se verificaron hashes reales, no se certifica su lista incompleta/duplicada como evidencia.
+- **Aceptación:** cambio limitado al negativo STATE: import local ValidationError, excepción específica, un único error y loc=(modify_key,). Parametrización, control, fixture, adaptadores, otras assertions y ocho archivos fuera de la allowlist conservados.
+- **Check del maestro desde backend:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py::test_project_market_state_valid_with_extras tests/test_scenario_adapters.py::test_project_market_state_negative_parametrized` → exit 0, 3 passed en 0.24s. Diff-check/cached-check correctos, índice vacío. No se atribuyen estas salidas a Qwen ni se recuperan salidas perdidas.
+- **Límite:** solo se acepta CORRECCIÓN02. STATE vuelve a EN_REVISION para el cierre conjunto; SNAPSHOT aún necesita excepciones específicas y prueba de missing_data sin alias. Siguiente corrección preparada: solo los dos negativos SNAPSHOT, sin modificar adaptadores o la prueba de alias.
+
+### Aceptación delegada CORRECCIÓN03 de excepciones SNAPSHOT — 2026-10-07
+
+- **Versión revisada antes del registro:** tests b606baab80a5f000eaf2bc16a2562b3604ca76cf, plan 719df680839815ad532d1d7f21a568fe7ec14f3e y módulo aac10d046dbdd7433242bd244bb3ce0f16bb4bb5. Los hashes aportados son reales; la lista no era la de REF-BASE porque reemplazó tres propuestas por modelos/fixtures/helpers. Se cotejó también el conjunto original, incluidas las propuestas intactas.
+- **Aceptación:** solo dos negativos cambiados, imports locales ValidationError/ScenarioError, excepciones específicas y code market_incomplete conservado. Resto de helpers/assertions, adaptadores, guardas y ocho archivos ajenos conservados.
+- **Check del maestro desde backend:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py::test_build_market_scenario_snapshot_control tests/test_scenario_adapters.py::test_build_market_scenario_snapshot_valid_until_too_far tests/test_scenario_adapters.py::test_build_market_scenario_snapshot_connected_false` → exit 0, 3 passed en 0.26s. Diff-check/cached-check correctos, índice vacío. Esta es evidencia propia del revisor, no recuperación de salidas Qwen.
+- **Límite:** se acepta solo CORRECCIÓN03; queda demostrar independencia de missing_data en el control, sin cambiar el constructor. No se acepta aún STATE/CLOSE/SNAPSHOT ni integración IA, servicios o ejecución financiera.
+
+### Aceptación delegada CORRECCIÓN04 y cierre STATE/CLOSE/SNAPSHOT — 2026-10-07
+
+- **Versión revisada antes del registro:** módulo aac10d046dbdd7433242bd244bb3ce0f16bb4bb5, tests e5ea502d5d75c4006f6cca8cd60fd48303439631 y plan ffa988695f3cb7189cd536e5010db649573aca48. Se cotejó el manifiesto original completo y propuestas intactas; la tabla del handoff sustituía tres propuestas por otros archivos y no se toma como lista completa de REF-BASE.
+- **CORRECCIÓN04 aceptada:** seis assertions conservan el control previo, prueban identidad distinta y aislamiento de mutaciones caller/snapshot. Ningún cambio de constructor, otros tests o guardas; ocho archivos fuera de allowlist conservados.
+- **Checks del maestro desde backend:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py::test_build_market_scenario_snapshot_control` → exit 0, 1 passed en 0.25s; mismo prefijo con `tests/test_scenario_adapters.py` → exit 0, 11 passed en 0.27s. Diff-check/cached-check correctos e índice vacío; no se atribuyen estas salidas a Qwen.
+- **Cierre manual delegado:** STATE-001, CLOSE-001 y SNAPSHOT-001 COMPLETADOS en sus contratos acotados. Rechazos y correcciones anteriores se conservan como historia. ACT-A-002/ACT-C-001 no se cierran globalmente, ni N02/IA/PAPER quedan integrados por estos adaptadores.
+- **Límites:** una evidencia de cierre, validez al instante capturado declarado, environment paper solo contractual, sin reloj real/IDs/TTL implícitos, indicadores, ejecución financiera o provenance_verified. No servicios, instalación o tests completos del backend/frontend.
+
+### 14.8. BACKEND-SCENARIO-ENGINE-001 — preparación histórica y cierre
+
+- **Owner:** ACT-A-002; no cierra su integración global. GROUP-BACKEND-001 / RUN-SCENARIO-ENGINE-001-001 / REV-001, COMPLETADO por revisión manual delegada del código y evidencia ya verificados.
+- **Objetivo único:** prepare_market_scenario_snapshot orquesta prepare_market_analysis y build_market_scenario_snapshot, sin duplicar selección/validación o ejecutar análisis/IA. IDs, captura, vencimiento, ref y missing_data siguen explícitos del caller.
+- **Allowlist propuesta:** scenario_adapters.py (solo función nueva/import local), test_scenario_adapters.py (fixture engine alineada y dos tests nuevos) y seguimiento propio de este plan. Código/modelos/fixtures originales permanecen intactos.
+- **Checks preparados:** solo los dos nodos nuevos y git checks; los comandos exactos y baseline actual se entregan en el paquete. Datos de fixture, no providers/servicios/rutas/clock/TTL por defecto o permisos de ejecución. STOP al terminar; si requiere más scope, BLOCKED.
+
+### Revisión delegada ENGINE-001 — 2026-10-07
+
+- **Base real antes del registro:** master, HEAD 4383372b846ca019cd8008f96b464dd82aa3e49e; módulo 82f130bdec3c4f0a569e888d82577eb8a6f72428, tests 7a54da38f70a0ee2c275ef8be8d75e0539ecd2fc y plan f9ee083a5852fbf699dedcb8d8f1e1eaa2bf2b9b. Siete contenidos fuera de la allowlist conservados, índice vacío y diff-check correcto.
+- **Resultado:** REQUIRES_CHANGES. Duplicado confirmado de prepare_market_scenario_snapshot: primera definición líneas 153–182, segunda idéntica 190–219 con separador 185–188. La segunda sobrescribe la primera; no cambia hoy los resultados al ser idénticas, pero deja código muerto y contradice una única orquestación.
+- **Check del maestro desde backend:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py::test_prepare_market_scenario_snapshot_valid tests/test_scenario_adapters.py::test_prepare_market_scenario_snapshot_no_engine` → exit 0, 2 passed en 0.24s. No se ejecuta ni certifica el reporte de 13 tests del otro chat; no se recuperan salidas ajenas.
+- **Tracking:** el plan mantenía exactamente su hash de preparación y no contenía registro de ejecución ENGINE. Se registra aquí la revisión; el implementador debe añadir seguimiento propio con resultados reales, sin modificar historia o aprobaciones previas.
+- **Corrección única preparada:** eliminar solo la segunda definición/separador y conservar la primera literalmente; no editar tests, adaptadores aceptados, helpers originales o modelos. Repetir los dos nodos y entregar un manifiesto actual del mismo conjunto de diez rutas. No se implementa la corrección en este chat ni se inicia otro task.
+
+### Revisión de eliminación del duplicado ENGINE-001 — 2026-10-07
+
+- **Versión realmente observada:** módulo 46c9abe467c355c9b6134ff73ef022feadc3f75c, tests 7a54da38f70a0ee2c275ef8be8d75e0539ecd2fc y plan d46e4fabbd8d77a3ac99644895234345c429df51 antes del registro; master/HEAD 4383372b846ca019cd8008f96b464dd82aa3e49e. No se aceptan por la segunda opinión ni por hashes no verificados.
+- **Código conforme:** queda una definición y se conserva la primera función; orquesta helpers sin cálculos, clock, IDs, TTL, endpoints o IA. Tests y ocho archivos ajenos a la corrección conservados.
+- **Check del maestro desde backend:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_scenario_adapters.py::test_prepare_market_scenario_snapshot_valid tests/test_scenario_adapters.py::test_prepare_market_scenario_snapshot_no_engine` → exit 0, 2 passed en 0.28s. Diff-check/cached-check correctos e índice vacío. No se certifica la salida ajena de 13 tests ni se atribuyen estos resultados a Qwen.
+- **Gap documental restante:** el plan seguía exactamente con el hash registrado por el maestro antes de la corrección, sin seguimiento de entrega ENGINE añadido. Se requiere solo una ficha propia fiel a la versión/evidencia actual, conservando el rechazo y estas revisiones; no más código o pytest en esa corrección.
+- **Parada:** ENGINE sin aceptación global todavía, integración N02 siguiente no habilitada. Solo registro de revisión; no se modifica código/tests ni se inicia otro task.
+
+### Ficha de entrega ENGINE — 2026-10-08
+
+- **Estado:** COMPLETADO por aceptación manual delegada; se conserva la fecha de entrega declarada y la historia anterior.
+- **Código observado:** módulo `46c9abe467c355c9b6134ff73ef022feadc3f75c`; tests `7a54da38f70a0ee2c275ef8be8d75e0539ecd2fc`.
+- **Cambio aplicado:** segunda definición de `prepare_market_scenario_snapshot` eliminada; primera definición conservada literalmente. Verificado con Grep: exactamente una definición (línea 153).
+- **Revisión de eliminación del duplicado ENGINE-001:** exit 0, 2 passed en 0.28s; diff-check/cached-check correctos e índice vacío. No atribuir a Qwen ni inventar ejecución ajena de 13 tests.
+- **Referencia al check completo del maestro:** § "Revisión de eliminación del duplicado ENGINE-001" (líneas 2207-2212) con exit 0, 2 passed, 0.28s; no atribuirlo a Qwen.
+- **Reporte ajeno:** 13 tests no re-verificado por esta ficha; no inventar salida o ejecución.
+- **Naturaleza de esta ficha:** documental — no es una nueva implementación ni aceptación.
+
+### Cierre manual ENGINE-001 y ajuste de revisión
+
+- **ENGINE-001 aceptado:** módulo 46c9abe467c355c9b6134ff73ef022feadc3f75c y tests 7a54da38f70a0ee2c275ef8be8d75e0539ecd2fc permanecen iguales a la revisión técnica conforme. Se utiliza el check del maestro ya registrado: 2 passed, exit 0, 0.28s; no pytest nuevo ni certificación del reporte ajeno de 13 tests.
+- **Seguimiento:** ficha de entrega observada, rechazo por duplicado y revisiones conservados. Solo se actualiza tracking del revisor; código/tests, propuestas y trabajo previo intactos. Git diff-check correcto e índice vacío; sin staging, commit o push.
+- **Criterio de eficiencia:** detalles de ficha/formato/hashes que el revisor puede verificar y registrar no generan nuevas rondas de implementación. Siguen bloqueando bugs, riesgos, mocks/fixtures inválidos, tests enmascarados, pérdida de trabajo o decisiones/ownership ambiguos.
+- **Parada:** ningún nuevo task implementado ni capacidad IA/PAPER habilitada. Próximo microtask pendiente de preparación, orientado a funcionalidad backend, no infraestructura de revisión.
+
+### 14.9. Servicio de asesoría preparado — tamaño funcional acotado
+
+- **Task:** BACKEND-SCENARIO-ADVISORY-SERVICE-001 / GROUP-BACKEND-001 / RUN-SCENARIO-ADVISORY-001-001 / REV-001, COMPLETADO; owner ACT-A-002. No cierra el ciclo PAPER de ACT-A-003.
+- **Objetivo único:** servicio async con cliente N02 inyectado: prepare_market_scenario_snapshot → await client.analyze_snapshot → mismo ScenarioAnalysisResult, sin reconstruir respuesta o recodificar errores. Metadata permanece explícita; el cliente conserva reloj/vigencia/cache y autoridad advisory existentes.
+- **Scope propuesto:** NEW backend/src/ai/market_scenarios.py, NEW backend/tests/test_market_scenarios.py y seguimiento propio de este plan. No editar adapters, modelos, cliente, rutas, frontend, persistencia o configuración.
+- **Unidad de entrega:** implementación y tres tests de orquestación juntos: forwarding/await/identidad de resultado, fallo de preparación sin llamar al cliente, ScenarioError del cliente propagado intacto. Mocks solo en la frontera del helper dentro del módulo nuevo; snapshot/result sentinels son DTO reales de fixtures N02, no clones ni prueba end-to-end.
+- **Comprobación preparada:** archivo nuevo y regresión focal con test_scenario_adapters.py; comandos exactos y baseline actual en paquete. Sin proveedores reales, servicios, instalación, build, suites completas, staging o commit/push.
+- **Limitaciones:** no endpoint ni panel IA operativo, snapshot propio aún mínimo de un cierre y no garantía de utilidad predictiva. No políticas nuevas de IDs/TTL ni authority/provenance true. No se implementa desde la preparación; STOP por cada entrega y BLOCKED si requiere ampliar scope.
+
+### Ficha de entrega ADVISORY — 2026-10-08
+
+- **Estado:** COMPLETADO por revisión manual delegada; corrección aplicada y confirmada en segunda opinión técnica.
+- **Código observado:** módulo `ee52a0a577273c1311ed86640f29de343e83f3c1`; tests `f1fe9e8c59b7703c1bada7cc7940d871968177d7`.
+- **Implementación:** NEW `backend/src/ai/market_scenarios.py` con función async `analyze_market_scenarios(client, engine, *, symbol, candles_count=200, snapshot_id, close_ref, captured_at_ms, valid_until_ms, missing_data) -> ScenarioAnalysisResult`. Importa `prepare_market_scenario_snapshot`, prepara snapshot con argumentos exactos, retorna `await client.analyze_snapshot(snapshot)`. Sin reconstruir, copiar o cambiar flags/source. Propaga excepciones intactas.
+- **Tests:** NEW `backend/tests/test_market_scenarios.py` con tres casos: (1) forwarding exacto/await una vez/resultado por identidad; (2) MarketAnalysisInputError propagada/cero llamadas cliente; (3) ScenarioError del cliente propagada/sin sustitución. Mocks solo en frontera del helper importado.
+- **Corrección aplicada:** (1) Línea 11: `from test_analysis_market_input import _block_network` — aislamiento de red contractual; (2) Línea 200: `assert exc_info.value is helper_error` — identidad de propagación verificada. Ambos cambios confirmados por lectura y segunda opinión técnica CONFORME.
+- **Comprobación:** 3 tests test_market_scenarios.py pasaron exit 0, 0.34s; 16 tests combinados (market_scenarios + scenario_adapters) pasaron exit 0, 0.29s. Diff-check/cached-check correctos e índice vacío.
+- **Naturaleza de esta ficha:** documental — no es una nueva implementación ni aceptación.
+
+### Revisión delegada ADVISORY-SERVICE-001
+
+- **Versión observada:** servicio ee52a0a577273c1311ed86640f29de343e83f3c1, tests f1fe9e8c59b7703c1bada7cc7940d871968177d7, plan actualizado tras cierre. master/HEAD 4383372b846ca019cd8008f96b464dd82aa3e49e.
+- **Servicio conforme:** snapshot preparado y await cliente, forwarding completo y resultado devuelto sin modificar; no nuevas políticas, instancias, validación, rutas, ejecución o proveedor real.
+- **Checks del maestro desde backend:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_market_scenarios.py` → exit 0, 3 passed; combinado con test_scenario_adapters.py → exit 0, 16 passed. Diff-check/cached-check correctos, índice vacío.
+- **Gap 1 cerrado:** test_market_scenarios.py línea 11 importa `_block_network` de test_analysis_market_input — aislamiento de red contractual demostrado.
+- **Gap 2 cerrado:** test_helper_raises_market_not_ready línea 200: `assert exc_info.value is helper_error` — identidad de propagación verificada.
+- **Estado final:** COMPLETADO por revisión manual delegada y segunda opinión técnica CONFORME. No se acepta ADVISORY global ni se inicia otro task desde esta sección.
+
+### 14.10. Cierre ACT-S-002 — Reconciliación de inventario — 2026-10-09
+
+- **Estado:** COMPLETADO por revisión manual del maestro el 2026-10-10; no se selecciona task siguiente.
+- **Baseline verificada:** `master`, HEAD `7322afa336a798e255f81b8c74154352e40a8bf3`; 7 tracked modificados + 10 untracked (sin commit).
+- **Matriz de capacidades respecto a la baseline:**
+
+| Área | Estado | Rutas / Tests | Observación |
+|---|---|---|---|
+| Mercado/API+procedencia | IMPLEMENTADO (contrato) | `backend/src/api/analysis.py`, `backend/tests/test_analysis_market_api.py` | B4.2 aceptado: POST /api/analysis/market con PreparedMarketAnalysis; 18+42 tests. Sin ejecución financiera. |
+| Análisis B3.1–B3.4 | COMPLETADO (aceptado) | `backend/tests/test_analysis_market_input.py` | B3.1-B3.4: insuficiencia, finitud, rango OHLC, open_time creciente — 8+25+34+40 tests. |
+| Análisis B4.1 | COMPLETADO (aceptado) | `backend/tests/test_analysis_market_input.py` | 16 tests + probe offline; últimas N cerradas 1m sin endpoint ni ejecución. |
+| Indicadores FYL | PARCIAL / NO VERIFICADO | `backend/src/indicators/fyl.py`, `backend/tests/test_fyl.py` | strength genérica corregida para umbral 0.01 (local, no committed); timestamps incrementales usan open_time de origen. Batch sigue TEST_ONLY con futuro. No afirmar equivalencia al FYL original. |
+| Indicadores Keltner/MACD | IMPLEMENTADO (batch) | `backend/src/indicators/` | Referencia numérica de la implementación actual aprobada/testeada; ACT-S-006 COMPLETADO en su alcance (§14.12). MACD BB y método original FYL siguen sin especificación. |
+| Reconexión engine | PARCIAL / NO VERIFICADO global | `backend/tests/test_binance_client.py`, `test_market_engine.py` | `_frame` parametrizado + FakeHTTP recovery tracking; 66 passed. El fake HTTP devuelve histórico vacío — prueba callback/protocolo, no backfill. No cierra ACT-S-005 global. |
+| Mercado microarreglos | EVIDENCIA ACOTADA (POR_REVALIDAR) | Gates verificados en tasks previos | Símbolo, close_time, rejilla WS 1m, rechazo REST bootstrap/gap verificados acotadamente. No bastan para cerrar ACT-S-005 global. |
+| N02/IA | IMPLEMENTADO (contrato), NO VERIFICADO (integración) | `backend/src/ai/market_scenarios.py`, `scenario_adapters.py`, `test_market_scenarios.py`, `test_scenario_adapters.py` | Escenarios estructurados con vigencia, límites y validación semántica. Contexto propio, auditoría e integración UI pendientes. ADVISORY-SERVICE-001 COMPLETADO en su alcance (§14.9). |
+| Terminal/UI | PARCIAL | `frontend/src/` | Una única Terminal de desarrollo; navegación Laboratorio/Bot objetivo. QA responsive/accesible pendiente (ACT-T-005 POR_REVALIDAR). |
+| PAPER/persistencia | AUSENTE | — | Estado en memoria; `aiosqlite` declarado sin implementación. ACT-P-001–P-010 PENDIENTE. |
+
+- **ADVISORY-SERVICE-001:** Corregido puntero activo en §1 y §12; ficha de cierre en §14.9 conservada como historia. Ya no se describe como "siguiente microtask preparado".
+- **B4.2:** Mantenido COMPLETADO en su alcance (§5 fila, §14.7). Descripción antigua de B4.2 como futuro reconciliada: ahora consta como aceptado con evidencia 18+42 tests. El FYL de §3 dev plan ya refleja strength genérica corregida y open_time de origen; batch continúa TEST_ONLY.
+- **N03:** Nota: no se encontró un identificador N03 independiente en plan, código ni tests. CORRECCION03 es un ID de corrección del bloque STATE/CLOSE/SNAPSHOT (§14.7), no un identificador de tarea. No se crea como nueva tarea/ID.
+- **ACT-S-005:** EN_REVISION (pendiente aceptación manual del maestro). 189 tests verdes; revalidación final documentada en §14.11 con evidencia separada por criterio. ACT-S-006/007 permanecen POR_REVALIDAR.
+- **Conservación de diffs previos:** Los 7 archivos tracked modificados y 10 untracked se conservan íntegros. Solo se aplicaron las correcciones documentales enumeradas arriba en los tres documentos raíz.
+- **Límites de esta reconciliación:** No se ejecutaron tests nuevos, ni build, ni typecheck, ni instalación limpia. Las cifras de tests citadas provienen de handoffs previos verificados por el maestro. ACT-S-002 cierra su inventario; no cierra fases completas ni selecciona siguiente task.
+- **STOP:** No se inicia tarea siguiente. Handoff entregado con diff documental, matriz/evidencia y estado de ACT-S-002.
+
+### 14.11. ACT-S-005 — Revalidación final (REV-001 + REV-002)
+
+**Estado:** COMPLETADO por revisión manual del maestro el 2026-10-10.
+**Baseline:** master / 7322afa336a798e255f81b8c74154352e40a8bf3
+**Tests ejecutados:** 189 passed, 0 failed (suite completa: test_market_api.py, test_market_engine.py, test_market_lifecycle.py, test_binance_client.py)
+
+#### Criterio 1 — Límites REST de `limit`
+- Default 100: `test_candles_default_limit_is_100` → 200, data_source=TEST_ONLY, interval=1m, len(candles)==100
+- Bordes válidos 1 y 500: `test_candles_limit_boundary_accepts_valid_values(limit=1)` y `(limit=500)` → 200, len==N
+- Inválidos 0, -1, 501: `test_market_lifecycle.py:1096-1104` → 422
+- Cap HTTP min(limit, 1000): implementado en `binance_client.py:95`, sin test directo (no bloquea cierre)
+
+#### Criterio 2 — Símbolos válidos y malformados
+- Malformado → 422 status/candles: `test_market_api.py:324-336` parametrizado con 9 símbolos inválidos
+- Válido no poseído → TEST_ONLY candles + unavailable status: `test_another_symbol_never_receives_current_engine_history`, `test_custom_symbol_fixture_is_still_test_only`
+
+#### Criterio 3 — Procedencia
+- Engine real → market_engine: `test_engine_history_preserves_symbol_interval_and_source`
+- Sin engine → unavailable: `test_status_default_symbol`
+- Engine vacío → fallback TEST_ONLY 1m: `test_empty_engine_fallback_keeps_fixture_interval`
+- WS no presenta fixture como conectado: candle events source correcto
+
+#### Criterio 4 — Temporalidad (evidencia separada)
+
+**Rejilla WS 1m:**
+- `engine.py:440`: guard de alineación temporal para velas WS 1m
+- `test_ws_misaligned_1m_candle_is_rejected`: rechazo de vela misalineada 1m
+- `test_ws_aligned_1m_candle_behaves_normally`: vela alineada 1m procesada normalmente
+- `test_non_1m_ws_intervals_are_unaffected_by_grid_check`: intervalos no-1m no afectados por el guard
+- `test_ws_misaligned_closed_candle_does_not_affect_engine_state`: vela cerrada misalineada sin efecto en estado
+- `test_ws_aligned_closed_candle_preserves_normal_flow`: vela cerrada alineada conserva flujo normal
+
+**Control de límites HTTP (no atribuido a rejilla WS):**
+- `test_market_lifecycle.py:1096-1104`: rechazo de límites fuera de rango en candles endpoint (REST, no WS)
+
+**Test de intervalos fijos del builder (no atribuido a rejilla WS):**
+- `test_builder_uses_configured_fixed_interval`: prueba del procesamiento/continuidad por `interval_ms`, no del guard de alineación WS
+
+**Construcción de URI WS (evidencia separada):**
+- `test_binance_client.py:156-181`: verificación directa de la URI WebSocket construida con el intervalo correcto
+
+**Control WS alineado (1m) — motor:**
+- `test_ws_aligned_closed_candle_preserves_normal_flow`: vela 1m alineada llega al engine, cierra y avanza last_closed_close_time.
+- Candle events source correcto en `test_market_api.py:211-229`.
+
+**Control non-1m del guard (5m):**
+- `test_non_1m_ws_intervals_are_unaffected_by_grid_check`: la vela 5m fuera de la rejilla 1m no es rechazada por el guard 1m.
+
+**Continuidad del builder (separada de rejilla WS):**
+- `test_builder_uses_configured_fixed_interval`: procesamiento/continuidad por interval_ms; no valida alineación epoch.
+
+- close_time inclusivo (3 tests): fallback, engine vacío, bootstrap REST
+  - `test_market_api.py:344-351` fallback
+  - `test_market_api.py:361-371` engine vacío
+  - `test_market_lifecycle.py:405-411` bootstrap REST
+- Bootstrap 500 velas: timestamps preservados (`test_market_lifecycle.py:389-418`)
+- Frescura clock_ms+margin: boundary test + freshness endpoint (`test_market_lifecycle.py:468-487`, `test_market_lifecycle.py:1075-1093`)
+- pending_gaps y entries_allowed: _assert_ready + múltiples tests gaps (`test_market_lifecycle.py:265-275`)
+
+#### Criterio 5 — Reconexión y teardown
+- Callbacks connect/disconnect/error: transport callbacks (`test_market_engine.py:203-238`)
+- Backfill simulado y exitoso: DelayedHTTP gap recovery (2 tests) (`test_market_lifecycle.py:545-591`, `test_market_lifecycle.py:691-719`)
+- Release handlers/tareas al disconnect: shutdown cancela recovery (`test_market_lifecycle.py:1107-1156`, `test_market_lifecycle.py:873-904`)
+- Cancelación y shutdown limpia recursos: preserve cleanup (`test_market_engine.py:469-479`, `test_market_lifecycle.py:941-984`)
+
+#### Gaps no aplicables
+- G4 retirado: cubierto por tests existentes
+- G6 retirado: cubierto por backfill ranged exitoso con DelayedHTTP
+
+### 14.12. Cierre ACT-S-006 — Referencia numérica Keltner actual
+
+- **Estado:** COMPLETADO por revisión manual del maestro el 2026-10-10.
+- **Contrato aprobado:** semilla EMA SMA, alpha `2/(n+1)`; ATR con `TR[0]=0`, media simple inicial incluyendo ese valor y recurrencia Wilder; bandas EMA ± multiplier×ATR; warmup `ema_period+atr_period`. Describe la implementación aprobada, no el Keltner original.
+- **Referencia independiente:** fixture 8 barras 1m, origen alineado `1_699_999_980_000`; test-only `ema_period=3`, `atr_period=3`, `multiplier=2.0`; expected racionales exactos en la fila ACT-S-006 y `backend/tests/test_keltner.py::test_keltner_reference_numeric_contract`, tolerancia rel/abs `1e-12`.
+- **Insuficiencia:** `test_keltner_warmup_length` comprueba 33→[], 34→1 punto y 35→2 puntos con defaults; B3/API conservan rechazo/no-fallback. No se fabrican señales.
+- **Verificación del maestro:** `test_keltner.py tests/test_analysis_market_input.py tests/test_analysis_market_api.py` → 40 passed, 1 warning Starlette/httpx. Diff checks limpios. Ningún cambio de fórmula productiva, estrategia, riesgo o frontend.
+- **Límites:** defaults actuales 20/14/2.0 no son obligatorios para todas las estrategias; nuevas convenciones requieren versión explícita. No se afirma equivalencia con el método original. ACT-S-007 permanece POR_REVALIDAR.
