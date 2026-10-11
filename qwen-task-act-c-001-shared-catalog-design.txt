@@ -1,0 +1,56 @@
+ACT-C-001 — MICROTASK DECISIÓN: SÍNTESIS DEL CATÁLOGO VERSIONADO
+Solo lectura · propuesta para revisión · no ejecutar tests ni implementar.
+Usa `act-c-001-strategy-data-version-review.md` como evidencia previa corregida.
+ACT-C-001 global continúa PENDIENTE. No reabrir N02, FYL/ACT-S-007 ni slices aceptados.
+
+OBJETIVO
+Proponer el contrato conceptual mínimo común UI/backend/IA que conecte referencias de
+estrategia y datasets, separando versiones de schema, versión de estrategia y referencia de
+datos. Resolver límites de compatibilidad y dependencias antes de autorizar código.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `act-c-001-strategy-data-version-review.md`.
+- `trading-bot-action-plan.md`: fila ACT-C-001, ACT-P-001 y dependencia ACT-S-002.
+- `trading-bot-development-plan.md`: §4 “Contratos y catálogos versionados” y descripción
+  ACT-P-001 de persistencia de referencias.
+- `backend/src/bot/models.py`: `TradeRule`, `TradingStrategy`, `AnalysisResult` y los DTOs
+  `BotProposal*` del response TEST_ONLY (solo estructura de contrato).
+- `backend/src/models/state.py`: `AnalysisResult` y `DecisionRecord` (solo referencias/version).
+- `backend/src/models/paper_contracts.py`: solo `StrategyRef` como precedente de referencia
+  compuesta; no revisar balances, fills, órdenes, posiciones ni OCO.
+- `backend/src/api/capabilities.py`: solo comprobar la frontera del catálogo estático
+  `backend_capabilities.v1`.
+- `backend/src/api/market.py`, `backend/src/api/analysis.py`,
+  `backend/src/api/analysis_market.py`: solo campos de origen/schema/procedencia.
+
+ESCRITURA: NINGUNA. No leer/editar otros archivos, tests, frontend, N02, FYL, órdenes,
+posiciones, riesgo ni indicadores. No ejecutar tests, build, servicios, red ni instalaciones.
+
+DECISIONES A SINTETIZAR (máximo cuatro subtareas)
+1. Separación de conceptos y ownership: catálogo versionado independiente de capacidades
+   estáticas; `schema_version` distinto de `strategy_ref` y `dataset_ref`.
+2. Proponer una forma estructurada de referenciar estrategia (ID estable + versión inmutable)
+   sin defaults, hashes ni formato de versión inventados; nombre es display, no ID.
+3. Proponer `dataset_ref` que describa fuente/mercado/símbolo/intervalo/ventana/corte solo con
+   identidad garantizada. Aclarar que replay exacto requiere ACT-P-001 y datos persistidos;
+   no prometer reconstrucción con una etiqueta de fuente sola.
+4. Dar esquema conceptual, alternativas, impacto wire/consumidores y un único siguiente
+   microtask de implementación con allowlist mínima. No escoger nombres/versiones Literals ni
+   cambiar respuestas actuales; separar fase de diseño de migración.
+
+NO REABRIR / NO INFERIR
+- No añadir campos a `CapabilitiesContract`; mantener su schema estático y significado.
+- No exigir `strategy_ref` en el endpoint aceptado de proposal/signal hasta una migración
+  compatible aprobada. No alterar DEC-4 ni N02.
+- No tratar defaults de `create_default_strategy()` como política aprobada.
+- No convertir `AnalysisResult` técnico y `AnalysisResult` de decisión en un solo modelo.
+- No asignar schema versions, UUID/SemVer, hashes, datasets, valores de riesgo/capital o
+  cobertura ficticia. `provided` no certifica proveedor; `TEST_ONLY` no es fuente de mercado.
+- No reabrir FYL ni recomendar equivalencia con un método original.
+
+BASELINE / SALIDA
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al inicio
+y cierre; preservar todas las modificaciones y untracked. Si difieren, STOP y explicar; no
+limpiar/revertir. Entregar decisión recomendada + alternativa, campos conceptuales sin valores
+inventados, riesgos/compatibilidad, dependencias y alcance exacto del futuro microtask. Confirmar
+cero archivos alterados y STOP para revisión del maestro.
