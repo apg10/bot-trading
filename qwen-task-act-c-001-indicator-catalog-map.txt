@@ -1,0 +1,40 @@
+ACT-C-001 — MICROTASK DECISIÓN: INVENTARIO DE INDICADORES PARA CATÁLOGO
+Solo lectura · preparado para revisión · no ejecutar tests ni implementar.
+ACT-C-001 global continúa PENDIENTE. ACT-S-006/Keltner está aceptado solo para la
+implementación actual; ACT-S-007/FYL sigue PAUSADO y ACT-E-001 BLOQUEADO.
+
+OBJETIVO
+Mapear únicamente los contratos/metadata existentes de indicadores que podrían figurar en el
+catálogo compartido, para precisar parámetros, unidades, calentamiento, barras y causalidad.
+No diseñar una estrategia canónica ni reabrir las fórmulas ya aceptadas de Keltner.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `trading-bot-action-plan.md`: fila ACT-C-001 y §14.12 (convención Keltner aceptada).
+- `trading-bot-development-plan.md`: §4 “Contratos y catálogos versionados”.
+- `backend/src/indicators/keltner.py`, `backend/src/indicators/macd.py`,
+  `backend/src/indicators/__init__.py`.
+- `backend/src/api/analysis.py`: campos de salida de Keltner/MACD y uso de indicadores
+  únicamente; no revisar FYL.
+- `backend/tests/test_keltner.py`, `backend/tests/test_macd.py` (solo referencias de tests,
+  contratos numéricos y warmup que existan).
+
+ESCRITURA: NINGUNA. No leer/editar `fyl.py`, reglas/estrategias, orders/positions, N02,
+frontend, proveedores, persistencia ni archivos fuera de allowlist. No cuestionar ni cambiar
+la convención Keltner aceptada; registrar su alcance limitado a la implementación actual.
+
+ANÁLISIS (máximo cuatro subtareas)
+1. Matriz de indicadores presentes: identificador/código, parámetros por defecto frente a
+   configurables y consumidores/outputs; separar hechos de defaults de pruebas.
+2. Unidades y calentamiento: citar lo realmente especificado y marcar desconocidos. No inferir
+   unidades/rangos/versiones que no estén documentados.
+3. Causalidad/barras: documentar solo garantías presentes en fuentes permitidas. No consultar
+   FYL ni inferir comportamiento causal de indicadores no revisados.
+4. Recomendar campos mínimos de un `IndicatorDefinition` versionable para el catálogo común
+   (ID/version opacos, parámetros tipados, unidades, warmup, barras/causalidad); dar alternativa
+   e implicaciones. No añadir literals/defaults ni fusionar con CapabilitiesContract.
+
+BASELINE / CHECKS / SALIDA
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al inicio
+y cierre; preservar todos los cambios locales. No ejecutar tests/builds/servicios/red ni
+instalaciones. Entregar matriz con citas, desconocidos explícitos, recomendación/alternativa y
+un futuro microtask mínimo. Confirmar cero archivos alterados y STOP para revisión del maestro.
