@@ -8,9 +8,9 @@ NUNCA usar para decisiones operacionales sin verificar procedencia de datos.
 
 import math
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from typing import List, Literal, Optional
 
 from src.indicators.keltner import calculate_keltner, KeltnerPoint
 from src.indicators.macd import calculate_macd, MACDPoint
@@ -207,4 +207,76 @@ async def analyze(request: AnalysisRequest):
             zones=[_zone_to_dict(z) for z in fyl_result.zones],
             annotations=fyl_result.annotations,
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Market analysis request / response
+# ---------------------------------------------------------------------------
+
+
+class MarketAnalysisRequest(BaseModel):
+    """Solicitud de análisis desde el motor de mercado."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., min_length=1, max_length=20, strict=True)
+    candles_count: StrictInt = Field(200, ge=50, le=500)
+
+
+class MarketAnalysisResponse(AnalysisResponse):
+    """Respuesta de análisis extendida con metadatos de mercado."""
+
+    source: str
+    as_of_close_time_ms: int
+    market_state: dict
+    execution_available: Literal[False] = False
+
+
+# ---------------------------------------------------------------------------
+# Endpoint POST /market
+# ---------------------------------------------------------------------------
+
+
+@router.post("/market", response_model=MarketAnalysisResponse)
+async def analyze_market(request: MarketAnalysisRequest, http_request: Request):
+    """Calcula indicadores técnicos usando velas cerradas del motor de mercado.
+
+    No habilita ejecución; solo reutiliza el cálculo existente (analyze).
+    """
+    # Import local para evitar ciclo analysis ↔ analysis_market.
+    from src.api.analysis_market import (  # noqa: F401
+        MarketAnalysisInputError,
+        prepare_market_analysis,
+    )
+
+    engine = getattr(http_request.app.state, "market_engine", None)
+
+    try:
+        prepared = prepare_market_analysis(engine, symbol=request.symbol, candles_count=request.candles_count)
+    except MarketAnalysisInputError as exc:
+        code_map = {
+            "INVALID_CANDLES_COUNT": 422,
+            "MARKET_NOT_READY": 503,
+            "INSUFFICIENT_CANDLES": 503,
+            "MARKET_SYMBOL_MISMATCH": 409,
+            "MARKET_INTERVAL_UNSUPPORTED": 409,
+            "MARKET_CONTEXT_CHANGED": 409,
+        }
+        status = code_map.get(exc.code, 500)
+        raise HTTPException(status_code=status, detail={"code": exc.code})
+
+    response = await analyze(prepared.request)
+
+    return MarketAnalysisResponse(
+        symbol=response.symbol,
+        timeframe=response.timeframe,
+        data_source=response.data_source,
+        keltner=response.keltner,
+        macd=response.macd,
+        fyl=response.fyl,
+        source=prepared.data_source,
+        as_of_close_time_ms=prepared.as_of_close_time_ms,
+        market_state=prepared.market_state,
+        execution_available=False,
     )

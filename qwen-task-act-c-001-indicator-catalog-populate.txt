@@ -1,0 +1,65 @@
+ACT-C-001 — MICROTASK: POBLAR CATÁLOGO KELTNER/MACD
+Estado: COMPLETADO Y ACEPTADO por el maestro el 2026-10-12. La restricción de no ejecutar se refiere a la fase previa a autorización; la entrega quedó verificada y committeada en `810dd2a`.
+ACT-C-001 global permanece PENDIENTE.
+
+OBJETIVO
+Poblar la definición estática existente `INDICATOR_CATALOG` con Keltner y MACD, usando el
+schema `IndicatorDefinition` ya implementado. Es metadata de la implementación actual, no una
+estrategia canónica ni una equivalencia con métodos externos. No tocar cálculos ni consumidores.
+
+DECISIONES YA APROBADAS
+- `indicator_id`: `keltner` y `macd` (nombres estables aprobados).
+- `schema_version`: `indicator_definition.v1`.
+- `implementation_version`: `None` hasta que ACT-P-001 asigne una versión persistida.
+- `function_configurable=True`; `consumer_exposed=False` mientras API/TradingStrategy no los
+  expongan.
+- Defaults y warmup describen el código actual. Rangos sin evidencia = NOT_SPECIFIED/None.
+- `CapabilitiesContract`, UI, API, N02, FYL y ejecución no se modifican.
+
+ENTRADAS QUE DEBE REPRESENTAR
+- Keltner: `ema_period` int=20, `atr_period` int=14, `multiplier` float=2.0;
+  warmup `ema_period + atr_period`, 34 con esos defaults; evidencia DOCUMENTED por guard/tests.
+  Outputs: `time_ms`, `ema_val`, `upper`, `lower`, `atr`; precio hereda instrumento y tiempo
+  usa ms. `api_rounding="2dp"` es formato de respuesta, no precisión del cálculo.
+- MACD: `fast_period` int=12, `slow_period` int=26, `signal_period` int=9; warmup
+  `max(fast_period, slow_period) + signal_period - 1`, 34 con esos defaults; evidencia
+  DOCUMENTED por docstring/tests. Outputs: `time_ms`, `macd_line`, `signal_line`, `histogram`;
+  precio hereda instrumento y tiempo usa ms. `api_rounding="4dp"` es solo serialización.
+- En ambos, `implementation_version=None`; ningún `min_value/max_value` inventado; causalidad
+  solo observada en la implementación actual, sin garantía formal ni equivalencia original.
+
+ALLOWLIST DE ESCRITURA (exhaustiva)
+- `backend/src/indicators/catalog.py` — MOD: añadir/rellenar solo las dos entradas aprobadas;
+  archivo ya existe en la baseline local. No crear otro módulo ni modificar funciones.
+- `backend/tests/test_indicator_catalog.py` — MOD: pruebas focales del contenido/IDs/schema,
+  parámetros/defaults, exposure flags, rangos desconocidos, units, warmup, outputs y ausencia
+  de FYL. Conservar todas las pruebas existentes.
+- `trading-bot-action-plan.md` — MOD solo fila ACT-C-001 si los checks pasan: anotar entrega
+  EN_REVISION; ACT-C-001 global sigue PENDIENTE.
+
+SOLO LECTURA
+`backend/src/indicators/keltner.py`, `backend/src/indicators/macd.py`,
+`backend/src/indicators/__init__.py`, `backend/src/api/analysis.py` (solo serialización/redondeo
+de puntos), `backend/src/bot/models.py` (solo campos de `TradingStrategy` para confirmar la
+exposición), fila ACT-C-001 del plan y esta task. No inspeccionar ni editar FYL, N02, otras rutas
+API, CapabilitiesContract, frontend, reglas, órdenes/posiciones o providers.
+
+SUBTAREAS (máximo cuatro)
+1. Añadir ambas entradas sin alterar modelos DTO ni valores fuera de los aprobados.
+2. Alinear metadata con firmas y outputs de las fuentes permitidas; marcar desconocidos como tal.
+3. Añadir/ajustar tests de catálogo solamente; no re-testear ni cambiar fórmulas de indicadores.
+4. Actualizar solo la ficha ACT-C-001 tras gate verde y comprobar baseline/allowlist.
+
+BASELINE / CHECKS
+Capturar `git status --short --untracked-files=all`, diffs staged/unstaged y hashes de los dos
+archivos target antes/después. Preservar cambios preexistentes; cualquier delta fuera de
+allowlist → STOP/BLOCKED. Ejecutar desde `backend/`:
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_indicator_catalog.py`
+Además `git diff --check` y `git diff --cached --check`. No instalar dependencias, no endpoint,
+no código de cálculo, sin staging/commit/push hasta revisión del maestro.
+
+ENTREGA FINAL
+- Revisión del maestro: aceptada; solo las dos entradas estáticas y las pruebas focales autorizadas.
+- Gate focal: 79 passed. `git diff --check` y `git diff --cached --check` limpios.
+- Commit/push posterior a la aceptación: `810dd2a feat(bot-trading): populate indicator catalog`.
+- ACT-C-001 global permanece PENDIENTE.

@@ -1,0 +1,41 @@
+ACT-C-001 — MICROTASK DECISIÓN: IDENTIDAD/VERSIÓN DE ESTRATEGIA
+Solo lectura · propuesta para revisión · no ejecutar tests ni implementar.
+DEC-4/Proposal-Signal y contratos PAPER Spot aceptados; ACT-C-001 global PENDIENTE.
+
+OBJETIVO
+Inventariar únicamente cómo se identifica una estrategia y cómo se podría referenciar una
+versión inmutable para UI/IA/PAPER. Recomendar el mínimo necesario para una futura referencia
+versionada; no definir el catálogo completo ni cambiar contratos.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `trading-bot-action-plan.md`: fila ACT-C-001, ACT-P-001 y dependencias inmediatas.
+- `trading-bot-development-plan.md`: §4 “Contratos y catálogos versionados” y línea/tabla de
+  ACT-P-001 sobre referencias persistidas de estrategias.
+- `backend/src/bot/models.py`: `TradeRule`, `TradingStrategy` y `AnalysisResult` únicamente.
+- `backend/src/bot/rules.py`: solo `create_default_strategy()` para inventariar la instancia
+  actual; no leer `RulesEngine`, señales, triggers ni implementación de indicadores.
+- `backend/src/models/state.py`: solo `AnalysisResult` y `DecisionRecord`.
+
+ESCRITURA: NINGUNA. No leer/editar órdenes, posiciones, riesgo, motores, indicadores, FYL,
+N02, frontend, tests ni otros archivos. ACT-S-007 continúa PAUSADO; ACT-E-001 BLOQUEADO.
+
+PREGUNTAS / ACEPTACIÓN
+1. Matriz de identidad actual: campos disponibles, función (ID vs nombre visible vs versión),
+   referencias entre decisión y análisis, valores libres/fijos, consumidores dentro de allowlist.
+2. Indicar diferencias entre `backend/src/bot/models.py::AnalysisResult` y
+   `backend/src/models/state.py::AnalysisResult`; no mezclarlos ni proponer migración en este
+   informe.
+3. Recomendar referencia mínima: p.ej. `strategy_id` estable + `strategy_version` inmutable,
+   parámetros ligados a snapshot ACT-P-001 y decisión enlazada a esa referencia. Comparar
+   nombre/version libre vs ID/version opacos; no inventar UUID, SemVer, hash ni defaults.
+4. Precisar compatibilidad y consecuencias: renombrado/alias, versiones antiguas tras cambios,
+   cómo nuevas versiones no reasignan posiciones existentes, qué debe hacer el consumidor si
+   la referencia falta o no se resuelve. Dar opción recomendada y alternativa.
+5. Separar hechos de propuestas; no declarar los defaults de la estrategia fixture como
+   aprobados para ejecución ni aprobar porcentajes/límites de riesgo.
+
+CHECKS / BASELINE
+No ejecutar tests, builds, servicios, red ni instalaciones. Capturar status/diffs staged y
+unstaged al inicio y al cierre; preservar todos los cambios locales. Confirmar cero archivos
+alterados. Entregar matriz, citas, recomendación/implicaciones y decisiones para el maestro.
+STOP; este informe no autoriza implementación ni cierre global.

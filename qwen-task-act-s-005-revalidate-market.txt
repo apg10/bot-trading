@@ -1,0 +1,114 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: ACT-S-005 — REVALIDAR MERCADO, HISTÓRICO Y CALLBACKS
+RUN: RUN-ACT-S-005-REVALIDATE-001 / REV-001
+
+TIPO
+Revalidación de solo lectura según el estado POR_REVALIDAR del plan canónico.
+No implementar fixes, no cerrar ACT-S-005 y no preparar/ejecutar task siguiente.
+No leer módulos/tests completos: localizar cada criterio y leer solo funciones,
+tests y fixtures pertinentes.
+
+REF-BASE
+Branch: master
+HEAD: 7322afa336a798e255f81b8c74154352e40a8bf3
+Preservar todos los cambios locales/untracked. En particular, no editar código,
+tests ni documentos: este task es read-only. Si el árbol cambia concurrentemente,
+STOP / BLOCKED.
+
+CONTEXTO DEL PLAN
+ACT-S-002 está COMPLETADO; su dependencia queda satisfecha. ACT-S-005 continúa
+POR_REVALIDAR. Revalidar los criterios exactos del backlog: límites, símbolo,
+procedencia, reconexión, teardown y estado temporal. Los microarreglos aceptados
+son evidencia acotada, no cierre automático de la fila.
+
+FUENTES DE CÓDIGO A INSPECCIONAR
+- backend/src/api/market.py
+- backend/src/market/engine.py
+- backend/src/market/binance_client.py
+- backend/src/market/candle_builder.py
+
+TESTS A LEER Y EJECUTAR
+- backend/tests/test_market_api.py
+- backend/tests/test_market_engine.py
+- backend/tests/test_market_lifecycle.py
+- backend/tests/test_binance_client.py
+
+MATRIZ DE REVALIDACIÓN
+Para cada criterio, registrar IMPLEMENTADO/PARCIAL/NO VERIFICADO con función/ruta,
+test exacto y resultado ejecutado. Distinguir política implementada de cobertura:
+1. Límites REST de `limit` (1..500, default 100). `test_candles_limit` existente
+   usa limit=10; comprobar si hay cobertura explícita de límites inferiores/superiores.
+2. Símbolo válido/malformado en status y candles; preservar símbolos válidos no
+   poseídos y comprobar procedencia/respuesta correcta.
+3. Procedencia: market_engine real frente a TEST_ONLY/unavailable; no presentar
+   fixture como mercado conectado ni ejecución.
+4. Temporalidad: close_time 1m inclusivo, rejilla WS 1m, bootstrap/gap REST,
+   frescura, pending_gaps y entries_allowed.
+5. Reconexión y teardown: callbacks, backfill real simulado cuando aplique, release
+   de handlers/tareas al disconnect, cancelación o shutdown. Distinguir el test de
+   callback/protocolo con FakeHTTP vacío de una prueba de backfill exitoso.
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_market_api.py tests/test_market_engine.py tests/test_market_lifecycle.py tests/test_binance_client.py
+Desde raíz ejecutar `git diff --check` y `git diff --cached --check`.
+
+DECISIÓN / CIERRE
+- No modificar la fila ACT-S-005 ni ningún otro archivo.
+- Si todos los criterios están respaldados por evidencia suficiente, recomendar
+  al maestro COMPLETADO, pero esperar aceptación manual.
+- Si falta cobertura/comportamiento, dejar ACT-S-005 POR_REVALIDAR y entregar solo
+  gaps concretos y un task candidato separado; no implementar el gap aquí.
+- No reabrir B4.2, N02, ACT-S-002 ni otras aceptaciones.
+
+MATRIZ DE REVALIDACIÓN (REV-001 — corregida)
+
+| # | Criterio | Estado | Función / Ruta | Test exacto | Resultado |
+|---|----------|--------|----------------|-------------|-----------|
+| 1.1 | Límite `limit` default=100 en `/candles` | IMPLEMENTADO (código) / NO VERIFICADO (test) | market.py:132 Query(100, ge=1, le=500) | — ningún test verifica default==100 | No verificado por test directo |
+| 1.2 | Límite inferior ge=1 rechazado | IMPLEMENTADO | market.py:132 | test_market_lifecycle.py:1096-1104 limit=0 → 422 | PASSED |
+| 1.3 | Límite superior le=500 rechazado | IMPLEMENTADO | market.py:132 | test_market_lifecycle.py:1096-1104 limit=501 → 422 | PASSED |
+| 1.4 | Límites válidos 1 y 500 aceptados | IMPLEMENTADO (código) / NO VERIFICADO (test) | market.py:132 | test_market_api.py:133-136 limit=10 — no llega a bordes | PASSED sin cobertura de bordes |
+| 1.5 | Cap HTTP client min(limit, 1000) | IMPLEMENTADO (código) / NO VERIFICADO (test) | binance_client.py:95 | — ningún test verifica cap 1000 | NO VERIFICADO por test directo |
+| 2.1 | Símbolo malformado → 422 en status | IMPLEMENTADO | market.py:83-88 _validate_symbol | test_market_api.py:324-328 parametrizado 9 símbolos inválidos | PASSED |
+| 2.2 | Símbolo malformado → 422 en candles | IMPLEMENTADO | market.py:135 | test_market_api.py:332-336 parametrizado 9 símbolos inválidos | PASSED |
+| 2.3 | Símbolo válido no poseído → status disconnected / candles TEST_ONLY | IMPLEMENTADO | market.py:109-116, 137-138 | test_market_api.py:188-197 test_another_symbol_never_receives_current_engine_history | PASSED |
+| 2.4 | Símbolo válido no poseído en candles → TEST_ONLY | IMPLEMENTADO (cubierto por G4 corregido) | market.py:147-163 fallback | test_market_api.py:188-197 + test_market_api.py:138-142 test_custom_symbol_fixture_is_still_test_only | PASSED — NO ES GAP |
+| 3.1 | Engine real → data_source market_engine | IMPLEMENTADO | market.py:144, _engine_metadata | test_market_api.py:174-185 test_engine_history_preserves_symbol_interval_and_source | PASSED |
+| 3.2 | Sin engine → data_source unavailable en status | IMPLEMENTADO | market.py:110-116 | test_market_api.py:89-96 test_status_default_symbol | PASSED |
+| 3.3 | Engine vacío → fallback TEST_ONLY intervalo 1m | IMPLEMENTADO | market.py:147-163 | test_market_api.py:200-206 test_empty_engine_fallback_keeps_fixture_interval | PASSED |
+| 3.4 | WS no presenta fixture como mercado conectado | IMPLEMENTADO | market.py:266-277 callbacks engine | test_market_api.py:211-229 candle events incluyen source correcto | PASSED |
+| 4.1 | close_time inclusivo (open_time + 59_999) fallback | IMPLEMENTADO | market.py:153 | test_market_api.py:344-351 test_fallback_without_engine_close_time_inclusive | PASSED |
+| 4.2 | close_time inclusivo con engine vacío | IMPLEMENTADO | market.py:153 | test_market_api.py:361-371 test_empty_engine_fallback_close_time_inclusive | PASSED |
+| 4.3 | close_time inclusivo en candles reales (bootstrap REST) | IMPLEMENTADO | engine.py:564-570, candle_builder.py:140-153 | test_market_lifecycle.py:405-411 test_bootstrap_uses_utc_closed_cutoff_and_preserves_binance_timestamps | PASSED |
+| 4.4 | Rejilla WS 1m (intervalo fijo) | IMPLEMENTADO | engine.py:127-139, binance_client.py:210-213 | test_market_engine.py:241-269 parametrizado 6 intervalos; test_binance_client.py:156-181 URI construction | PASSED |
+| 4.5 | Bootstrap ventana 500 velas | IMPLEMENTADO | engine.py:555-557 coverage_start/end | test_market_lifecycle.py:389-418 verifica limit==500, timestamps preservados | PASSED |
+| 4.6 | Frescura (stale) basada en clock_ms + margin | IMPLEMENTADO | engine.py:394-395, _watch_freshness | test_market_lifecycle.py:468-487 boundary; test_market_lifecycle.py:1075-1093 freshness endpoint | PASSED |
+| 4.7 | pending_gaps y entries_allowed en estado | IMPLEMENTADO | engine.py:36-37,35-36,398-399 | test_market_lifecycle.py:265-275 _assert_ready; múltiples tests gaps | PASSED |
+| 5.1 | Callbacks connect/disconnect/error en WS | IMPLEMENTADO | binance_client.py:213-216, engine.py:197-216 | test_market_engine.py:203-238 test_connection_error_reconnect_and_stop_use_transport_callbacks | PASSED |
+| 5.2 | Backfill simulado (gap recovery) | IMPLEMENTADO (mock) | engine.py:590-604 gap recovery loop | test_market_lifecycle.py:545-591 test_delayed_bootstrap_recovers_gap_before_first_streamed_close; test_market_lifecycle.py:691-719 gap interior/latest | PASSED |
+| 5.3 | Release handlers/tareas al disconnect | IMPLEMENTADO | market.py:294-300 finally; engine.py:270-298 _stop, _release_resources | test_market_lifecycle.py:1107-1156 two_browser_tabs_share_engine_and_each_disconnect_removes_handlers; test_market_lifecycle.py:873-904 shutdown cancela recovery | PASSED |
+| 5.4 | Cancelación y shutdown limpia recursos | IMPLEMENTADO | engine.py:223-225, 301-309 | test_market_engine.py:469-479 test_cancelling_start_cleans_up_and_preserves_cancellation; test_market_lifecycle.py:941-984 cancelled stop preserves cleanup | PASSED |
+| 5.5 | FakeHTTP vacío vs backfill exitoso distinguidos | IMPLEMENTADO (arquitectura) | engine.py:529-610 _recover/_recover_history; tests usan DelayedHTTP | test_market_lifecycle.py:625-651 test_unsuccessful_bootstrap_never_allows_entries — empty/error → no entries_allowed | PASSED |
+| 5.6 | Retry budget WS (reconexión) | IMPLEMENTADO | binance_client.py:232-305 backoff exponencial cap 60s | test_binance_client.py:184-207,210-223,226-242,245-268 retry budget, delay cap, valid data resets | PASSED |
+| 5.7 | Backfill exitoso (ranged recovery) | IMPLEMENTADO (cubierto por G6 corregido) | engine.py:590-604 loop page-by-page | test_market_lifecycle.py:691-719 test_gap_inside_or_at_end_of_bootstrap_is_recovered_before_ready + test_market_lifecycle.py:421-464 test_left_truncated_bootstrap_requires_explicit_window_prefix — NO ES GAP | PASSED |
+
+GAPS CONSIDERADOS Y RETIRADOS:
+- G4 (símbolo válido no poseído en candles → TEST_ONLY): RETIRADO. Cubierto por test_another_symbol_never_receives_current_engine_history (test_market_api.py:188-197) que verifica data_source==TEST_ONLY en candles y unavailable en status para ETH/USDT sin engine, más test_custom_symbol_fixture_is_still_test_only (test_market_api.py:138-142).
+- G6 (backfill exitoso distinguido): RETIRADO. Cubierto por test_gap_inside_or_at_end_of_bootstrap_is_recovered_before_ready (test_market_lifecycle.py:691-719) que prueba backfill ranged exitoso y motor listo, más test_left_truncated_bootstrap_requires_explicit_window_prefix (test_market_lifecycle.py:421-464) que cubre recuperación exitosa.
+
+GAPS CONSERVADOS (cobertura faltante):
+- G1: Límite inferior limit=1 no probado explícitamente. Solo se prueba rejection de 0 y acceptance implícita dentro del rango. No hay test que verifique limit=1 como mínimo válido.
+- G2: Límite superior limit=500 no probado como aceptación. Solo se prueba rejection de 501. No hay test que verifique limit=500 como máximo válido.
+- G3: Default limit=100 no verificado por test. El código establece Query(100, ...) pero ningún test verifica el default.
+
+G5 (cap HTTP min(limit, 1000)): IMPLEMENTADO en binance_client.py:95. NO VERIFICADO por test directo — la ausencia de test unitario sobre este cap no implica que el criterio esté incompleto; es una distinción entre política implementada y cobertura de prueba.
+
+DECISIÓN / CIERRE
+- No modificar la fila ACT-S-005 ni ningún otro archivo.
+- ACT-S-005 permanece POR_REVALIDAR mientras existan los gaps G1-G3 (cobertura faltante de límites).
+- G5 no se considera gap funcional: el cap está implementado; solo falta test directo. No justifica cierre automático ni bloqueo del criterio.
+- Si se añade cobertura para G1-G3, recomendar al maestro COMPLETADO, pero esperar aceptación manual.
+- No reabrir B4.2, N02, ACT-S-002 ni otras aceptaciones.
+
+HANDOFF Y STOP
+Reportar baseline, matriz corregida, comandos/resultados, gaps conservados (G1-G3) y recomendación de estado. Sin staging, commit, push, cambios de código/tests/docs ni task siguiente.

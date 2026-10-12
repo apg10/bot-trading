@@ -8,14 +8,15 @@ metadatos estaticos derivados de la configuracion actual.
 from __future__ import annotations
 
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 
 from src.config import config as app_config
+from src.models.state import CapabilitiesContract
 
 router = APIRouter()
 
 
-class CapabilitiesResponse(BaseModel):
+class CapabilitiesResponse(CapabilitiesContract):
     """Respuesta exacta del endpoint de capacidades."""
 
     model_config = ConfigDict(
@@ -36,20 +37,6 @@ class CapabilitiesResponse(BaseModel):
             }
         }
     )
-
-    schema_version: str = "backend_capabilities.v1"
-    environment: str
-    runtime_health_checked: bool = False
-    market_data_supported: bool = True
-    technical_analysis_supported: bool = True
-    ai_scenarios_supported: bool = True
-    original_method_supported: bool = False
-    execution_available: bool = False
-    portfolio_available: bool = False
-    paper_simulation_available: bool = False
-    exchange_demo_execution_available: bool = False
-    live_execution_available: bool = False
-
 
 @router.get("/api/capabilities")
 async def get_capabilities() -> CapabilitiesResponse:

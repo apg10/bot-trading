@@ -1,0 +1,93 @@
+QWEN BATCH: BACKEND-FYL-RECONNECT-001
+============================================================
+
+USO
+Qwen recibe la orden de leer SOLO el task actual, no el archivo completo. No
+precargar tasks futuros. ACT-S-002 sigue diferido; no cerrar ACT-S-007 ni
+ACT-S-005 globalmente. BATCH COMPLETADO; no hay task siguiente.
+
+REF-BASE
+master / 7322afa336a798e255f81b8c74154352e40a8bf3
+TASK 01 está COMPLETADO y VERIFICADO por el maestro; su delta aceptado está en
+`backend/src/indicators/fyl.py` y `backend/tests/test_fyl.py`. El target de TASK 02
+(`backend/tests/test_binance_client.py`) estaba limpio en REF-BASE. Preservar el
+delta FYL y todos los otros cambios previos; si TASK 02 difiere, STOP.
+
+
+TASK 01 — FYL INCREMENTAL STRENGTH SIGN
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-007
+TASK: BACKEND-FYL-INCREMENTAL-STRENGTH-001 / REV-002
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO (21 passed).
+
+OBJETIVO
+Corregir el signo de fuerza en máximos/mínimos incrementales para que pivotes
+locales válidos pasen `min_strength=0.01`, sin mirar al futuro ni atribuir la
+métrica a la fórmula original de FYL.
+
+ARCHIVOS EDITABLES — LISTA EXHAUSTIVA
+1. backend/src/indicators/fyl.py
+2. backend/tests/test_fyl.py
+
+CONTRATO
+- Mantener detección por ventana anterior, lookback, umbral, timestamps, mode,
+  confirmed y resultados batch sin cambios.
+- Para máximo: excursión positiva `high[i] - max(highs[ventana previa])`,
+  normalizada por el high actual usando la guarda de denominador ya existente.
+- Para mínimo: excursión positiva `min(lows[ventana previa]) - low[i]`,
+  normalizada por `abs(low[i])` usando la guarda existente.
+- Es una magnitud genérica de excursión de implementación; no afirmar fidelidad
+  a la fórmula FYL original ni definir el método.
+
+TESTS
+- Añadir regresión con `min_strength` predeterminado, timestamps no cero e
+  irregulares, y un máximo/mínimo local con fuerza >= 0.01.
+- Comprobar timestamp/precio/fuerza del origen y que los pivotes existentes no
+  cambian al añadir velas futuras.
+- Conservar intactos los tests existentes que usan `min_strength=-1`.
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_fyl.py tests/test_analysis_market_api.py
+Desde raíz: `git diff --check`, `git diff --cached --check`, `git status --short --untracked-files=all`.
+
+EXCLUSIONES / HANDOFF
+No cambiar batch, APIs, detectores, fórmula original, umbrales, frontend, docs o
+plan. Sin staging, commit, push, red ni operaciones externas. Handoff y STOP;
+no leer TASK 02 hasta autorización manual del maestro.
+
+
+TASK 02 — RECONNECT CALLBACK TEST CONTRACT
+============================================================
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: BACKEND-MARKET-RECONNECT-CALLBACK-TEST-001 / REV-001
+ESTADO: COMPLETADO Y VERIFICADO POR EL MAESTRO (66 passed).
+PRECONDICIÓN: TASK 01 completado y verificado; preservar su delta FYL.
+
+OBJETIVO
+Reparar `test_engine_receives_real_client_disconnect_and_reconnect_callbacks`
+para que pruebe callbacks reales del WS usando la validación temporal y el
+contrato HTTP histórico actuales, sin debilitar el motor.
+
+ARCHIVO EDITABLE — LISTA EXHAUSTIVA
+1. backend/tests/test_binance_client.py
+
+ACEPTACIÓN
+- Parametrizar `_frame` con `open_time` opcional, conservando exactamente el
+  default para los otros tests. En este test usar
+  `aligned_open=(1_700_000_000_000 // 60_000) * 60_000` y close_time inclusivo.
+- `FakeHTTP` implementa `get_klines(symbol, interval, limit, start_ts, end_ts)`;
+  devuelve `[]` de forma determinista y contabiliza llamadas. Afirmar que el
+  motor invocó recuperación. No afirmar history_loaded/readiness/backfill.
+- Mantener pruebas de primer frame, disconnect real, segundo connect, callback
+  `bar_closed`, estados de conexión y limpieza de tasks.
+- No desactivar ni saltar `_validated_candle` y no cambiar código de producción.
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_binance_client.py tests/test_market_engine.py
+Desde raíz: `git diff --check`, `git diff --cached --check`,
+`git status --short --untracked-files=all`.
+
+EXCLUSIONES / HANDOFF
+No modificar `engine.py`, `binance_client.py`, fixtures de producción, otros
+tests ni contratos. Sin staging, commit o push. Handoff y STOP; no identificar ni
+iniciar el task siguiente hasta revisar ambos arreglos y el estado real de N03.

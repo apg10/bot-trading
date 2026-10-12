@@ -1,0 +1,43 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-006
+TASK: BACKEND-KELTNER-WARMUP-BOUNDARY-001 / REV-001
+
+OBJETIVO
+Caracterizar la semántica existente de datos insuficientes/warmup de Keltner:
+sin señal fabricada bajo el mínimo y salida solo desde el primer índice válido.
+Este es el microtask de insuficiencia; NO valida fórmula ni referencia numérica.
+
+REF-BASE
+master / 7322afa336a798e255f81b8c74154352e40a8bf3
+`backend/src/indicators/keltner.py` está limpio; `backend/tests/test_keltner.py` no
+existe. `backend/tests/test_analysis_market_api.py` es un archivo untracked
+preexistente y se usa solo como regression read/execute, sin editarlo. Preservar
+todos los cambios locales/untracked. Si el target aparece o la baseline cambia
+concurrentemente, STOP / BLOCKED.
+
+ARCHIVOS EDITABLES — LISTA EXHAUSTIVA
+1. backend/tests/test_keltner.py (crear test focalizado)
+
+CONTRATO OBSERVABLE
+- Con defaults actuales `ema_period=20`, `atr_period=14`, mínimo actual = 34 velas.
+- 33 velas → lista vacía, no ceros ni fallback sintético.
+- 34 velas → 1 punto; 35 velas → 2 puntos.
+- Timestamps de salida corresponden a candles[33:] (primer índice que produce
+  KeltnerPoint según el código actual).
+- No afirmar que esto sea fórmula o especificación del Keltner original; no
+  probar valores numéricos de bandas, ATR o EMA en este task.
+
+ACEPTACIÓN
+Un test parametrizado de 33/34/35 velas usa solo datos OHLC simples, llama
+`calculate_keltner` con defaults y comprueba longitud y mapeo temporal exactos.
+No requiere ni modifica producción. Mantener B3/API de insuficiencia intacto.
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_keltner.py tests/test_analysis_market_input.py tests/test_analysis_market_api.py
+Desde raíz: `git diff --check`, `git diff --cached --check`,
+`git status --short --untracked-files=all`.
+
+EXCLUSIONES / HANDOFF
+No modificar keltner.py, ema.py, API, otros indicadores, periodos, bandas, ATR,
+fórmula original, strategy, docs ni plan. No marcar ACT-S-006 COMPLETADO: la
+referencia numérica sigue pendiente por separado. Sin staging, commit, push o red.
+Entregar diff/resultados y STOP; no leer ni iniciar otra tarea automáticamente.

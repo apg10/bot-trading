@@ -15,6 +15,9 @@ from src.bot.models import (
     TradingStrategy,
     TradingSignal,
     AnalysisResult,
+    BotProposalSignal,
+    BotProposalAnalysis,
+    BotProposalResponse,
     Position,
     Order,
 )
@@ -118,7 +121,7 @@ async def get_bot_status():
     )
 
 
-@router.post("/analyze", response_model=dict)
+@router.post("/analyze", response_model=BotProposalResponse)
 async def analyze_with_rules(request: BotRequest):
     """Propuesta TEST_ONLY sobre indicadores fijos; nunca crea una orden o un fill."""
     # Inicializar engine lazy
@@ -126,7 +129,7 @@ async def analyze_with_rules(request: BotRequest):
         _bot_state["engine"] = RulesEngine(_bot_state["strategy"])
 
     # Simular análisis técnico (en producción usar datos reales)
-    analysis = AnalysisResult(
+    analysis = BotProposalAnalysis(
         symbol=request.symbol,
         timeframe="15m",
         keltner_ema=65000.0,  # Simulado
@@ -145,22 +148,30 @@ async def analyze_with_rules(request: BotRequest):
         }],
     )
 
-    # Evaluar reglas
-    signal = _bot_state["engine"].evaluate(analysis)
+    # Evaluar reglas (sin alterar la lógica existente)
+    raw_signal = _bot_state["engine"].evaluate(analysis)
 
-    return {
-        "data_source": "TEST_ONLY",
-        "result_type": "proposal",
-        "executable": False,
-        "execution_available": False,
-        "warning": "Indicadores fijos de desarrollo; reglas del método pendientes. No operativo.",
-        "signal": {
-            **signal.model_dump(), "data_source": "TEST_ONLY",
-            "result_type": "proposal", "executable": False,
-        },
-        "strategy": _bot_state["strategy"].model_dump(),
-        "analysis": {**analysis.model_dump(), "data_source": "TEST_ONLY"},
-    }
+    return BotProposalResponse(
+        data_source="TEST_ONLY",
+        result_type="proposal",
+        executable=False,
+        execution_available=False,
+        warning="Indicadores fijos de desarrollo; reglas del método pendientes. No operativo.",
+        signal=BotProposalSignal(
+            timestamp_ms=raw_signal.timestamp_ms,
+            symbol=request.symbol,
+            signal_type=raw_signal.signal_type,
+            strength=raw_signal.strength,
+            confidence=raw_signal.confidence,
+            entry_price=raw_signal.entry_price,
+            stop_loss_price=raw_signal.stop_loss_price,
+            take_profit_price=raw_signal.take_profit_price,
+            reason=raw_signal.reason,
+            rules_triggered=raw_signal.rules_triggered,
+        ),
+        strategy=_bot_state["strategy"],
+        analysis=analysis,
+    )
 
 
 @_ai_router.post("/ai/scenarios", response_model=ScenarioAnalysisResult)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -107,3 +107,35 @@ class AnalysisResult(BaseModel):
     pivot_highs: list[dict] = Field(default_factory=list, description="Pivotes altos recientes")
     pivot_lows: list[dict] = Field(default_factory=list, description="Pivotes bajos recientes")
     consolidation_zones: list[dict] = Field(default_factory=list, description="Zonas de consolidación")
+
+
+# ---------------------------------------------------------------------------
+# DTOs aditivos para ACT-C-001 — propuesta TEST_ONLY (no ejecutable)
+# ---------------------------------------------------------------------------
+
+
+class BotProposalSignal(TradingSignal):
+    """Señal tipada como propuesta TEST_ONLY; no cambia TradingSignal."""
+
+    data_source: Literal["TEST_ONLY"] = "TEST_ONLY"
+    result_type: Literal["proposal"] = "proposal"
+    executable: Literal[False] = False
+
+
+class BotProposalAnalysis(AnalysisResult):
+    """Análisis tipado como propuesta TEST_ONLY; no cambia AnalysisResult."""
+
+    data_source: Literal["TEST_ONLY"] = "TEST_ONLY"
+
+
+class BotProposalResponse(BaseModel):
+    """Respuesta tipada de POST /api/bot/analyze — solo lectura, sin ejecución."""
+
+    data_source: Literal["TEST_ONLY"] = "TEST_ONLY"
+    result_type: Literal["proposal"] = "proposal"
+    executable: Literal[False] = False
+    execution_available: Literal[False] = False
+    warning: str
+    signal: BotProposalSignal
+    strategy: TradingStrategy
+    analysis: BotProposalAnalysis

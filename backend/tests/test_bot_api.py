@@ -15,6 +15,7 @@ import src.api.bot as bot_api
 from src.ai.ollama_client import OllamaClient
 from src.ai.scenario_models import MAX_SNAPSHOT_AGE_MS, QWEN_MODEL
 from src.bot.rules import RulesEngine, create_default_strategy
+from src.bot.models import SignalType, SignalStrength
 
 
 CLOSE_MS = 1_800_000_059_999  # cierre inclusivo Binance de una vela 1m
@@ -293,3 +294,97 @@ def test_legacy_market_data_format_is_rejected_before_ollama(client, unused_olla
     constructor.assert_not_called()
     analyze.assert_not_called()
     assert bot_api._bot_state["ollama_client"] is None
+
+
+# ── ACT-C-001: pruebas focales de los DTOs aditivos ────────────────────────
+
+from src.bot.models import (
+    BotProposalSignal,
+    BotProposalAnalysis,
+    BotProposalResponse,
+    TradingSignal,
+    AnalysisResult,
+    SignalType,
+    SignalStrength,
+)
+
+
+def test_analyze_response_model_is_BotProposalResponse_and_serialises(client):
+    """Verifica que /api/bot/analyze devuelve un BotProposalResponse serializable."""
+    response = client.post("/api/bot/analyze", json={"symbol": "BTC/USDT"})
+    assert response.status_code == 200
+    data = response.json()
+
+    # Claves top-level exactas (compatibilidad con wire actual)
+    for key in ("data_source", "result_type", "executable", "execution_available",
+                 "warning", "signal", "strategy", "analysis"):
+        assert key in data, f"Falta clave top-level: {key}"
+
+    # Valores Literal en el nivel superior
+    assert data["data_source"] == "TEST_ONLY"
+    assert data["result_type"] == "proposal"
+    assert data["executable"] is False
+    assert data["execution_available"] is False
+    assert isinstance(data["warning"], str) and len(data["warning"]) > 0
+
+    # signal: BotProposalSignal — hereda de TradingSignal, conserva metadata + flags
+    sig = data["signal"]
+    assert sig["data_source"] == "TEST_ONLY"
+    assert sig["result_type"] == "proposal"
+    assert sig["executable"] is False
+    assert sig["symbol"] == "BTC/USDT"
+    for field in ("timestamp_ms", "signal_type", "strength", "confidence", "reason"):
+        assert field in sig, f"Falta campo en signal: {field}"
+
+    # strategy: TradingStrategy — estructura completa
+    strat = data["strategy"]
+    assert "name" in strat
+    assert "rules" in strat
+
+    # analysis: BotProposalAnalysis — hereda de AnalysisResult + data_source="TEST_ONLY"
+    ana = data["analysis"]
+    assert ana["data_source"] == "TEST_ONLY"
+    assert ana["symbol"] == "BTC/USDT"
+    for field in ("timeframe", "keltner_ema", "macd_line", "pivot_highs", "pivot_lows"):
+        assert field in ana, f"Falta campo en analysis: {field}"
+
+    # Nunca construye Order/Position ni llama un ejecutor
+    assert bot_api._bot_state["positions"] == []
+    assert bot_api._bot_state["orders"] == []
+
+
+def test_bot_proposal_signal_inherits_trading_signal():
+    """BotProposalSignal es subtipo de TradingSignal y fija flags."""
+    s = BotProposalSignal(
+        timestamp_ms=1, symbol="X", signal_type=SignalType.HOLD,
+        strength=SignalStrength.MODERATE, confidence=0.5, reason="test",
+    )
+    assert isinstance(s, TradingSignal)
+    assert s.data_source == "TEST_ONLY"
+    assert s.result_type == "proposal"
+    assert s.executable is False
+
+
+def test_bot_proposal_analysis_inherits_analysis_result():
+    """BotProposalAnalysis es subtipo de AnalysisResult y fija data_source."""
+    a = BotProposalAnalysis(symbol="X", timeframe="15m")
+    assert isinstance(a, AnalysisResult)
+    assert a.data_source == "TEST_ONLY"
+
+
+def test_bot_proposal_response_validates_literal_types():
+    """BotProposalResponse rechaza valores no permitidos en campos Literal."""
+    with pytest.raises(Exception):  # Pydantic valida Literales al instanciar
+        BotProposalResponse(
+            data_source="LIVE",  # type: ignore
+            result_type="proposal",
+            executable=False,
+            execution_available=False,
+            warning="w",
+            signal=BotProposalSignal(
+                timestamp_ms=1, symbol="X", signal_type=SignalType.HOLD,
+                strength=SignalStrength.MODERATE, confidence=0.5, reason="t",
+            ),
+            strategy=create_default_strategy(),
+            analysis=BotProposalAnalysis(symbol="X", timeframe="15m"),
+        )

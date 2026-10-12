@@ -1,0 +1,67 @@
+MICROTASK ACT-C-001 — CONTRATO TIPADO DE PROPOSAL/SIGNAL
+Estado: APROBADO PARA EJECUCIÓN por el maestro el 2026-10-11; respetar estrictamente la allowlist.
+DEC-4 está aceptada como límite: propuesta TEST_ONLY, no ejecutable, separada de N02.
+ACT-C-001 global permanece PENDIENTE.
+Dependencia satisfecha: contratos PAPER Spot, batches A+B, aceptados por el maestro el 2026-10-11.
+No modificar sus DTOs ni retroceder esa aceptación.
+
+OBJETIVO
+Tipar la respuesta actual de `POST /api/bot/analyze` sin cambiar su JSON ni la lógica de
+reglas. Reusar `TradingSignal`, `TradingStrategy` y `AnalysisResult`; declarar los flags
+TEST_ONLY/no ejecutable en DTOs de response. No crear órdenes, cambiar estrategia ni ampliar
+contratos N02.
+
+ALCANCE MÁXIMO: 4 SUBTAREAS
+1. En `backend/src/bot/models.py`, añadir DTOs aditivos:
+   - `BotProposalSignal(TradingSignal)`: `data_source: Literal["TEST_ONLY"]`,
+     `result_type: Literal["proposal"]`, `executable: Literal[False]`.
+   - `BotProposalAnalysis(AnalysisResult)`: `data_source: Literal["TEST_ONLY"]`.
+   - `BotProposalResponse`: esos campos top-level, `execution_available: Literal[False]`,
+     warning actual, `signal: BotProposalSignal`, `strategy: TradingStrategy`,
+     `analysis: BotProposalAnalysis`.
+2. En `backend/src/api/bot.py`, solo `/api/bot/analyze`: declarar response_model y devolver
+   el DTO sin alterar la forma/valores JSON actuales. Mantener los indicadores fijos y la
+   advertencia existentes; nunca construir Order/Position ni llamar un ejecutor.
+3. Añadir `backend/tests/test_bot_proposal_contract.py` (NEW), aislado de los tests N02, para
+   keys/valores JSON exactos, validación PAPER TEST_ONLY/no ejecutable, estructura de
+   signal/analysis y ausencia de efectos en órdenes/posiciones.
+4. En `trading-bot-action-plan.md`, editar solo la ficha ACT-C-001 si el gate pasa: registrar
+   el microtask como entregado EN_REVISION; conservar ACT-C-001 global PENDIENTE.
+
+COMPATIBILIDAD / NO OBJETIVOS
+- Mantener exactamente keys y valores wire actuales: top-level `data_source`, `result_type`,
+  `executable`, `execution_available`, `warning`, `signal`, `strategy`, `analysis`; el signal
+  conserva su metadata actual; analysis conserva `data_source="TEST_ONLY"`.
+- No añadir `schema_version` en este cambio: el endpoint no lo tiene hoy y el catálogo global
+  sigue pendiente. No añadir `strategy_id/version` todavía; depende del contrato/versionado
+  de estrategias de ACT-C-001/ACT-P-001.
+- No modificar campos ni enums de `TradingSignal`, `TradingStrategy`, `AnalysisResult`,
+  `Order`, `Position` o `Scenario*`; no modificar `bot/rules.py`, indicadores o fixtures.
+- N02 permanece `scenario_advisory`, aislado y sin cambios. No leer/modificar tests N02 ni
+  `backend/tests/test_bot_api.py` (mezcla tests de reglas con N02). La prueba nueva usa solo
+  el router/ruta de reglas aislados y no llama rutas IA.
+- Sin ledger, riesgo, persistencia, órdenes/fills, endpoints nuevos, frontend ni dependencias.
+
+ALLOWLIST
+WRITE (exacta):
+- `backend/src/bot/models.py` (añadir solo los DTOs anteriores).
+- `backend/src/api/bot.py` (solo route `/api/bot/analyze`).
+- `backend/tests/test_bot_proposal_contract.py` — NEW (prueba aislada del contrato de reglas).
+- `trading-bot-action-plan.md` (solo fila ACT-C-001 para anotar entrega EN_REVISION).
+READ-ONLY necesario: `trading-bot-action-plan.md` fila ACT-C-001 y fuentes anteriores en sus
+secciones permitidas. No inspeccionar otros módulos/tests.
+
+BASELINE
+Antes de editar capturar `git status --short --untracked-files=all`, `git diff` y
+`git diff --cached`; preservar todos los cambios locales. El plan ya tiene diff preexistente:
+comparar el delta final y cambiar únicamente su fila ACT-C-001. Si cambia baseline o aparece
+un delta fuera de allowlist, STOP/BLOCKED sin revertir ni limpiar nada.
+
+CHECKS (ejecutar desde `backend/`)
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_bot_proposal_contract.py`
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_models.py`
+Luego `git diff --check` y `git diff --cached --check`. No ejecutar suite N02 ni tests amplios.
+
+STOP
+Sin staging, commit/push ni siguiente microtask. Reportar diff, tests y baseline para revisión;
+no marcar DEC-4 como implementación global ni ACT-C-001 COMPLETADO.

@@ -424,3 +424,29 @@ def test_isolation_restores_sentinel_after_fixture(fail_inside):
 
     # El sentinel de esta regresión tampoco puede contaminar las siguientes pruebas.
     assert market_api._market_engine is original_engine
+
+
+# ── Límites válidos de limit (G1-G3: cobertura faltante) ─────────────────────
+
+@pytest.mark.parametrize("limit, expected_count", [
+    (1, 1),
+    (500, 500),
+])
+def test_candles_limit_boundary_accepts_valid_values(client, limit, expected_count):
+    """Verificar que los bordes válidos de limit devuelven exactamente N velas."""
+    resp = client.get(f"/api/market/candles?limit={limit}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data_source"] == "TEST_ONLY"
+    assert data["interval"] == "1m"
+    assert len(data["candles"]) == expected_count
+
+
+def test_candles_default_limit_is_100(client):
+    """Sin query limit, el endpoint debe devolver exactamente 100 velas."""
+    resp = client.get("/api/market/candles")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data_source"] == "TEST_ONLY"
+    assert data["interval"] == "1m"
+    assert len(data["candles"]) == 100

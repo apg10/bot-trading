@@ -1,0 +1,85 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-006
+TASK: BACKEND-KELTNER-NUMERIC-REFERENCE-CHECK-001 / REV-001
+
+OBJETIVO
+Comprobar si existe una referencia numérica aprobada para validar Keltner sin
+inferirla del código ni inventar la fórmula original. ACT-S-006 sigue POR_REVALIDAR.
+
+REF-BASE
+master / 7322afa336a798e255f81b8c74154352e40a8bf3
+Solo lectura; preservar los cambios locales. Si hay actividad concurrente, STOP.
+
+FUENTES A LEER — ALCANCE CERRADO
+- `trading-bot-action-plan.md`: fila ACT-S-006 y bloque §14.10 de inventario.
+- `trading-bot-development-plan.md`: estado/bloqueos de Keltner y §3.
+- `backend/src/indicators/keltner.py` y `backend/src/indicators/__init__.py`.
+- Tests actuales de análisis que llaman o sustituyen Keltner.
+No leer todo el repo ni la copia fechada `trading-plans-2026-10-07/`.
+
+ENTREGA
+1. Enumerar qué especifica el plan/código sobre fórmula, EMA/ATR inicial,
+   periodos, multiplier, warmup e índices de salida.
+2. Separar especificación aprobada de comportamiento observado en el código.
+3. Verificar si hay fixture/referencia numérica independiente y test directo de
+   Keltner; listar rutas/tests exactos.
+4. Si existe referencia aprobada, entregar su fuente y los parámetros/valores
+   esperados sin implementar ni recalcular el algoritmo.
+5. Si no existe (como indican los planes actuales), declarar BLOCKED y pedir al
+   maestro la decisión mínima: fórmula ATR/init, EMA/init, periodos/multiplicador,
+   fixture de referencia y tolerancia. No seleccionar equivalentes por costumbre.
+
+EXCLUSIONES
+Sin cambios de código, tests, docs, plan, dependencias o configuración. No usar
+web, instalar librerías, ejecutar proveedores ni generar valores esperados desde
+la misma implementación. No cerrar ACT-S-006 ni alterar el warmup ya verificado.
+
+HANDOFF Y STOP
+Reportar hallazgos, rutas, decisión faltante o referencia aprobada. ACT-S-006
+permanece POR_REVALIDAR hasta resolver este contrato. Sin staging, commit, push
+ni task siguiente automático. STOP.
+
+--- CORRECCIÓN DEL INFORME ACT-S-006 ---
+
+### 1. Cálculo Keltner real existente y probado por `test_market_real_calculation`
+- Ruta: `backend/tests/test_analysis_market_api.py` (test que invoca `calculate_keltner` real)
+- Lo que comprueba: salida no vacía (`len(data["keltner"]["points"]) > 0`)
+- No verifica valores numéricos de bandas, ATR ni EMA — solo existencia de datos
+
+### 2. Pruebas de equivalencia market/provided
+- Rutas: `backend/tests/test_analysis_market_api.py` (asserts `data["keltner"] == data_provided["keltner"]`)
+- Naturaleza: comparan la misma implementación (`calculate_keltner`) con los mismos candles de entrada; verifican identidad de salida, no validez numérica respecto a una referencia externa
+
+### 3. Ausencia de fixture/test con valores numéricos esperados independientes
+- No existe fixture de OHLCV con valores Keltner esperados aprobados en ningún plan, código ni test
+- `test_keltner.py` solo comprueba longitud y mapeo temporal (warmup), no valores
+- Valores en `frontend/tests/analysis-request-tracker.test.ts:397` son fixture de prueba, no referencia aprobada
+
+### Comportamiento observado en código (NO es especificación aprobada)
+
+**EMA:**
+- Inicializada con SMA de los primeros `ema_period` closes
+- Alpha = 2.0 / (ema_period + 1)
+- Recurrencia: `val[i] = close[i] * alpha + val[i-1] * (1 - alpha)`
+
+**ATR:**
+- `true_ranges` inicializado en `[0.0]` (longitud 1)
+- Primer valor ATR: promedio simple de los primeros `atr_period` true_ranges
+- Recurrencia Wilder: `(atr[i-1] * (period - 1) + true_range[i]) / period`
+
+**Parámetros por defecto:**
+- `ema_period=20`, `atr_period=14`, `multiplier=2.0`
+- Mínimo warmup: 34 velas; primer índice de salida: 33 (0-based)
+
+Estos detalles son observaciones del código actual, no una especificación aprobada ni referencia numérica. No constituyen autoridad para validar valores esperados.
+
+### Decisión mínima pendiente del maestro
+| Parámetro | Pendiente |
+|-----------|-----------|
+| Fórmula ATR inicial | ¿Media simple de primeros `period` true_ranges u otro método? |
+| EMA init y alpha | ¿SMA inicial con alpha = 2/(n+1) como implementado? |
+| Periodos | Confirmar ema_period=20, atr_period=14 aprobados |
+| Multiplicador | Confirmar multiplier=2.0 aprobado |
+| Fixture de referencia | ¿Qué fixture con OHLCV y valores esperados se usará? |
+| Tolerancia | ¿Tolerancia numérica para comparación de floats? |
+
+**ACT-S-006: POR_REVALIDAR.** No se modificó código, tests ni docs. No se inventó fórmula ni se seleccionó task siguiente.

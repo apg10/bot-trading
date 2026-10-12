@@ -1,0 +1,45 @@
+ACT-C-001 — MICROTASK DE DECISIÓN: IDENTIDAD Y CONTRATO DEL CATÁLOGO
+REV-001 · SOLO LECTURA · PREPARADO PARA REVISIÓN; no ejecutar hasta autorización.
+ACT-C-001 global sigue PENDIENTE.
+
+OBJETIVO
+Resolver únicamente las decisiones de diseño abiertas de `IndicatorDefinition` usando el
+inventario ya revisado. No volver a explorar la implementación ni producir código. Entregar
+una tabla breve de decisión, recomendación, alternativa e implicación.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `act-c-001-indicator-catalog-review.md`.
+- `qwen-task-act-c-001-indicator-definition-design.txt`.
+- `trading-bot-action-plan.md`: fila ACT-C-001.
+- `trading-bot-development-plan.md`: §4 “Contratos y catálogos versionados”.
+
+No abrir fuentes/tests adicionales: el inventario ya contiene las citas de implementación.
+No leer ni mencionar FYL; ACT-S-007 permanece PAUSADO y ACT-E-001 BLOQUEADO. No reabrir N02,
+Capabilities, otros indicadores ni los microtasks aceptados.
+
+DECISIONES (máximo cuatro)
+1. **Identidad:** comparar ID semántico estable ligado al indicador actual frente a ID opaco
+   registrado. Recomendar uno sin asignar valores ni fijar sintaxis.
+2. **Versiones:** decidir si `schema_version` e `implementation_version` son referencias
+   separadas; diferenciar qué cambia cada una, sin elegir valores/formato ni fingir una
+   versión de implementación inexistente.
+3. **Metadatos:** proponer forma para parámetros tipados/configurables, default de implementación
+   vs default canónico, rangos conocidos/desconocidos, unidades, warmup derivado y evidencia de
+   causalidad (documentada/deducida/no especificada). No repetir tablas de números del código.
+4. **Ubicación/compatibilidad:** recomendar catálogo estático en módulo Python aditivo frente a
+   endpoint/expansión de contrato; explicar consumidores y límites. No cambiar wire JSON ni
+   ampliar `CapabilitiesContract` en esta decisión.
+
+REGLAS DE SALIDA
+- Máximo 400 palabras, una fila por decisión.
+- Valores desconocidos deben decir `NO ESPECIFICADO`; no completar rangos, IDs, versiones,
+  defaults, hashes ni unidades por intuición.
+- Distinguir el catálogo de capacidades estáticas. No afirmar equivalencia con métodos externos
+  ni convertir defaults de implementación en estrategia aprobada.
+- Cerrar con el alcance mínimo del futuro microtask de implementación y cualquier aprobación
+  aún necesaria; no dar por aprobado el contrato por recomendación propia.
+
+BASELINE / STOP
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al inicio
+y cierre. Conservar el workspace dirty; cero ediciones, tests, builds, servicios, red o
+instalaciones. Si la baseline cambia, STOP y explicar. Entregar decisión y STOP para el maestro.

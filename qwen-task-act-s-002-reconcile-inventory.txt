@@ -1,0 +1,124 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-002
+TASK: ACT-S-002 — RECONCILIAR INVENTARIO Y SEGUIMIENTO
+RUN: RUN-ACT-S-002-001 / REV-001
+
+USO
+Qwen recibe la orden de leer solo este task. Es documental, no implementa producto.
+Al finalizar, entregar diff y evidencia y STOP. No seleccionar ni ejecutar otro task.
+
+REF-BASE / WORKSPACE ACTUAL
+Branch: master
+HEAD: 7322afa336a798e255f81b8c74154352e40a8bf3
+Índice vacío. Status observado:
+ M backend/src/api/analysis.py
+ M backend/src/indicators/fyl.py
+ M backend/tests/test_binance_client.py
+ M backend/tests/test_fyl.py
+ M trading-bot-action-plan.md
+ M trading-bot-development-plan.md
+ M trading-console-visual-brief.md
+?? backend/src/ai/market_scenarios.py
+?? backend/src/ai/scenario_adapters.py
+?? backend/tests/test_analysis_market_api.py
+?? backend/tests/test_market_scenarios.py
+?? backend/tests/test_scenario_adapters.py
+?? qwen-batch-backend-fyl-reconnect-001.txt
+?? trading-plans-2026-10-07/trading-bot-action-plan.md
+?? trading-plans-2026-10-07/trading-bot-development-plan.md
+?? trading-plans-2026-10-07/trading-console-visual-brief.md
+?? qwen-task-act-s-002-reconcile-inventory.txt (este archivo de instrucciones)
+Los tres documentos raíz tienen diffs locales preexistentes. Antes de editar,
+registrar status, diff completo de esos documentos y hashes. Tratar su contenido
+actual como baseline autorizada; preservar cambios ajenos a ACT-S-002. No restaurar,
+recrear ni tocar archivos fuera de la allowlist. Si HEAD/status/diff difieren de
+esta baseline o no se puede separar el delta previo, STOP / BLOCKED.
+
+OBJETIVO
+Reconciliar el inventario y el seguimiento del plan canónico con código, tests y
+aceptaciones observables. Distinguir implementación, tests verificados y aceptación
+pendiente. La reconciliación no implementa funciones ni cierra automáticamente fases.
+
+ARCHIVOS EDITABLES — LISTA EXHAUSTIVA
+1. trading-bot-action-plan.md
+2. trading-bot-development-plan.md
+3. trading-console-visual-brief.md
+
+REQUIRED CONTEXT
+Leer los tres documentos de raíz y solo el código/tests necesarios para respaldar
+las afirmaciones que se van a actualizar. La copia `trading-plans-2026-10-07/` es
+histórica/propuesta, no autoridad; no leerla como fuente de estado ni editarla.
+
+Revisar como mínimo: action plan §1, §5 y §14.7–§14.9; development plan estado por
+área, bloqueos y tabla de fases; brief §5/contexto actual.
+
+EVIDENCIA QUE DEBE RECONCILIARSE
+- ACT-S-002 está PENDIENTE; cerrarlo solo si se entrega la matriz y los tres
+  documentos quedan coherentes. Si no, dejarlo abierto con gaps concretos.
+- B3.1–B3.4, B4.1 y B4.2 constan aceptados. Mantener B4.2 COMPLETADO; no reabrirlo.
+- BACKEND-SCENARIO-STATE/CLOSE/SNAPSHOT y ADVISORY-SERVICE-001 están COMPLETADOS
+  solo en sus alcances anotados. Conservar íntegra su cronología de aceptación.
+- FYL incremental: strength genérica corregida para el umbral 0.01; timestamps de
+  pivotes incremental/batch usan open_time de origen. Gate local reportado y
+  verificado: test_fyl.py + test_analysis_market_api.py, 21 passed. Batch continúa
+  TEST_ONLY; los tests concretos son `test_incremental_strength_sign_default_min_strength`,
+  `test_incremental_pivots_preserve_real_open_time_with_nonzero_start_and_irregular_intervals`
+  y `test_batch_pivots_preserve_real_open_time_with_nonzero_start_and_irregular_intervals`.
+  No afirmar equivalencia al FYL original, cuya fórmula sigue sin especificación.
+- Reconexión: `test_engine_receives_real_client_disconnect_and_reconnect_callbacks`
+  actualizado al frame 1m alineado y al contrato HTTP fake; gate local reportado y
+  verificado: test_binance_client.py + test_market_engine.py, 66 passed. El fake
+  HTTP devuelve histórico vacío: esto prueba el callback/protocolo, no backfill.
+- Mercado: los microarreglos de símbolo, close_time, rejilla WS 1m y rechazo REST
+  bootstrap/gap se verificaron en sus gates. No bastan por sí solos para cerrar
+  ACT-S-005 global.
+- ACT-S-005 sigue POR_REVALIDAR salvo que se demuestren TODOS sus criterios del
+  backlog (límites, símbolo, procedencia, reconexión, teardown y temporalidad).
+- ACT-S-007 sigue POR_REVALIDAR: las pruebas de timestamps/fuerza no especifican
+  ni validan la fórmula original. No cerrar ACT-S-006 ni inventar Keltner/FYL.
+- Buscar el identificador N03 como token independiente en plan/código/tests. No
+  crear N03 ni tratar CORRECCION03 como N03. Si no existe, registrar “no definido/
+  no encontrado”; no asignarle estado PENDIENTE o COMPLETADO.
+
+CORRECCIONES DOCUMENTALES OBLIGATORIAS
+1. Corregir las referencias activas que dicen que ADVISORY-SERVICE-001 es “siguiente”
+   (§1 y §12): §14.9 y su ficha conservan su cierre COMPLETADO como historia. No
+   borrar ni reescribir la ficha de entrega/revisión.
+   Añadir la matriz/registro ACT-S-002 en una nueva §14.10, actualizar el estado y
+   evidencia de su fila en §5. Tras cierre, dejar claro que no se seleccionó task
+   siguiente; no crear otro backlog ID.
+2. Reconciliar la descripción antigua de B4.2 como futuro y la afirmación FYL de
+   timestamps `índice × 60.000` en el resumen vigente; actualizar solo esa descripción.
+   Mantener los paquetes B4.2/ACT-S-001 históricos como historia, con nota de
+   superseded si hace falta; no borrar ni reabrir entregas aceptadas.
+3. Registrar los dos microarreglos aceptados bajo ACT-S-005/007 como evidencia
+   acotada, pero mantener POR_REVALIDAR si algún criterio global sigue sin validar.
+4. Reflejar estado real coherente entre los tres documentos. No convertir objetivos
+   visuales, N02 estructurado, TEST_ONLY ni ejecución inexistente en capacidades
+   operativas. No inventar funciones ni un task sucesor.
+
+MATRIZ Y CRITERIOS DE CIERRE
+- La reconciliación identifica capacidades pertinentes como IMPLEMENTADO, PARCIAL,
+  AUSENTE o NO VERIFICADO, con rutas de código y tests concretos cuando existan.
+- Incluir al menos filas para mercado/API+procedencia, análisis B3/B4, indicadores
+  FYL/Keltner, N02/IA, Terminal/UI y PAPER/persistencia/demo. Usar evidencia ya
+  verificable; marcar no auditado/NO VERIFICADO donde no alcance, sin ampliar a QA.
+- Para tests, indicar si el resultado fue ejecutado localmente o reportado en un
+  handoff previamente verificado. No llamar “pasados” a tests solo leídos.
+- Separar estado de código, cobertura de tests y aceptación de plan; no deducir
+  cierre global de ACT-S-005/007 por los microarreglos anteriores.
+- B4.2, STATE/CLOSE/SNAPSHOT y ADVISORY permanecen aceptados en su alcance.
+- No hay afirmación inventada de N03 ni confusión con CORRECCION03.
+- Los tres documentos raíz concuerdan y sus cambios previos no relacionados se
+  conservan literalmente.
+
+VALIDACIÓN
+Task documental: tests/build/typecheck NO APLICA; no modificar código/tests.
+Ejecutar desde raíz `git diff --check` y `git diff --cached --check`; revisar status.
+Comparar el diff final con los diffs iniciales capturados y separar cada delta propio.
+
+EXCLUSIONES / HANDOFF
+No editar código, tests, API, frontend, archivos AI, copia fechada, configuración o
+dependencias. No cerrar ACT-S-005/006/007/C-001 sin sus criterios completos. No
+crear N03, no actualizar porcentaje global, no borrar historial. Sin staging,
+commit, push, red, servicios o instalación. Entregar diff de los tres documentos,
+matriz/evidencia, estado de ACT-S-002 y límites. STOP; no iniciar tarea siguiente.

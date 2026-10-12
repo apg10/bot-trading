@@ -1,0 +1,43 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-007
+TASK: ACT-S-007 — REVALIDAR AISLAMIENTO FYL
+RUN: RUN-ACT-S-007-REVALIDATE-001 / REV-001
+
+TIPO
+Revalidación de solo lectura del item POR_REVALIDAR. No implementar detector ni
+atribuirlo al método FYL original.
+
+REF-BASE
+master / 6c1ef549e962acc1f4249f7f352ced3fad6d30a6
+`backend/src/indicators/fyl.py` y `backend/tests/test_fyl.py` tienen cambios locales
+aceptados por tareas FYL previas. Capturar status/diffs/hashes y tratarlos como
+baseline inmutable. Preservar los demás cambios locales. Si hay cambio concurrente,
+STOP / BLOCKED.
+
+ALCANCE DE LECTURA
+- `trading-bot-action-plan.md`: fila ACT-S-007 y §14.10.
+- `trading-bot-development-plan.md`: §3 y estado FYL.
+- `backend/src/indicators/fyl.py`.
+- `backend/tests/test_fyl.py` y el uso actual desde `backend/src/api/analysis.py` /
+  `backend/tests/test_analysis_market_api.py`.
+Leer solo funciones/tests relevantes, no módulos completos ni copias fechadas.
+
+REVALIDAR
+1. Incremental usa solo barras previas (sin lookahead), fuerza genérica con default
+   min_strength=0.01 y timestamp open_time real; identificar tests exactos.
+2. Batch preserva open_time/zonas pero usa datos futuros, continúa TEST_ONLY y no se
+   usa como señal causal/operativa.
+3. Comprobar si existe una especificación aprobada del detector FYL original. No
+   inferirla de capturas, nombres, valores de fixtures ni del código actual.
+4. Separar implementación, cobertura de tests y aceptación del plan. No concluir
+   COMPLETADO solo porque los tests pasen si ACT-S-007 requiere una especificación
+   que no existe.
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_fyl.py tests/test_analysis_market_api.py
+Desde raíz: `git diff --check`, `git diff --cached --check`.
+
+SALIDA / STOP
+Entregar matriz corta de criterios, rutas/tests/resultados, contradicciones y
+recomendación POR_REVALIDAR/COMPLETADO con evidencia. No editar archivos, plan,
+tests ni código; no inventar fórmulas ni abrir otro task. Sin staging, commit,
+push, red o instalaciones. STOP; el maestro decide aceptación y siguiente paso.

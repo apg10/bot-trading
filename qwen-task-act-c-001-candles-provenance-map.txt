@@ -1,0 +1,45 @@
+ACT-C-001 / MICROTASK DE DECISIÓN 3 — VELAS Y PROCEDENCIA
+REV-001 · SOLO LECTURA · PREPARADO PARA REVISIÓN; no ejecutar tests ni implementar.
+
+OBJETIVO
+Inventariar el flujo de velas y etiquetas de procedencia desde Binance/fixture hasta
+histórico, WebSocket y análisis. Recomendar identidad/forma canónica mínima y dónde debe
+vivir la procedencia, con implicaciones de compatibilidad. No cambiar modelos ni wire JSON.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `trading-bot-action-plan.md`: fila ACT-C-001 y slice Environment aceptado.
+- `backend/src/market/candle_builder.py`, `backend/src/market/engine.py`,
+  `backend/src/market/binance_client.py`.
+- `backend/src/api/market.py`, `backend/src/api/analysis.py`,
+  `backend/src/api/analysis_market.py`, `backend/src/models/state.py`.
+- `backend/src/indicators/keltner.py` (solo validar consumidor/campos).
+- `backend/tests/test_candle_builder.py`, `backend/tests/test_market_api.py`,
+  `backend/tests/test_analysis_market_input.py`, `backend/tests/test_analysis_market_api.py`,
+  `backend/tests/test_binance_client.py`.
+
+ESCRITURA: NINGUNA. No inspeccionar/editar frontend, FYL, N02, estrategia, otros dominios,
+fixtures fechadas ni archivos fuera de allowlist. ACT-S-007 sigue PAUSADO; no analizarlo.
+
+PREGUNTAS A RESPONDER
+1. Matriz de formas actuales: `Candle.timestamp_ms`, vela de motor/API `open_time` +
+   `close_time` + `is_closed`, `CandleInput` de análisis; indicar campos requeridos,
+   contexto symbol/interval, procedencia y consumidores/tests exactos.
+2. Describir con evidencia qué significa `close_time` (inclusive), vela provisional/cerrada,
+   fallback `TEST_ONLY`, y etiquetas `market_engine`/`provided`. No inferir origen certificado.
+3. Recomendar una opción mínima para identidad: mantener `open_time` como tiempo de apertura
+   en el contrato de mercado y adaptar `timestamp_ms` legado, o alternativa con impactos.
+   Recomendar si procedencia sigue en envelope/response o pasa a cada vela; no mezclarla con
+   aptitud, salud ni autorización de ejecución.
+4. Separar cambios compatibles de los que alterarían API/WS/consumidores; proponer un solo
+   siguiente microtask de implementación después de aprobación. No inventar schema_version.
+
+BASELINE
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al
+inicio y al cierre; no cambiar nada. Los cambios locales existentes son baseline, incluidos
+`analysis.py`, `market_api.py`, `binance_client.py` y datos de análisis. Si varían status o
+diffs durante el informe, STOP y reportar, sin limpiar/revertir.
+
+CHECKS / SALIDA
+No ejecutar tests, build, red ni instalaciones. Entregar matriz, rutas/tests que sustentan
+cada afirmación, recomendación con opción alternativa e impacto, alcance exacto del futuro
+microtask y decisiones que debe aprobar el maestro. Confirmar cero archivos alterados y STOP.

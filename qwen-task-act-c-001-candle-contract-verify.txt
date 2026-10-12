@@ -1,0 +1,59 @@
+ACT-C-001 / SLICE: VELAS Y PROCEDENCIA — VERIFICAR CONTRATO EXISTENTE
+RUN: REV-001 · PROPUESTA PARA REVISIÓN; no ejecutar hasta autorización.
+
+DECISIONES APROBADAS PARA ESTE SLICE
+- `open_time` es la identidad temporal del flujo/contrato de mercado.
+- `Candle.timestamp_ms` permanece como campo legacy; el adapter de borde mapea
+  `timestamp_ms` a `open_time`. No renombrar ni cambiar su serialización.
+- La procedencia queda en el envelope de la respuesta, no en cada vela.
+- Preservar las semánticas existentes: `CandleHistoryResponse.data_source` marca
+  mercado/fixture; el análisis de velas recibidas marca `data_source="provided"`;
+  la ruta market-analysis puede identificar además `source="market_engine"`.
+- `close_time` permanece cierre inclusivo; `is_closed` distingue vela final.
+
+OBJETIVO
+Verificar si la implementación y pruebas existentes ya cumplen esas decisiones. Si
+cumplen, registrar aceptación de este sub-slice en la ficha ACT-C-001 y mantener el
+alcance global PENDIENTE. Si hay gap, no arreglarlo: devolver evidencia y proponer un
+microtask de código separado.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `trading-bot-action-plan.md`: solo fila ACT-C-001.
+- `backend/src/models/state.py`: solo `Candle`/`MarketSnapshot`.
+- `backend/src/fixtures/synthetic.py`: generación de `Candle`.
+- `backend/src/market/candle_builder.py`, `backend/src/market/engine.py`.
+- `backend/src/api/market.py`, `backend/src/api/analysis.py`,
+  `backend/src/api/analysis_market.py`.
+- `backend/tests/test_models.py`, `backend/tests/test_candle_builder.py`,
+  `backend/tests/test_market_api.py`, `backend/tests/test_analysis_market_input.py`,
+  `backend/tests/test_analysis_market_api.py`.
+
+ALLOWLIST DE ESCRITURA
+- `trading-bot-action-plan.md`: MOD únicamente en la ficha ACT-C-001, y solo si la
+  evidencia pasa. Registrar el sub-slice de velas/procedencia aceptado; mantener el
+  estado global ACT-C-001 PENDIENTE y enumerar lo que aún falta.
+- Ningún archivo de código o test. No tocar las suites existentes aunque estén dirty.
+
+NO INCLUIR
+Cambios/alias de `Candle`, schema_version, payloads HTTP/WS, fuentes por vela, nuevas
+etiquetas, backtest, catálogo/versiones, señales, órdenes/posiciones, estrategia/FYL,
+N02, frontend o TypeScript. ACT-S-007 permanece PAUSADO y ACT-E-001 BLOQUEADO.
+
+PRECONDICIÓN DE BASELINE
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached`.
+Hay cambios preexistentes en plan, `analysis.py`, `market.py`, `state.py` y tests; son
+baseline inmutable. Al editar la ficha, comparar el delta posterior contra el diff del
+plan capturado: permitir solo la modificación autorizada de la fila ACT-C-001. Cambios
+preexistentes fuera de esa fila no causan STOP; cualquier delta concurrente no autorizado
+sí causa STOP/BLOCKED. No revertir ni limpiar archivos.
+
+CHECKS (ejecutar desde `backend/`)
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_models.py tests/test_candle_builder.py tests/test_market_api.py tests/test_analysis_market_input.py tests/test_analysis_market_api.py`
+Además `git diff --check` y `git diff --cached --check`. No ejecutar otros tests/builds,
+servicios, red ni instalaciones.
+
+SALIDA / STOP
+Matriz de criterios con rutas/tests exactos y resultado; confirmar preservación de
+`timestamp_ms`, JSON de `open_time`, procedencia en envelope, cierre inclusivo y
+`is_closed`. Si pasa, registrar únicamente este sub-slice y dejar ACT-C-001 global abierto.
+No implementar gaps, no cerrar el backlog y no hacer commit/push.

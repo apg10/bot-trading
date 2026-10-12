@@ -1,0 +1,84 @@
+PROPUESTA DE MICROTASK — ACT-C-001 / SLICE: ENVIRONMENT CANÓNICO
+Estado: PREPARADO PARA REVISIÓN. No ejecutar ni editar hasta autorización.
+Dependencia: ACT-S-002 COMPLETADO. ACT-C-001 global sigue PENDIENTE.
+
+OBJETIVO
+Unificar el tipo Python `Environment` usado por config y modelos backend, sin cambiar
+valores wire, coerciones, aliases de entrada ni la exclusión operativa de LIVE. Reutilizar
+`backend/src/models/state.py::Environment`, ya consumido por modelos Pydantic, como tipo
+único; `src.config.Environment` seguirá siendo un nombre público compatible por import.
+Este slice no cambia el tipo espejo de TypeScript ni contratos de capacidades/snapshot.
+
+INVENTARIO ACTUAL
+- `backend/src/config.py`: define `Environment(StrEnum)` con `paper`, `exchange_demo`,
+  `live`. `Config` normaliza mayúsculas y guiones; aliases `EXCHANGEDEMO` y `DEMO` mapean
+  a `exchange_demo`; entrada desconocida cae a `paper`; `LIVE`/`live` lanza `ValueError`.
+- `backend/src/models/state.py`: define otra clase `Environment(StrEnum)` con los mismos
+  tres valores. La usan `EngineInfo`, `MarketSnapshot`, `Order` y `Position`.
+- Consumidores backend del tipo de `state.py`: `api/market.py::StartMarketRequest`,
+  `api/main.py::EngineInfo`, `fixtures/synthetic.py` y los modelos anteriores. `src/__init__.py`
+  re-exporta `Environment` desde `src.config`.
+- `StrEnum` serializa sus values minúsculos; las clases duplicadas hoy comparan con strings,
+  pero no son idénticas por tipo. `api/main.py` convierte `app_config.env` con
+  `Environment(app_config.env)`.
+- Especializaciones que permanecen intactas: `CapabilitiesContract.environment` acepta solo
+  `paper|exchange_demo`; `ScenarioSnapshot.environment` acepta solo `paper`.
+- UI: `frontend/src/types/state.ts` declara el espejo TS `paper|exchange_demo|live`, usado por
+  `EngineInfo`, `MarketSnapshot`, `Order`, `Position`; el fixture sintético declara `paper`.
+  No hay codegen Python→TypeScript en este slice.
+
+RECOMENDACIÓN Y COMPORTAMIENTO A PRESERVAR
+Fuente backend única: `models.state.Environment`. `config.py` importará ese tipo en vez de
+declarar otro. Al importarse desde `src.config`, el nombre seguirá disponible porque el
+símbolo importado queda expuesto en ese módulo; `src/__init__.py` no requiere cambios.
+`models.state`/`models` no importan config, por lo que la dirección de import evita ciclo.
+No borrar `LIVE` del enum: permanece definido por compatibilidad, pero `Config` lo seguirá
+rechazando; el endpoint de capacidades no aceptará LIVE y N02 sigue siendo PAPER. Conservar
+normalización, aliases, fallback desconocido→PAPER, valores serializados en minúscula y
+conversión Pydantic. El tipo TS sigue siendo espejo independiente, no fuente backend.
+
+ALLOWLIST DE ESCRITURA (exhaustiva)
+- `backend/src/config.py` — MOD: importar el `Environment` canónico y retirar solo la
+  declaración duplicada; mantener mapa, fallback, rechazo LIVE y API pública del módulo.
+- `backend/tests/test_environment_canonical.py` — NEW: identidad/import compatibility,
+  valores/serialización, aliases y fallback, LIVE rechazado por `Config`.
+- `trading-bot-action-plan.md` — MOD solo en la ficha ACT-C-001: registrar aceptación de
+  este sub-slice y mantener el alcance global PENDIENTE.
+
+SOLO LECTURA
+`backend/src/models/state.py`, `backend/src/__init__.py`, `backend/src/models/__init__.py`,
+`backend/src/api/market.py`, `backend/src/api/main.py`, `backend/src/fixtures/synthetic.py`,
+`backend/src/ai/scenario_models.py`, `backend/tests/test_models.py`,
+`backend/tests/test_market_lifecycle.py`, `backend/tests/test_capabilities_api.py`,
+`frontend/src/types/state.ts`, `frontend/src/fixtures/synthetic.ts`, plan canónico.
+No modificar el modelo canónico, capacidades aceptadas, N02, UI u otros consumidores.
+
+PRECONDICIÓN DE BASELINE
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` antes
+de editar. Preservar todos los cambios preexistentes. En el plan comparar el diff final con
+la baseline y permitir únicamente el delta intencional de la ficha ACT-C-001; no parar por
+diffs preexistentes fuera de la ficha, pero detenerse ante cualquier cambio concurrente,
+alteración de baseline o edición fuera de allowlist. No limpiar ni revertir cambios.
+
+CRITERIOS DE ACEPTACIÓN
+1. `config.Environment is models.state.Environment`; `src.config.Environment` y
+   `src.Environment` siguen siendo imports compatibles de la misma clase.
+2. Los miembros y values siguen siendo `PAPER="paper"`, `EXCHANGE_DEMO="exchange_demo"`,
+   `LIVE="live"`; serialization JSON conserva los values minúsculos.
+3. `Config` preserva parsing case-insensitive, normalización de `-`, aliases existentes,
+   fallback de input desconocido a PAPER y rechazo de LIVE.
+4. `StartMarketRequest`, `EngineInfo`, `MarketSnapshot`, `Order` y `Position` continúan
+   validando/serializando sin cambios; `CapabilitiesContract` y `ScenarioSnapshot` mantienen
+   sus restricciones de entorno actuales. No se habilita LIVE.
+5. Solo se editan rutas de allowlist; la ficha ACT-C-001 registra este sub-slice aceptado y
+   deja explícitamente abierto el alcance global. No se declara ACT-C-001 COMPLETADO.
+
+CHECKS (ejecutar desde `backend/`)
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_environment_canonical.py tests/test_models.py tests/test_market_lifecycle.py tests/test_capabilities_api.py`
+Además: `git diff --check`, `git diff --cached --check`, revisión de status/diffs contra
+baseline y confirmación de que no se modificó `test_capabilities_api.py` ni frontend.
+
+STOP
+Esta es solo una propuesta del siguiente microtask. No editar, ejecutar tests, cambiar plan,
+hacer commit/push ni iniciar contratos de velas, señales, órdenes, posiciones o estrategias
+hasta aprobación expresa.

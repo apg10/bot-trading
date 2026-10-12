@@ -7,22 +7,38 @@ Implementar solo los DTOs Pydantic del contrato `IndicatorDefinition` y pruebas 
 No poblar todavía el catálogo con registros Keltner/MACD ni elegir valores de ID/version;
 esos valores dependen de decisiones/versiones persistidas posteriores.
 
+ACLARACIONES A–G RESUELTAS PARA EL MICRO-TASK
+- A: `indicator_id` obligatorio, string no vacío sin regex/formato impuesto. Su validación
+  semántica y registro corresponden a un catálogo/persistencia posterior.
+- B: `schema_version: str` requerido e independiente de
+  `implementation_version: str | None`, también requerido como campo pero nullable. Ninguno
+  tiene valor/default/formato preasignado; generación/persistencia queda para ACT-P-001.
+- C: `function_configurable: bool` describe argumentos de función. `consumer_exposed: bool | None`
+  tiene default `None` (=no determinado); para los usos actuales, `AnalysisRequest` y
+  `TradingStrategy` no exponen parámetros Keltner/MACD, por lo que las entradas de prueba usan
+  `false`. No confundir llamada Python con configuración de estrategia/API.
+- D: `UnitSpec` distingue origen y valor: `origin` es `instrument`, `fixed` o `not_specified`;
+  `unit: str | None` es `None` cuando se hereda del instrumento o no está especificada, y se
+  informa el `origin` para distinguirlos. No fijar USDT.
+- E: `WarmupSpec` usa `rule: str | None`, `bars: int | None` y evidencia
+  `documented|deduced|not_specified`. `None` es unknown, no cero. Las cifras conocidas se usan
+  solo en fixtures de tests, no como catálogo canónico.
+- F: ejecutar desde `backend/` con `.venv/bin/python`; no hace falta activar venv. Verificar que
+  existe; si falta, STOP, sin instalar ni crear entornos.
+- G: esta autorización cubre solo el micro-task descrito abajo, no catalogar, integrar ni
+  desplegar. El maestro revisa la entrega antes de aceptar/cerrar.
+
 CONTRATO A IMPLEMENTAR (estructura, sin instancias de catálogo)
-- `indicator_id: str`: obligatorio, no vacío, sin regex/formato impuesto.
-- `schema_version: str`: obligatorio, separado de la versión de implementación; sin valor
-  default ni literal de producción.
-- `implementation_version: str | None`: obligatorio nullable; `None` significa que aún no se
-  asignó una versión persistida. No generar hashes/fechas/versiones.
 - `ParameterSpec`: nombre, tipo escalar (`int|float|bool`), `function_configurable`,
-  `consumer_exposed: bool | None`, `implementation_default` tipado, min/max opcionales y un
-  estado explícito para rangos conocidos vs NO ESPECIFICADO. No marcar los parámetros actuales
-  como expuestos a estrategia/API si no existen esos campos.
-- Unidades por input/output deben admitir unidades heredadas del instrumento; no fijar USDT.
-- Warmup representa regla dependiente de parámetros, valor de ejemplo solo como fixture test y
-  evidencia clasificada (documentada/deducida/no especificada). Causalidad es evidencia, no una
-  promesa formal. Output schema separa unidades y redondeo de API de precisión matemática.
-- `IndicatorDefinition` agrupa estos componentes. Test placeholders de schema no se registran
-  como valores del catálogo de producción.
+  `consumer_exposed`, `implementation_default` opcional/tipado, min/max opcionales y estado de
+  rango `specified|not_specified`. Defaults reflejan la implementación actual, nunca estrategia
+  canónica. Si `range_status=not_specified`, min/max quedan `None`.
+- `WarmupSpec`: regla derivada, barras conocidas opcionales y nivel de evidencia; no se fija
+  margen de estabilidad ni garantía formal de no-lookahead.
+- `OutputSpec`: nombre, tipo, `UnitSpec`; redondeo API no define precisión matemática.
+- `IndicatorDefinition`: agrupa `indicator_id`, `schema_version`, `implementation_version`,
+  parámetros, inputs/outputs, unidades, warmup y causalidad. No crear catálogo poblado ni
+  asignar IDs/versiones/valores en este task; usar fixtures sintéticos solo para pruebas.
 
 ALLOWLIST DE ESCRITURA (exhaustiva)
 - `backend/src/indicators/catalog.py` — NEW: schemas/DTOs puros, sin catálogo poblado ni

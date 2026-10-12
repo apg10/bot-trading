@@ -1,0 +1,121 @@
+PROPUESTA DE MICROTASK — ACT-C-001 / CONTRATOS PAPER SPOT
+Estado: PREPARADO PARA ACEPTACIÓN DE ESPECIFICACIÓN. No ejecutar/implementar aún.
+DEC-5 se cierra solo como inventario; no se elige `bot.models` ni `models.state` como
+familia canónica. ACT-C-001 global sigue PENDIENTE.
+
+OBJETIVO
+Añadir DTOs Pydantic aditivos y pruebas de contrato para órdenes, fills, reservas OCO y
+vista de posición PAPER Spot. No alterar los dos modelos legacy ni conectarlos a runtime.
+La especificación propuesta está al final; si no se aprueba, detenerse sin editar.
+
+CONTRATO PROPUESTO (sin capital, costes ni riesgo numérico)
+- `StrategyRef`: `strategy_id` estable + `strategy_version` inmutable; `decision_id` refiere
+  a DecisionRecord. No derivar versión del nombre visible ni inventar hash. schema version
+  del DTO es distinta de la versión de estrategia.
+- `PaperOrder`: IDs `order_id`, `client_order_id` idempotente, `paper_account_id` y
+  `paper_session_id`,
+  `environment="paper"`, símbolo BASE/QUOTE, side/type existentes, `requested_qty` Decimal
+  base, fills/cantidad restante, price/trigger cuando corresponda, `strategy_ref`,
+  `decision_id`, estado, tiempo, asignaciones explícitas de lote para ventas y vínculo a
+  `position_id`/`protection_group_id` para salidas.
+- Idempotencia normativa: mismo `(account_id, session_id, environment, client_order_id)` y mismo payload
+  canónico devuelve el mismo resultado sin segundo efecto; payload distinto con igual clave
+  es conflicto. Cancel/replace también llevan `command_id` idempotente. No implementar
+  storage/deduplicación en este task.
+- Estados: flujo PAPER local PREPARED→ACCEPTED/REJECTED/CANCELLED/EXPIRED; ACCEPTED→
+  PARTIALLY_FILLED/FILLED/CANCELLED/EXPIRED; PARTIALLY_FILLED→PARTIALLY_FILLED/FILLED/
+  CANCELLED/EXPIRED. `PENDING_SEND` no se usa en el flujo local normal (si se introduce una
+  cola durable, PREPARED→PENDING_SEND→ACCEPTED/REJECTED/UNKNOWN_STATE). REJECTED, FILLED,
+  CANCELLED y EXPIRED son terminales. Cancelación/expiración parcial conserva fills y
+  ejecutado, anula solo remanente.
+- `UNKNOWN_STATE` puede entrar desde PENDING_SEND/ACCEPTED/PARTIALLY_FILLED solo si una
+  escritura transaccional tuvo resultado incierto. Solo reconciliación contra ledger/fills
+  puede resolverlo a ACCEPTED/PARTIALLY_FILLED/FILLED/CANCELLED/REJECTED/EXPIRED; nunca
+  reenviar automáticamente ni fabricar un fill.
+- `PaperFill`: evento inmutable con fill/order ID, qty, price, time, y en ventas allocations
+  explícitas por lote cuya suma coincide con qty del fill. Comisión requerida como
+  `Commission | null`. `null`=coste desconocido; `{amount:"0", asset:...}`=cero conocido.
+  Fee conocido se postea aparte en su asset del ledger. Si es desconocido, no afirmar saldo
+  reconciliado/PnL neto ni aceptar órdenes que dependan de ese saldo. Sin política ACT-P-005,
+  no calcular fee ni PnL neto.
+- `PaperPositionView`: proyección no autoritativa de lotes Spot. `position_id` identifica el
+  lote creado por los fills de una orden de entrada; fills parciales de esa entrada actualizan
+  el mismo lote. La vista agregada por account+symbol+strategy_ref suma esos lotes. Qty/coste
+  medio derivan de fills; abierta/cerrada deriva de qty. Mark/PnL es vista con snapshot, no
+  saldo contable.
+- `PaperBalanceView`: ledger ACT-P-002 es única autoridad; `available=total-reserved` por
+  asset; todos son no negativos y `total=available+reserved`. `reserved<=total`, y una
+  reserva nueva no supera el disponible previo. Efectivo quote es compartido y no se duplica
+  por estrategia.
+- `UnattributedInventoryView`: cantidad base explícita sin strategy_ref, incluida en total
+  ledger pero no vendible por una estrategia hasta evento de atribución explícito. Invariante:
+  `ledger.total = sum(open position lots) + sum(unattributed inventory)`.
+- `PaperReservationRef` y `PaperProtectionGroup`: la reserva identifica asset/amount y el
+  order o grupo dueño; OCO enlaza stop/take y allocations por position_id sin duplicar amount.
+- Atribución Spot: cada orden de entrada crea lotes `position_id` atribuidos a una única
+  `strategy_ref`; fills parciales de la misma orden pertenecen al mismo lote. Cada venta requiere allocations
+  explícitas a lotes; suma exacta=qty solicitada; sin FIFO ni consumo cruzado. El inventario
+  base no atribuido (p.ej. apertura explícita) se representa aparte y no se puede vender desde
+  una estrategia hasta una atribución explícita. Invariante: balance base del ledger = suma
+  de lotes atribuidos + inventario no atribuido; reservas son una partición de disponible,
+  no inventario adicional.
+- Venta: `lot_allocations` explícitas (lot/position ID + qty); suma=qty solicitada, símbolos,
+  account y strategy_ref coherentes. No FIFO ni asignación cruzada implícita.
+- OCO: stop/take ligados a `position_id` y `protection_group_id`; reserva compartida una sola
+  vez, nunca suma duplicada. Fill parcial reduce la cantidad protegida del grupo y de ambos
+  miembros al inventario abierto restante; fill total cancela el sibling. Cancelar un miembro
+  no cancela el otro ni libera la reserva que ese miembro aún necesita. Cancelar el grupo
+  cancela remanentes de ambos y libera solo reserva no consumida. La reserva OCO es por lote
+  y compartida (no se suma por orden); nunca excede lotes disponibles. El motor serializará la
+  carrera para impedir sobreventa. Ventas manuales solo usan base libre; no pueden consumir
+  qty protegida salvo cancelación/reemplazo explícito.
+  Si stop y take son ambos alcanzables en una barra y se desconoce el orden intrabar, resultado
+  sigue pendiente de ACT-P-005.
+- Importes `Decimal`, JSON string, unidad explícita (qty base, precio/notional quote, fee
+  asset). Precisión/tick/step proviene de filtros versionados; sin escala fija ni redondeo
+  silencioso. Precio de ejecución, fees y ambigüedad intrabar siguen abiertos a ACT-P-005.
+- Compra MARKET necesita cota explícita de quote para poder reservar; sin cota, rechazar.
+  No definir monto inicial, fees, spread, slippage, capital ni porcentajes de riesgo.
+
+ALLOWLIST PROPUESTA (si se aprueba)
+- `backend/src/models/paper_contracts.py` — NEW: DTOs contract-only; reutilizar valores/types
+  de enums existentes cuando encajen, sin modificar/reexportar `bot.models` ni `models.state`,
+  sin adaptadores/runtime.
+- `backend/tests/test_paper_contracts.py` — NEW: campos/tipos, Decimal JSON, PAPER-only,
+  comisión null vs cero, matriz estática de transiciones, no overfill, atribución/reconciliación
+  de inventario, ecuación de balances, límite de reserva, OCO parcial/cancelación de miembro y
+  grupo, sin doble reserva ni venta sobre inventario abierto.
+- SOLO LECTURA para mapear compatibilidad: `backend/src/bot/models.py`,
+  `backend/src/models/state.py`, `backend/src/models/__init__.py`, `backend/src/__init__.py`.
+- `trading-bot-action-plan.md` — MOD solo ficha ACT-C-001 después de aceptación del microtask;
+  dejar el global PENDIENTE.
+
+COMPATIBILIDAD
+Los DTOs nuevos son aditivos y se importan desde `src.models.paper_contracts`; no reemplazan
+ni reexportan los modelos actuales. `bot.models` y `models.state` conservan sus campos,
+serialización e imports hasta un microtask posterior que apruebe un adapter/migración.
+
+NO INCLUYE
+Ledger/SQLite, saldo inicial con valor por defecto, generación de fills simulados,
+matching/pricing, cálculo/política de comisiones, risk policy, endpoints/UI, adaptadores,
+migración/eliminación de modelos legacy, N02, estrategia activa ni dependencias nuevas.
+Idempotencia efectiva y transiciones runtime pertenecen a
+ACT-P-001/002/003; política de fill/costes a ACT-P-005; riesgo a ACT-P-004.
+
+DECISIONES QUE EL MAESTRO DEBE APROBAR
+1. Identidad de lotes por orden de entrada+`strategy_ref`; vista agregada por
+   account+symbol+strategy_ref y ventas con lot allocations explícitas.
+2. `UNKNOWN_STATE` solo por incertidumbre de persistencia/reconciliación; `PENDING_SEND` fuera
+   del flujo PAPER local normal.
+3. OCO comparte una reserva; cancelar grupo completo o una operación explícita de reemplazo.
+4. Commission nullable distingue desconocido de cero; sin defaults monetarios.
+5. DTOs Paper nuevos y aditivos en módulo propio; legacy intacto, sin elegir familia actual.
+
+BASELINE Y CHECKS (solo después de autorización)
+Capturar status y diffs staged/unstaged; preservar cambios locales. Comparar el delta y
+editar solo allowlist. Ejecutar desde `backend/`: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys
+tests/test_paper_contracts.py tests/test_models.py tests/test_bot_api.py`; luego diff checks.
+Tests legacy existentes son solo regresión; no modificarlos.
+
+STOP: Esta propuesta no autoriza código. Esperar aprobación del contrato y allowlist.

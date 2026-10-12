@@ -1,0 +1,47 @@
+ACT-C-001 / MICROTASK DE DECISIÓN 5 — MODELOS ORDER/POSITION
+REV-001 · SOLO LECTURA · PREPARADO PARA REVISIÓN; no ejecutar tests ni implementar.
+
+OBJETIVO
+Inventariar exclusivamente las dos familias de modelos `Order` y `Position`, sus enums,
+consumidores/tests y ausencias operativas. Recomendar límites/camino mínimo de compatibilidad
+antes de cualquier consolidación. No crear API, ejecución, persistencia ni fills.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `trading-bot-action-plan.md`: fila ACT-C-001 y slice Environment aceptado.
+- `backend/src/bot/models.py`: `Order`, `Position`, enums relacionados.
+- `backend/src/models/state.py`: `Order`, `Position`, enums relacionados (no tocar
+  `Environment` ni `CapabilitiesContract`).
+- `backend/src/api/bot.py`: imports, placeholders/counts y cualquier uso de esos modelos.
+- `backend/src/models/__init__.py`, `backend/src/__init__.py` (solo reexports).
+- `backend/tests/test_models.py`, `backend/tests/test_bot_api.py`,
+  `backend/tests/test_bot_ai_api.py`.
+
+ESCRITURA: NINGUNA. No leer/editar rules, señales/propuestas, N02 salvo las referencias de
+`test_bot_ai_api.py` necesarias para entender objetos preservados, DB/persistencia, motor,
+riesgo, endpoints de ejecución, frontend ni archivos fuera de allowlist.
+
+PREGUNTAS A RESPONDER
+1. Matriz por familia con tipos/campos requeridos, defaults, constraints, enums/valores de
+   status, entorno/ID/timestamps y campos de precio/riesgo. Marcar explícitamente diferencias;
+   no presentar modelos Pydantic como contratos operativos por existir.
+2. Enumerar usos efectivos y reexports; distinguir construcción en tests, placeholders y
+   consumidores productivos. Confirmar si existe ruta/persistencia/creación/actualización
+   real de órdenes/posiciones; citar evidencia y tests exactos.
+3. Recomendar qué modelo podría ser la base canónica —o recomendar posponer la unificación—
+   y presentar alternativa con coste de migración/imports, estado lifecycle, validaciones,
+   identidad y compatibilidad. No inferir una autoridad de ejecución.
+4. Enumerar decisiones que requieren aprobación: status lifecycle, environment, campos de
+   posición, constraints quantity/price e identidad. Dar recomendación con implicaciones.
+5. Proponer un único microtask de implementación después de aprobación, solo para modelos,
+   adaptadores y tests; cualquier API/persistencia queda expresamente separada.
+
+BASELINE
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al
+inicio y cierre; no cambiar nada. Estos archivos pueden tener cambios locales aceptados;
+son baseline inmutable. Si status o diffs varían durante el informe, STOP y reportar; no
+limpiar, revertir o “arreglar” diferencias.
+
+CHECKS / SALIDA
+No ejecutar tests, build, servicios, red ni instalaciones. Entregar matriz, citas de código/
+tests, propuesta recomendada y alternativa, límites del futuro microtask y decisiones para
+el maestro. Confirmar cero archivos alterados y STOP.

@@ -1,0 +1,89 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-C-001
+TASK: ACT-C-001 — INVENTARIO Y MAPA CANÓNICO DE CONTRATOS (READ-ONLY)
+RUN: REV-001
+ESTADO: PREPARADO PARA REVISIÓN; no iniciar hasta autorización expresa.
+
+OBJETIVO
+Entregar un mapa verificable de los contratos que YA existen para entorno,
+capacidades, velas/procedencia, estrategia/parámetros/versiones, propuestas,
+órdenes y posiciones. Identificar duplicados, diferencias y huecos; proponer
+un contrato objetivo mínimo con compatibilidad y decisiones pendientes. Es una
+fase de inventario/decisión de ACT-C-001, no una unificación ni implementación.
+
+BASELINE Y CONSERVACIÓN
+- Esperada: master / 6c1ef549e962acc1f4249f7f352ced3fad6d30a6.
+- Capturar `git status --short --untracked-files=all`, diffs e hashes de los
+  archivos de entrada antes de leer. Hay modificaciones locales preexistentes;
+  son baseline ajena e inmutable, incluidos análisis, FYL y tests.
+- Si cambia la baseline durante el task: STOP/BLOCKED. Al final demostrar que
+  status, diffs e hashes de archivos de entrada no fueron alterados por el task.
+
+ALLOWLIST DE LECTURA (exhaustiva; solo las partes relevantes)
+- `trading-bot-action-plan.md`: §§3, 5 (ACT-C-001), 14.13.
+- `trading-bot-development-plan.md`: §3, §4 y “Contratos y catálogos versionados”.
+- `backend/src/config.py`, `backend/src/models/state.py`.
+- `backend/src/api/capabilities.py`, `backend/src/api/market.py`,
+  `backend/src/api/analysis.py`, `backend/src/api/analysis_market.py`,
+  `backend/src/api/bot.py`.
+- `backend/src/market/engine.py`, `backend/src/market/candle_builder.py`,
+  `backend/src/fixtures/synthetic.py`.
+- `backend/src/bot/models.py`, `backend/src/bot/rules.py`,
+  `backend/src/ai/scenario_models.py`, `backend/src/ai/scenario_adapters.py`.
+- `backend/tests/test_models.py`, `backend/tests/test_capabilities_api.py`,
+  `backend/tests/test_market_api.py`, `backend/tests/test_analysis_market_input.py`,
+  `backend/tests/test_analysis_market_api.py`, `backend/tests/test_bot_api.py`,
+  `backend/tests/test_ai_scenarios.py`, `backend/tests/test_scenario_adapters.py`.
+
+ARCHIVOS AUTORIZADOS PARA ESCRITURA: ninguno. No crear ni editar archivos, código,
+tests, planes, fixtures, modelos o APIs. Entregar el informe en la respuesta.
+No leer frontend, planes fechados, secretos ni otros módulos fuera de allowlist.
+
+ALCANCE / ACEPTACIÓN
+1. Matriz por dominio con fuente actual (clase/ruta/endpoint), campos y valores
+   wire relevantes, versionado/procedencia, tests que lo cubren y estado:
+   entorno/capacidades; candle/datos; estrategia/configuración/indicadores;
+   propuesta/señal; orden; posición.
+2. Enumerar contradicciones observables, sin resolverlas en código. Distinguir
+   contratos de API, modelos internos y ejemplos TEST_ONLY; no presentar mocks
+   ni clases sin endpoint como capacidades operativas.
+3. Para cada dominio, proponer un límite/identidad canónica mínima y el mapeo
+   desde contratos actuales; indicar compatibilidad, campos que no deben inferirse
+   y riesgos de cambiar nombres/valores. No diseñar API nueva ni catálogo dinámico.
+4. Recomendar qué decisiones debe aprobar el maestro antes de una tarea de
+   implementación; dar opción recomendada, alternativa e implicaciones. No elegir
+   silenciosamente ni convertir sugerencias en requisitos aceptados.
+5. Separar evidencia existente de huecos. Citar referencias de código/tests. No
+   correr tests: la tarea no modifica comportamiento; enumerar gates focales para
+   una futura implementación y explicar qué contrato verificarían.
+
+RESTRICCIONES DE DOMINIO
+- Mantener ACT-S-007 PAUSADO (§14.13); equivalencia FYL original pertenece a
+  ACT-E-001 BLOQUEADO. No reabrirlos ni hacerlos dependencia de este inventario.
+- LIVE está declarado pero deshabilitado; distinguir valor de enum de entorno
+  habilitado. No habilitar LIVE ni inferir ejecución/portfolio desde capacidades.
+- Los snapshots N02, API de capabilities, velas de mercado y modelos legacy de
+  bot tienen contratos/versiones distintos hoy. Describir; no afirmar que ya sean
+  una fuente común.
+- No convertir señal/propuesta TEST_ONLY en orden ni posición; no introducir
+  persistencia, riesgo, estrategia real o autoridad de ejecución.
+
+DECISIONES A PRESENTAR (NO RESOLVER POR CUENTA PROPIA)
+- Versión de contrato: reutilizar versiones explícitas por payload donde ya
+  existen (recomendado para compatibilidad) vs. introducir versión global de API.
+- Consolidación: capa canónica/adaptadores preservando wire contracts existentes
+  (recomendado, menos riesgo) vs. reemplazar familias duplicadas (requiere migración
+  y puede romper consumers/tests).
+- Identidad versionada de estrategia y datos: recomendar campos mínimos y qué
+  puede afirmarse con la información existente; no inventar hashes/versiones.
+
+CHECKS DEL TASK
+- No ejecutar tests, build, servicios, red ni instalaciones.
+- `git diff --check` y `git diff --cached --check` deben quedar limpios.
+- Comparar baseline status/diffs/hashes pre/post; cualquier diferencia inducida
+  por el task es fallo y exige STOP, no limpieza automática.
+
+SALIDA Y STOP
+Informe breve con matriz, diferencias, propuestas recomendadas y alternativas,
+decisiones que requieren aprobación y archivos/tests focales para la futura
+implementación. No marcar ACT-C-001 COMPLETADO: el informe prepara el contrato,
+no prueba compatibilidad ni implementación. Terminar y esperar revisión del maestro.

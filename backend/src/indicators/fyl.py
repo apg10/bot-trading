@@ -89,7 +89,7 @@ def _detect_pivots_incremental(
 
         if is_high:
             # Calcular fuerza basada en los vecinos anteriores
-            left_range = max(highs[max(0, i - lookback):i]) - highs[i]
+            left_range = highs[i] - max(highs[max(0, i - lookback):i])
             strength = left_range / highs[i] if highs[i] > 0 else 0.0
             if strength >= min_strength:
                 pivots.append(PivotPoint(
@@ -108,7 +108,7 @@ def _detect_pivots_incremental(
                 break
 
         if is_low:
-            left_range = lows[i] - min(lows[max(0, i - lookback):i])
+            left_range = min(lows[max(0, i - lookback):i]) - lows[i]
             strength = left_range / abs(lows[i]) if lows[i] != 0 else 0.0
             if strength >= min_strength:
                 pivots.append(PivotPoint(

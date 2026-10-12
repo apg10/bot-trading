@@ -1,0 +1,50 @@
+ACT-C-001 — MICROTASK DECISIÓN: IDENTIDAD/VERSIÓN DE DATOS
+Solo lectura · propuesta para revisión · no ejecutar tests ni implementar.
+DEC-3 (open_time + timestamp_ms legacy; procedencia en envelope) ya aceptada.
+ACT-C-001 global PENDIENTE.
+
+OBJETIVO
+Inventariar únicamente identidad, esquema y procedencia de los datos de mercado usados por
+backend/analisis. Recomendar qué distingue una versión de esquema de una revisión/dataset
+concreto; diseñar el mínimo para reproducibilidad sin inventar hashes/proveedores ni tocar
+indicadores, IA o ejecución.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `trading-bot-action-plan.md`: fila ACT-C-001, slice de velas/procedencia aceptado y ACT-P-001.
+- `trading-bot-development-plan.md`: §3 mercado backend, §4 contratos versionados y la
+  descripción ACT-P-001 de referencias persistidas de datasets.
+- `backend/src/models/state.py`: solo `Candle` y `MarketSnapshot`.
+- `backend/src/market/engine.py`: solo snapshot/metadata temporal y barras cerradas.
+- `backend/src/market/binance_client.py`: solo formato/metadata HTTP y WS recibidos.
+- `backend/src/api/market.py`, `backend/src/api/analysis.py`,
+  `backend/src/api/analysis_market.py`: solo schemas/respuestas y mapeos de origen.
+- `backend/src/fixtures/synthetic.py`: identidad/procedencia de fixture.
+- `backend/tests/test_market_api.py`, `backend/tests/test_analysis_market_input.py`,
+  `backend/tests/test_analysis_market_api.py`: solo expectativas de identidad/procedencia.
+
+ESCRITURA: NINGUNA. No leer/editar frontend, N02, FYL, indicadores, estrategia, órdenes,
+posiciones, tests fuera de allowlist ni planes fechados. No modificar etiquetas actuales.
+
+PREGUNTAS / ACEPTACIÓN
+1. Matriz de identificadores actuales: símbolo/mercado, intervalo, `open_time`/`close_time`,
+   cierre, formato, fuente y rango temporal; anotar cuáles están en vela y cuáles en envelope.
+2. Documentar con evidencia diferencias actuales: histórico `market_engine`/`TEST_ONLY`,
+   análisis de velas del cliente `provided`, y `source="market_engine"` de market-analysis.
+   No equiparar `provided` a proveedor certificado.
+3. Separar conceptos:
+   - `schema_version`: forma/semántica del contrato de datos;
+   - `dataset/run reference`: mercado, símbolo, intervalo, ventana/versionado de datos,
+     snapshot temporal y procedencia necesarios para reconstruir un análisis.
+   Recomendar campos mínimos con implicaciones; no inventar valores de versión, hash, hora,
+   cobertura ni nombres de proveedor no garantizados por el código.
+4. Recomendar si el catálogo común ACT-C-001 debe referenciar contratos separados de datos y
+   estrategia o un envelope compartido. Mantener la procedencia en envelope y `timestamp_ms`
+   legacy intactos; no añadir campos/labels en este informe.
+5. Señalar dependencias para implementación futura (ACT-P-001 para persistencia/versiones,
+   ACT-P-010 para feed real, si aplica), alternativa y decisiones que debe aprobar el maestro.
+
+CHECKS / BASELINE
+No ejecutar tests, builds, servicios, red ni instalaciones. Capturar status/diffs staged y
+unstaged al inicio y al cierre; preservar modificaciones y archivos untracked locales.
+Confirmar cero archivos alterados. Entregar matriz con citas, separación de conceptos,
+propuesta recomendada/alternativa y futuro microtask mínimo. STOP sin implementar.

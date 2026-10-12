@@ -126,3 +126,106 @@ def test_batch_pivots_preserve_real_open_time_with_nonzero_start_and_irregular_i
         end_found = any(p.time_ms == zone.end_time_ms for p in result.pivots)
         assert start_found, f"Zone start_time_ms={zone.start_time_ms} no coincide con ningún pivote"
         assert end_found, f"Zone end_time_ms={zone.end_time_ms} no coincide con ningún pivote"
+
+
+# TASK 01 — FYL INCREMENTAL STRENGTH SIGN REGRESSION
+"""Verifica que el signo de la fuerza en pivotes incrementales es correcto:
+máximos y mínimos locales válidos superan el umbral predeterminado (0.01)."""
+
+
+def test_incremental_strength_sign_default_min_strength():
+    """Caso incremental con min_strength predeterminado (0.01).
+
+    - timestamps no cero e irregulares;
+    - un máximo y un mínimo local que superen 0.01;
+    - comprobar pivote, timestamp de origen y strength positiva/umbral;
+    - ampliar la misma entrada con barras futuras y comprobar que los pivotes ya
+      observables conservan tipo, tiempo, precio y strength.
+    """
+    # Datos con timestamps irregulares y offset no cero.
+    # lookback=3 → el primer índice posible es i=3.
+    # idx=3: high=150 > max(100,105,110)=110? Sí (150>110). Es HIGH local.
+    #   strength = (150 - 110) / 150 = 40/150 ≈ 0.2667 > 0.01 ✓
+    # idx=3: low=90 > min(30,28,26)=26? Sí → no es LOW local (no es mínimo).
+    # idx=7: high=130 < max(140,135,145)=145 → no es HIGH local.
+    #   low=80 < min(85,88,92)=85? Sí → es LOW local.
+    #   strength = (85 - 80) / 80 = 5/80 = 0.0625 > 0.01 ✓
+    candles = [
+        {"open_time": 1_700_000_100_000, "high": 100.0, "low": 30.0, "close": 95.0},
+        {"open_time": 1_700_000_160_000, "high": 105.0, "low": 28.0, "close": 101.0},
+        {"open_time": 1_700_000_230_000, "high": 110.0, "low": 26.0, "close": 104.0},
+        {"open_time": 1_700_000_305_000, "high": 150.0, "low": 90.0, "close": 140.0},   # idx=3: HIGH local
+        {"open_time": 1_700_000_390_000, "high": 140.0, "low": 85.0, "close": 135.0},
+        {"open_time": 1_700_000_485_000, "high": 135.0, "low": 88.0, "close": 130.0},
+        {"open_time": 1_700_000_590_000, "high": 145.0, "low": 92.0, "close": 140.0},
+        {"open_time": 1_700_000_700_000, "high": 130.0, "low": 80.0, "close": 125.0},   # idx=7: LOW local
+    ]
+
+    # ── Primera llamada con min_strength predeterminado (0.01) y lookback=3 ──
+    result = calculate_fyl(candles, lookback=3)
+
+    assert result.mode == "incremental"
+    assert len(result.pivots) > 0, "Se esperaba al menos un pivote con min_strength=0.01"
+
+    # Encontrar el HIGH en idx=3 y LOW en idx=7
+    high_pivot = None
+    low_pivot = None
+    for p in result.pivots:
+        if p.pivot_type.value == "high" and p.time_ms == candles[3]["open_time"]:
+            high_pivot = p
+        if p.pivot_type.value == "low" and p.time_ms == candles[7]["open_time"]:
+            low_pivot = p
+
+    assert high_pivot is not None, "No se encontró HIGH pivot en candles[3]['open_time']"
+    assert low_pivot is not None, "No se encontró LOW pivot en candles[7]['open_time']"
+
+    # Verificar timestamps exactos
+    assert high_pivot.time_ms == candles[3]["open_time"]
+    assert low_pivot.time_ms == candles[7]["open_time"]
+
+    # Verificar precios exactos
+    assert high_pivot.price == candles[3]["high"]
+    assert low_pivot.price == candles[7]["low"]
+
+    # Verificar strength positiva y sobre umbral predeterminado 0.01
+    assert high_pivot.strength > 0.0, f"strength HIGH debe ser positiva, got {high_pivot.strength}"
+    assert high_pivot.strength >= 0.01, f"strength HIGH {high_pivot.strength} < umbral 0.01"
+    assert low_pivot.strength > 0.0, f"strength LOW debe ser positiva, got {low_pivot.strength}"
+    assert low_pivot.strength >= 0.01, f"strength LOW {low_pivot.strength} < umbral 0.01"
+
+    # Verificar que confirmed=False (incremental)
+    assert high_pivot.confirmed is False
+    assert low_pivot.confirmed is False
+
+    # ── Ampliar con barras futuras y comprobar estabilidad de pivotes observados ──
+    future_candles = [
+        {"open_time": 1_700_000_815_000, "high": 132.0, "low": 82.0, "close": 128.0},
+        {"open_time": 1_700_000_935_000, "high": 140.0, "low": 85.0, "close": 135.0},
+        {"open_time": 1_700_001_060_000, "high": 145.0, "low": 88.0, "close": 140.0},
+    ]
+    extended_candles = candles + future_candles
+    result_extended = calculate_fyl(extended_candles, lookback=3)
+
+    assert result_extended.mode == "incremental"
+
+    # Los pivotes ya observables deben conservar tipo, tiempo, precio y strength
+    high_pivot_ext = None
+    low_pivot_ext = None
+    for p in result_extended.pivots:
+        if p.pivot_type.value == "high" and p.time_ms == candles[3]["open_time"]:
+            high_pivot_ext = p
+        if p.pivot_type.value == "low" and p.time_ms == candles[7]["open_time"]:
+            low_pivot_ext = p
+
+    assert high_pivot_ext is not None, "HIGH pivot desapareció tras extender con barras futuras"
+    assert low_pivot_ext is not None, "LOW pivot desapareció tras extender con barras futuras"
+
+    assert high_pivot_ext.pivot_type == high_pivot.pivot_type
+    assert high_pivot_ext.time_ms == high_pivot.time_ms
+    assert high_pivot_ext.price == high_pivot.price
+    assert high_pivot_ext.strength == high_pivot.strength
+
+    assert low_pivot_ext.pivot_type == low_pivot.pivot_type
+    assert low_pivot_ext.time_ms == low_pivot.time_ms
+    assert low_pivot_ext.price == low_pivot.price
+    assert low_pivot_ext.strength == low_pivot.strength

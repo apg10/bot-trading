@@ -1,0 +1,37 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: BACKEND-MARKET-LIMIT-BOUNDARIES-001 / REV-001
+
+OBJETIVO
+Cerrar el gap de cobertura G1-G3 de la revalidación ACT-S-005: demostrar los
+límites válidos de GET /api/market/candles y su default, sin cambiar producción.
+
+REF-BASE
+master / 7322afa336a798e255f81b8c74154352e40a8bf3
+`backend/tests/test_market_api.py` está limpio respecto a HEAD. Preservar todos
+los cambios locales/untracked preexistentes y editar únicamente el archivo de la
+allowlist. Si el target difiere de REF-BASE, STOP / BLOCKED.
+
+ARCHIVO EDITABLE — LISTA EXHAUSTIVA
+1. backend/tests/test_market_api.py
+
+TRABAJO
+Añadir una prueba parametrizada o equivalente con tres solicitudes a
+`GET /api/market/candles` usando el fixture TestClient aislado sin engine:
+1. sin query `limit` → exactamente 100 velas;
+2. `limit=1` → exactamente 1 vela;
+3. `limit=500` → exactamente 500 velas.
+
+En cada caso comprobar status 200, `data_source == "TEST_ONLY"`, `interval == "1m"`
+y longitud exacta. No debilitar ni duplicar la prueba ya existente de límites
+inválidos (`0`, `-1`, `501`) en `test_market_lifecycle.py`.
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_market_api.py tests/test_market_lifecycle.py
+Desde raíz: `git diff --check`, `git diff --cached --check`,
+`git status --short --untracked-files=all`.
+
+EXCLUSIONES / HANDOFF
+No cambiar código productivo, límites de `Query`, el client Binance, fixtures,
+otros endpoints, docs ni estado global ACT-S-005. No commit/push/staging. Entregar
+el diff y resultados y STOP; la revalidación global y cierre de ACT-S-005 queda
+para revisión posterior del maestro.

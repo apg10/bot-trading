@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -14,6 +14,25 @@ class Environment(StrEnum):
     PAPER = "paper"
     EXCHANGE_DEMO = "exchange_demo"
     LIVE = "live"
+
+
+class CapabilitiesContract(BaseModel):
+    """Contrato estático versionado expuesto por GET /api/capabilities."""
+
+    schema_version: Literal["backend_capabilities.v1"] = Field(
+        default="backend_capabilities.v1", frozen=True
+    )
+    environment: Literal["paper", "exchange_demo"]
+    runtime_health_checked: Literal[False] = False
+    market_data_supported: bool = True
+    technical_analysis_supported: bool = True
+    ai_scenarios_supported: bool = True
+    original_method_supported: bool = False
+    execution_available: bool = False
+    portfolio_available: bool = False
+    paper_simulation_available: bool = False
+    exchange_demo_execution_available: bool = False
+    live_execution_available: bool = False
 
 
 # ── Motor / Estado ───────────────────────────────────────────────────────────

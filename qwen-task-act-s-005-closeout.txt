@@ -1,0 +1,58 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-005
+TASK: ACT-S-005 — REVALIDACIÓN FINAL Y CIERRE CONDICIONAL
+RUN: RUN-ACT-S-005-CLOSEOUT-001 / REV-001
+
+TIPO
+Revisión de evidencia y actualización puntual de seguimiento. Sin implementación.
+
+REF-BASE
+master / 7322afa336a798e255f81b8c74154352e40a8bf3
+ACT-S-002 está COMPLETADO. El árbol conserva cambios locales aceptados y el nuevo
+test de límites en `backend/tests/test_market_api.py`. Capturar status/diff antes
+de tocar seguimiento y preservar todo. No restaurar archivos ni alterar tests.
+
+ARCHIVO EDITABLE — LISTA EXHAUSTIVA
+1. trading-bot-action-plan.md (solo fila ACT-S-005 y nueva ficha §14.11 si cierra)
+
+REVALIDAR TODOS LOS CRITERIOS ACT-S-005
+1. Límites/query: `Query(100, ge=1, le=500)`; tests para default 100, válidos 1/500
+   e inválidos 0/-1/501.
+2. Símbolos: válidos y malformados en status/candles; símbolo válido no poseído no
+   recibe historial del engine y conserva procedencia TEST_ONLY/unavailable correcta.
+3. Procedencia: `market_engine` real vs fixture TEST_ONLY/unavailable; no afirmar
+   conexión ni ejecución por fixture.
+4. Temporalidad: close_time inclusivo, rejilla WS 1m, bootstrap/gap REST, frescura,
+   pending_gaps y entries_allowed.
+5. Reconexión/teardown: callbacks reales, recuperación, liberación de handlers,
+   cancelación y shutdown. Distinguir el FakeHTTP vacío (callbacks/protocolo) del
+   backfill exitoso probado con DelayedHTTP.
+
+Leer solo funciones/tests relevantes en:
+- backend/src/api/market.py
+- backend/src/market/engine.py
+- backend/src/market/binance_client.py
+- backend/src/market/candle_builder.py
+- backend/tests/test_market_api.py
+- backend/tests/test_market_engine.py
+- backend/tests/test_market_lifecycle.py
+- backend/tests/test_binance_client.py
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_market_api.py tests/test_market_engine.py tests/test_market_lifecycle.py tests/test_binance_client.py
+Desde raíz: `git diff --check`, `git diff --cached --check`.
+
+DECISIÓN / CIERRE
+- La fila solo puede pasar a COMPLETADO si cada criterio tiene evidencia de código
+  y test pertinente. No basta con que todas las suites estén verdes si existe un
+  criterio sin cobertura; distinguirlo y aplicar el alcance exacto de la fila.
+- El cap HTTP `min(limit,1000)` puede constar como código revisado sin test directo;
+  no ampliar la aceptación para convertirlo en requisito nuevo.
+- Si todos los criterios se satisfacen: actualizar únicamente la fila ACT-S-005 a
+  COMPLETADO y añadir §14.11 con rutas/tests/resultados/limits. Si falta algo,
+  dejar POR_REVALIDAR y reportar gaps; no arreglarlos ni seleccionar otro task.
+- Mantener ACT-S-006/007 en POR_REVALIDAR; no reabrir ACT-S-002, B4.2, N02 ni otros
+  cierres aceptados. No crear N03.
+
+HANDOFF Y STOP
+Reportar matriz completa, tests ejecutados, límites y diff del plan. No editar
+código/tests/otros docs, no staging, commit, push ni siguiente task automático.

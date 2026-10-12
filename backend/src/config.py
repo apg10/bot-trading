@@ -7,16 +7,12 @@ MARKET_FRESHNESS_MARGIN_SECONDS=30: edad máxima = 60s + margen.
 La referencia es UTC actual menos close_time Binance de la última vela cerrada.
 """
 
-from enum import StrEnum
 import math
 import os
 from typing import Optional
 
-
-class Environment(StrEnum):
-    PAPER = "paper"
-    EXCHANGE_DEMO = "exchange_demo"
-    LIVE = "live"
+# Fuente canónica del tipo Environment (reutiliza models.state.Environment)
+from .models.state import Environment
 
 
 class Config:

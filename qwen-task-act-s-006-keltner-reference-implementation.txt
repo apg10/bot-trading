@@ -1,0 +1,75 @@
+MAESTRO: GROUP-BACKEND-001 / owner ACT-S-006
+TASK: BACKEND-KELTNER-NUMERIC-REFERENCE-TEST-001 / REV-001
+
+AUTORIZACIÓN
+El usuario aprobó el contrato numérico de la versión Keltner actual en esta
+conversación. Implementar solo el test independiente y su registro documental.
+ACT-S-006 NO se cierra con este task.
+
+REF-BASE
+master / 7322afa336a798e255f81b8c74154352e40a8bf3
+`backend/src/indicators/keltner.py` está limpio; `backend/tests/test_keltner.py`
+existe en el árbol local como test warmup. Los dos documentos raíz están sucios
+con cambios previos aceptados. Capturar status/diffs/hashes antes de editar y
+preservar todo contenido previo fuera de este delta. No reemplazar esos archivos.
+
+ARCHIVOS EDITABLES — LISTA EXHAUSTIVA
+1. backend/tests/test_keltner.py
+2. trading-bot-development-plan.md
+3. trading-bot-action-plan.md
+
+CONTRATO NUMÉRICO APROBADO
+La referencia caracteriza la implementación actual, no el método Keltner original:
+- `TR[0]=0`; para i>0: `max(H-L, abs(H-Cprev), abs(L-Cprev))`.
+- EMA: SMA de los primeros n closes en índice n-1; después alpha=2/(n+1) y
+  `EMA[i]=alpha*C[i]+(1-alpha)*EMA[i-1]`.
+- ATR: promedio simple de los primeros p true ranges, incluyendo TR[0]=0 en p-1;
+  después recurrencia Wilder `(ATR[i-1]*(p-1)+TR[i])/p`.
+- Keltner: `upper=EMA+multiplier*ATR`; `lower=EMA-multiplier*ATR`.
+- Warmup actual: len < ema_period+atr_period → []; primera salida en índice
+  ema_period+atr_period-1.
+- Los defaults actuales 20/14/2.0 no son obligatorios para todas las estrategias.
+
+FIXTURE DE REFERENCIA (OHLCV, 1m)
+`open_time[i] = 1_699_999_980_000 + i*60_000` (origen minuto-alineado).
+Columnas por índice (O,H,L,C,V):
+0 (9,10,8,9,100); 1 (10,12,9,11,101); 2 (11,13,10,12,102);
+3 (12,14,11,13,103); 4 (14,16,12,15,104); 5 (14,15,12,13,105);
+6 (13,17,13,16,106); 7 (16,18,14,17,107).
+Test-only params: ema_period=3, atr_period=3, multiplier=2.0.
+No estrategia se ejecuta: strategy_version=N/A (test de indicador),
+risk_profile=N/A (sin ejecución/riesgo). Dataset: keltner-reference-ohlcv-8bar-v1.
+
+EXPECTED INDEPENDIENTE
+Calcular/verificar manualmente desde las fórmulas anteriores; no importar ni llamar
+`ema`, `_atr` o `calculate_keltner` para generar expected. Testear puntos i=5,6,7:
+
+| i | open_time | EMA | ATR | upper | lower |
+|---|---:|---:|---:|---:|---:|
+| 5 | 1_700_000_280_000 | 317/24 = 13.208333333333334 | 79/27 = 2.925925925925926 | 4117/216 = 19.060185185185187 | 1589/216 = 7.356481481481482 |
+| 6 | 1_700_000_340_000 | 701/48 = 14.604166666666666 | 266/81 = 3.2839506172839505 | 27439/1296 = 21.172067901234566 | 10415/1296 = 8.036265432098766 |
+| 7 | 1_700_000_400_000 | 1517/96 = 15.802083333333334 | 856/243 = 3.522633744855967 | 177661/7776 = 22.847350823045268 | 68093/7776 = 8.7568158436214 |
+
+Comparar flotantes con `pytest.approx(rel=1e-12, abs=1e-12)`: expected son
+racionales exactos, secuencia de solo tres recurrencias; tolerancia holgada frente
+a error de redondeo IEEE-754 y estricta frente a diferencias de fórmula.
+
+DOCUMENTACIÓN
+- En development plan, distinguir convención Keltner aprobada de fórmula FYL/MACD BB
+  aún indefinida; dejar claro que 20/14/2.0 son defaults configurables, no mandato
+  para cada estrategia.
+- En action plan, registrar fixture, parámetros, expected independiente y test/gate
+  bajo ACT-S-006. Mantener ACT-S-006 en EN_REVISION/POR_REVALIDAR, no COMPLETADO.
+- No reescribir historial ni cambiar estados de otros IDs.
+
+CHECK — DESDE backend/
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_keltner.py tests/test_analysis_market_input.py tests/test_analysis_market_api.py
+Desde raíz: `git diff --check`, `git diff --cached --check`,
+`git status --short --untracked-files=all`.
+
+EXCLUSIONES / HANDOFF
+No modificar keltner.py, ema.py, parámetros/defaults productivos, estrategia,
+riesgo, API, frontend ni arquitectura. No añadir estrategia real/versionado
+estructural: la metadata N/A solo etiqueta este test unitario. Sin staging,
+commit/push por Qwen; tras aceptación manual el maestro gestionará commit/push.
+Handoff y STOP; no task siguiente automático.

@@ -1,0 +1,252 @@
+PROPOSTA DE MICROTASK — ACT-C-001 (SLICE: ENTORNO / CAPACIDADES)
+==================================================================
+
+Estado inicial: PENDIENTE (propuesta para revisión)
+Dependencia: ACT-S-002 (COMPLETADO)
+Prioridad: P0
+
+
+OBJETIVO
+========
+
+Definir el contrato canónico de **capacidades estáticas** (entorno y capacidades) que
+UI, IA y backend deben compartir, garantizando compatibilidad con el endpoint existente
+`GET /api/capabilities`. Este slice se limita a campos derivables sin diagnóstico en
+tiempo de ejecución: entorno, soporte de subsistemas y versión del schema.
+
+**Fuera de alcance**: aptitud de datos, disponibilidad de ejecución, catálogo dinámico,
+velas, indicadores, zonas, estrategias, IA, órdenes, posiciones, persistencia, replay
+y laboratorio.
+
+
+ALCANCE DEL PLAN CANÓNICO (referencia)
+======================================
+
+- Plan técnico §4 "Contratos y catálogos versionados (objetivo, ACT-C-001)":
+  contrato común de estrategia, indicadores y datos para backend, UI e IA;
+  catálogo dinámico completo como ampliación.
+- Plan acción §5 fila ACT-C-001: mapa canónico de entornos, capacidades, velas,
+  propuestas, órdenes y posiciones; contratos y catálogo común para UI/IA.
+- Plan técnico §2 "Entornos separados": PAPER (datos reales, ejecuciones simuladas),
+  EXCHANGE_DEMO (demo/testnet oficial), LIVE (fuera de alcance).
+- Plan acción §10 "Bloqueos": distinguir datos ilustrativos, procedencia, entorno y
+  capacidad operativa.
+
+Este microtask **no implementa** el catálogo dinámico completo ni los contratos de
+velas/órdenes/posiciones. Solo fija la base de entorno y capacidades sobre la que
+esos contratos posteriores se apoyarán.
+
+
+ARCHIVOS CONSULTADOS (solo lectura)
+====================================
+
+1. `backend/src/config.py` — `Environment(StrEnum)` con PAPER/EXCHANGE_DEMO/LIVE;
+   clase `Config` con `env`, `execution_available=False`, `is_live=False`.
+2. `backend/src/models/state.py` — duplicado de `Environment(StrEnum)` (mismos valores);
+   `EngineInfo(environment: Environment)`, `MarketSnapshot(environment: Environment)`,
+   `Order(environment: Environment)`, `Position(environment: Environment)`.
+3. `backend/src/api/capabilities.py` — `GET /api/capabilities` con campos booleanos
+   hardcodeados a False para ejecución, cartera, paper_simulation, etc.
+4. `backend/src/api/main.py` — `lifespan` crea `MarketEngine`; `/health` devuelve
+   `environment: app_config.env`; `/engine/state` devuelve `implementation_status: not_implemented`.
+5. `backend/src/api/analysis_market.py` — `PreparedMarketAnalysis.execution_available: Literal[False]`.
+6. `trading-bot-development-plan.md` — §§1, 2, 4 "Contratos y catálogos versionados".
+7. `trading-bot-action-plan.md` — §§5 (ACT-C-001), §10 (bloqueos), §4 (puertas H0).
+
+
+PRECONDICIONES DE SEGURIDAD
+===========================
+
+Antes de editar cualquier archivo, desde la raíz del repositorio:
+- `git status --short --untracked-files=all` → capturar y conservar la salida.
+- `git diff -- trading-bot-action-plan.md` y `git diff --cached -- trading-bot-action-plan.md`
+  → capturar ambos diffs actuales del plan como baseline.
+
+Al modificar `trading-bot-action-plan.md`:
+- Limitar el cambio exclusivamente a la ficha ACT-C-001 (actualizar estado a PREPARADO).
+- Preservar todos los cambios preexistentes exactamente — en especial §14.13. La
+  existencia de cambios baseline fuera de ACT-C-001 no es por sí sola motivo para parar.
+- Comparar los diffs staged y unstaged posteriores con los capturados: solo se permite
+  añadir el delta intencional de ACT-C-001. Si cambia concurrentemente la baseline,
+  aparece una modificación inducida fuera de la allowlist o se altera un delta preexistente:
+  STOP / BLOCKED; no revertir ni limpiar cambios.
+- Comparar el status final con el inicial, explicando solo los cambios esperados en los
+  archivos autorizados. Preservar todo lo demás.
+
+
+DECISIONES PENDIENTES CON RECOMENDACIÓN E IMPLICACIONES
+========================================================
+
+D1. ¿Unificar o separar los dos `Environment` de config y models?
+------------------------------------------------------------------
+Decisión: **excluido de este slice**.
+
+No afirmar que existe una fuente única de verdad hoy: el repo contiene duplicados
+en `config.py` y `models/state.py`. Unificarlos requiere migrar imports en múltiples
+módulos y validar compatibilidad — fuera del scope de capacidades estáticas.
+
+Este microtask define solo el contrato de capacidades (capítulo D2-D5). Si se decide
+unificar Environment en un slice posterior, el contrato aquí definido no se ve afectado
+porque usa `environment: Literal["paper", "exchange_demo"]`, independiente de la identidad del tipo.
+
+D2. Estructura del inventario de capacidades (compatibilidad con `/api/capabilities`)
+--------------------------------------------------------------------------------------
+Recomendación: **estructura plana compatible con el endpoint actual**, sin romper la API.
+
+El contrato debe reflejar los campos que `GET /api/capabilities` devuelve hoy:
+  - `schema_version`: `Literal["backend_capabilities.v1"]` — versión del schema de capacidades, idéntica al valor actual del endpoint.
+  - `environment`: `Literal["paper", "exchange_demo"]` — entorno runtime (sin modificar los enums existentes).
+  - `runtime_health_checked`: `Literal[False]` — siempre False en este slice (sin diagnóstico), mantenido en su ubicación JSON actual para no romper compatibilidad. Se describe como metadata semántica, no anidada ni con promesa de transición automática a True.
+  - Campos booleanos de soporte: `market_data_supported`, `technical_analysis_supported`,
+    `ai_scenarios_supported`, `original_method_supported`.
+  - Campos booleanos de ejecución/cartera/simulación: `execution_available`,
+    `portfolio_available`, `paper_simulation_available`, `exchange_demo_execution_available`,
+    `live_execution_available`.
+
+Implicaciones: la estructura actual (planos booleanos) se mantiene como base. El contrato
+canónico declara estos campos con sus tipos y semántica, pero no introduce jerarquías ni
+subobjetos que requieran migrar consumidores existentes. La compatibilidad es por diseño:
+los consumidores actuales de `/api/capabilities` siguen funcionando sin cambios.
+
+D3. Aptitud de datos y disponibilidad de ejecución
+----------------------------------------------------
+Decisión: **excluidos de este slice**.
+
+`data_aptitude` requiere un mecanismo de evaluación de frescura/health que implica
+diagnóstico en tiempo de ejecución — fuera del alcance de capacidades estáticas.
+`execution_available` como enum (paper | exchange_demo | none) requeriría migrar los
+campos booleanos actuales y actualizar todos los consumidores.
+
+Estos campos se dejan para un slice posterior donde se defina el mecanismo de evaluación
+y se planifique la migración del endpoint `/api/capabilities`.
+
+D4. Versión del schema de capacidades e inmutabilidad de `schema_version`
+--------------------------------------------------------------------------
+Recomendación: usar `"backend_capabilities.v1"` como versión del contrato canónico,
+**idéntica al valor actual del endpoint**. No declarar una versión distinta que rompa la
+compatibilidad JSON con `/api/capabilities`.
+
+**Garantía de inmutabilidad**: `schema_version` se define como un campo Pydantic de tipo
+`Literal["backend_capabilities.v1"]` con `Field(frozen=True)`. Al ser Literal, el único
+valor aceptable es `"backend_capabilities.v1"`; al ser frozen, no puede reasignarse tras
+la construcción. No usar `ClassVar`: ese tipo no aparece en la respuesta JSON y rompería
+la compatibilidad del endpoint.
+
+Los consumidores (UI, IA) validan `schema_version` antes de interpretar campos. Si la
+versión no coincide con `"backend_capabilities.v1"`, se rechaza el payload o se activa un
+modo fallback.
+
+D5. ¿Incluir `runtime_health_checked` en el contrato canónico?
+---------------------------------------------------------------
+Recomendación: **sí, como campo plano en su ubicación JSON actual**, no como metadata anidada.
+
+Valor actual: siempre False porque el endpoint no diagnostica. El contrato debe mantenerlo
+en su posición plana (no dentro de un subobjeto `metadata`) para no romper compatibilidad.
+Se describe como metadata semántica, pero no se promete que pasará a True automáticamente
+ni se anida en ningún subcampo.
+
+Implicaciones: no bloquea la implementación del slice; documenta una capacidad futura
+sin comprometer a implementarla ahora.
+
+
+ALLOWLIST DE ARCHIVOS
+=====================
+
+Archivo | Tipo | Cambio
+--------|------|-------
+`backend/src/models/state.py` | MOD | Definir `CapabilitiesContract(BaseModel)` con campos planos: schema_version (`Literal["backend_capabilities.v1"]`), environment (`Literal["paper", "exchange_demo"]`), runtime_health_checked (`Literal[False]`), y los campos booleanos de soporte actuales. Sin DataAptitude ni ExecutionType.
+`backend/src/api/capabilities.py` | MOD | Migrar `CapabilitiesResponse` para heredar/componer `CapabilitiesContract`; mantener la respuesta JSON idéntica al endpoint actual para compatibilidad.
+`backend/tests/test_act_c_001_env_capabilities.py` | NEW | Tests del contrato: validación de campos, valores permitidos (Literal), versión schema inmutable.
+`backend/tests/test_capabilities_api.py` | EXISTING | Tests de regresión del endpoint `GET /api/capabilities`: JSON idéntico al actual, schema_version `"backend_capabilities.v1"`, environment válido. No se escribe ni modifica este archivo; se usa como referencia de regresión.
+`trading-bot-action-plan.md` | MOD | Actualizar fila ACT-C-001 con estado PREPARADO y evidencia de esta propuesta.
+
+
+CRITERIOS DE ACEPTACIÓN
+=======================
+
+C1. El contrato `CapabilitiesContract` existe en `backend/src/models/state.py`
+    con campos planos: schema_version (`Literal["backend_capabilities.v1"]`), environment
+    (`Literal["paper", "exchange_demo"]`), runtime_health_checked (`Literal[False]`),
+    y los campos booleanos de soporte actuales (market_data_supported, technical_analysis_supported,
+    ai_scenarios_supported, original_method_supported, execution_available, portfolio_available,
+    paper_simulation_available, exchange_demo_execution_available, live_execution_available).
+
+C2. No existen `DataAptitude` ni `ExecutionType` en este slice.
+
+C3. El endpoint `GET /api/capabilities` sigue devolviendo el mismo JSON con
+    `schema_version: "backend_capabilities.v1"`: la migración de `CapabilitiesResponse`
+    a `CapabilitiesContract` no altera los campos ni tipos de la respuesta.
+
+C4. El schema_version del contrato canónico es `"backend_capabilities.v1"`, inmutable por
+    diseño (Literal["backend_capabilities.v1"] con Field(frozen=True)). No se usa ClassVar.
+
+C5. Tests unitarios verifican: (a) que environment acepta solo `"paper"` y `"exchange_demo"`,
+    (b) que la construcción con todos los campos booleanos en False es válida,
+    (c) que schema_version no puede reasignarse ni tomar otro valor,
+    (d) que el endpoint devuelve JSON compatible.
+
+C6. No se modifican archivos fuera de la allowlist.
+
+
+CHECKS DE VALIDACIÓN
+====================
+
+Tests focalizados (contrato):
+  (ejecutar desde `backend/`)
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_act_c_001_env_capabilities.py`
+
+Tests de regresión del endpoint:
+  (ejecutar desde `backend/`)
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_capabilities_api.py`
+
+Suite relevante (regresión de modelos):
+  (ejecutar desde `backend/`)
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_models.py`
+
+Typecheck: NO APLICA — este slice es Python/Pydantic; no hay TypeScript en el alcance.
+`api/main.py` y `analysis_market.py` no son necesarios para este slice.
+
+Git safety:
+  git diff --check
+  git diff --cached --check
+  git status --short --untracked-files=all
+
+
+DECISIONES PENDIENTES CON RECOMENDACIÓN (para revisión)
+========================================================
+
+- D6. ¿El contrato debe incluir también el estado del motor (EngineState, MarketStatus)?
+  El plan menciona "mapa canónico de entornos, capacidades, velas, propuestas, órdenes".
+  Estado del motor podría ir en un subcampo `engine` del capabilities.
+  **Recomendación: posponer a otro slice.** Este microtask se limita a entorno y
+  capacidades; el estado del motor pertenece al slice de mercado/transporte.
+
+- D7. ¿Incluir `data_source` (market_engine | TEST_ONLY) en el contrato?
+  Pertenece más al contrato de velas/datos que al de capacidades.
+  **Recomendación: fuera de este slice.** Irá en el contrato de datos posterior.
+
+
+STOP PARA REVISIÓN
+==================
+
+Propuesta revisada según comentarios del maestro. Cambios aplicados:
+1. Enfoque en capacidades **estáticas** y compatibilidad con `GET /api/capabilities`.
+2. `DataAptitude` y `ExecutionType` **excluidos** de este slice.
+3. Decisión D1 (unificar Environment) **excluida**: no se afirma que exista una fuente única.
+4. Endpoint `/api/capabilities` incluido en la allowlist; su compatibilidad es criterio C3.
+5. Tests del endpoint incluidos en los criterios de aceptación (C5d).
+6. Checks TypeScript eliminados → NO APLICA.
+7. Inmutabilidad de `schema_version`: **Literal["backend_capabilities.v1"] con Field(frozen=True)** — no ClassVar.
+8. **Versión unificada**: `"backend_capabilities.v1"` en el contrato y en el endpoint (sin contradicción).
+9. `environment` cambiado a **`Literal["paper", "exchange_demo"]`** — sin modificar enums existentes.
+10. `runtime_health_checked` mantenido como **campo plano en su ubicación JSON actual**, no anidado; sin promesa de transición automática.
+11. Prueba existente de regresión: `test_capabilities_api.py` se conserva sin cambios y se ejecuta.
+
+Pendiente:
+1. Validar que el enfoque estático es suficiente para la base del contrato.
+2. Confirmar allowlist de archivos.
+3. Aceptar/ajustar decisiones D2, D4, D5 restantes.
+4. Autorizar implementación, tests y actualización del plan por separado.
+
+No se ha editado ningún archivo de código, no se han ejecutado tests, no hay commit/push.
+Todos los cambios locales están conservados.

@@ -1,0 +1,45 @@
+ACT-C-001 / MICROTASK DE DECISIÓN 4 — PROPUESTA/SEÑAL NO EJECUTABLE
+REV-001 · SOLO LECTURA · PREPARADO PARA REVISIÓN; no ejecutar tests ni implementar.
+
+OBJETIVO
+Mapear la señal de reglas y su respuesta `/api/bot/analyze` como propuesta no ejecutable.
+Recomendar una forma tipada/versionable mínima y su adaptación compatible; distinguirla de
+la asesoría IA N02. No definir órdenes/posiciones ni convertir señal en acción ejecutable.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `trading-bot-action-plan.md`: fila ACT-C-001 y slice Environment aceptado.
+- `backend/src/bot/models.py` (solo Signal/related proposal fields),
+  `backend/src/bot/rules.py`, `backend/src/api/bot.py`.
+- `backend/src/api/analysis.py` (solo separar respuesta de indicadores de propuesta),
+  `backend/src/ai/scenario_models.py` (solo frontera advisory N02; no reabrir N02).
+- `backend/tests/test_bot_api.py`, `backend/tests/test_bot_ai_api.py`,
+  `backend/tests/test_ai_scenarios.py`.
+
+ESCRITURA: NINGUNA. No inspeccionar/editar órdenes, posiciones, persistencia, ejecución,
+velas, FYL, frontend, estrategia activa ni archivos fuera de allowlist. ACT-S-007 sigue
+PAUSADO; la equivalencia FYL pertenece a ACT-E-001 y no se reabre.
+
+PREGUNTAS A RESPONDER
+1. Matriz de respuesta real de `/api/bot/analyze`, `TradingSignal` y consumidor/tests:
+   campos, enum values, status, timestamps, flags `TEST_ONLY`, `result_type`, `executable`
+   y `execution_available`; separar modelo interno de wire response.
+2. Precisar qué garantías son actuales: señal solo advisory/test, indicadores fijos,
+   ninguna orden creada, no persistencia ni ejecución. No inferir estados de cuenta.
+3. Mapear N02 por separado (schema/versiones/result_type/provenance), indicando por qué
+   no es el mismo contrato que la señal de reglas. No modificar ni consolidar N02.
+4. Recomendar estructura mínima y opción de compatibilidad para una futura respuesta tipada:
+   mantener dict/wire actual con adapter, o nueva versión explícita; listar campos que no
+   deben inventarse (strategy/data version). Dar alternativa e implicaciones.
+5. Proponer un único microtask de implementación posterior, solo tras aprobación; enumerar
+   archivos/tests mínimos y criterio para no producir órdenes desde la propuesta.
+
+BASELINE
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al
+inicio y al cierre; no cambiar nada. Preservar modificaciones y untracked actuales (incluidos
+`backend/src/api/bot.py` si estuviese modificado). Si varían status o diffs durante el informe,
+STOP y reportar; no limpiar ni revertir.
+
+CHECKS / SALIDA
+No ejecutar tests, build, servicios, red ni instalaciones. Entregar matriz con referencias,
+recomendación + alternativa, compatibilidad/riesgos y archivos/tests del futuro microtask.
+Confirmar cero archivos alterados y STOP para decisión del maestro.

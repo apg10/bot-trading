@@ -100,9 +100,10 @@ async def _stop(client, task):
     await asyncio.wait_for(task, timeout=1)
 
 
-def _frame(symbol="BTCUSDT", is_closed=False):
+def _frame(symbol="BTCUSDT", is_closed=False, open_time=None):
+    ot = open_time if open_time is not None else 1_700_000_000_000
     return json.dumps({"k": {
-        "s": symbol, "t": 1_700_000_000_000, "T": 1_700_000_059_999,
+        "s": symbol, "t": ot, "T": ot + 59_999,
         "o": "100.0", "h": "102.0", "l": "99.0", "c": "101.0",
         "v": "15.0", "x": is_closed,
     }})
@@ -537,17 +538,27 @@ def test_engine_receives_real_client_disconnect_and_reconnect_callbacks(transpor
     class FakeHTTP:
         def __init__(self, _config):
             self.closed = False
+            self.get_klines_calls = 0
 
         async def close(self):
             self.closed = True
 
+        async def get_klines(self, symbol, interval, limit, start_ts=None, end_ts=None):
+            self.get_klines_calls += 1
+            return []
+
     monkeypatch.setattr(engine_module, "BinanceHTTPClient", FakeHTTP)
+
+    aligned_open = (1_700_000_000_000 // 60_000) * 60_000
+    captured_http = []
 
     async def scenario():
         transport.plans.extend([
-            FakeSocket([_frame(is_closed=True), FakeConnectionClosed()]), FakeSocket(),
+            FakeSocket([_frame(is_closed=True, open_time=aligned_open), FakeConnectionClosed()]), FakeSocket(),
         ])
         engine = engine_module.MarketEngine(BinanceConfig(reconnect_base_delay=0.0))
+        # Mock _clock_ms so candles with 2023 timestamps pass validation.
+        engine._clock_ms = lambda: aligned_open + 120_000
         states, closes = [], []
 
         async def state(snapshot):
@@ -564,9 +575,16 @@ def test_engine_receives_real_client_disconnect_and_reconnect_callbacks(transpor
                          and (False, True) in states and states[-1] == (True, False))
             assert engine.state.closed_candles_count == 1
             assert engine.state.connected is True
+            captured_http.append(engine._http_client)
         finally:
             await asyncio.wait_for(engine.stop(), timeout=1)
             await asyncio.wait_for(task, timeout=1)
         assert states[-1] == (False, False)
         assert asyncio.all_tasks() == {asyncio.current_task()}
+
     asyncio.run(scenario())
+
+    # Verificar que el motor invocó recuperación HTTP tras reconectar.
+    http_client = captured_http[0]
+    assert isinstance(http_client, FakeHTTP)
+    assert http_client.get_klines_calls > 0
