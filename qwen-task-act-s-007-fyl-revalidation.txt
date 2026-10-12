@@ -1,17 +1,24 @@
 MAESTRO: GROUP-BACKEND-001 / owner ACT-S-007
 TASK: ACT-S-007 — REVALIDAR AISLAMIENTO FYL
-RUN: RUN-ACT-S-007-REVALIDATE-001 / REV-001
+RUN: RUN-ACT-S-007-REVALIDATE-002 / REV-002
+ESTADO: PREPARADO PARA AUTORIZACIÓN; no ejecutar ni editar hasta autorización expresa.
 
 TIPO
 Revalidación de solo lectura del item POR_REVALIDAR. No implementar detector ni
 atribuirlo al método FYL original.
 
 REF-BASE
-master / 6c1ef549e962acc1f4249f7f352ced3fad6d30a6
-`backend/src/indicators/fyl.py` y `backend/tests/test_fyl.py` tienen cambios locales
-aceptados por tareas FYL previas. Capturar status/diffs/hashes y tratarlos como
-baseline inmutable. Preservar los demás cambios locales. Si hay cambio concurrente,
-STOP / BLOCKED.
+`master` / `c43f420f8cc52159fd260d9e76a1bd8ad5887299`. Los cambios de FYL y pruebas
+quedaron incluidos en `e85fdb2 chore(bot-trading): checkpoint project progress`;
+son baseline comprometida, no cambios locales por aceptar en este task. SHA-256:
+- `backend/src/indicators/fyl.py`: `a6035e76d37a2cf892b4aba371629242d95fe6f8a8cf73203e3663e881d7581e`
+- `backend/tests/test_fyl.py`: `bb63675bbdf23bacdbc45331d5159d49643e2b215758a40e06dc204b19abb684`
+- `backend/src/api/analysis.py`: `ec37f5ad643a18dbd9e756e42690ed818e31003a924a3cb4d17fb422df84bda5`
+- `backend/tests/test_analysis_market_api.py`: `55feea75beabfb92310dc88b84a82e26cd00f455b8d6914a455ed8c455d292a0`
+La baseline incluía un único untracked ajeno, `frontend/tsconfig.tsbuildinfo`, generado
+por ACT-S-004; preservarlo sin leerlo ni editarlo. Antes de comenzar, capturar status,
+diff/diff-cached y hashes. Si HEAD, archivos/hashes o cualquier otro estado difieren,
+STOP / BLOCKED; no cambiar ni limpiar nada.
 
 ALCANCE DE LECTURA
 - `trading-bot-action-plan.md`: fila ACT-S-007 y §14.10.
@@ -20,17 +27,24 @@ ALCANCE DE LECTURA
 - `backend/tests/test_fyl.py` y el uso actual desde `backend/src/api/analysis.py` /
   `backend/tests/test_analysis_market_api.py`.
 Leer solo funciones/tests relevantes, no módulos completos ni copias fechadas.
+Usar el plan de acción raíz como autoridad de estado; las referencias históricas de
+§14.10 y del plan de desarrollo pueden ser previas al commit y son evidencia a reportar,
+no permiso para editarlas.
 
 REVALIDAR
 1. Incremental usa solo barras previas (sin lookahead), fuerza genérica con default
-   min_strength=0.01 y timestamp open_time real; identificar tests exactos.
+   min_strength=0.01 y timestamp open_time real; identificar evidencia de código/tests,
+   incluyendo `test_incremental_pivots_preserve_real_open_time_with_nonzero_start_and_irregular_intervals`
+   y `test_incremental_strength_sign_default_min_strength`.
 2. Batch preserva open_time/zonas pero usa datos futuros, continúa TEST_ONLY y no se
-   usa como señal causal/operativa.
+   usa como señal causal/operativa; identificar
+   `test_batch_pivots_preserve_real_open_time_with_nonzero_start_and_irregular_intervals`
+   y la evidencia de `test_analysis_market_api.py` sobre origen/salida.
 3. Comprobar si existe una especificación aprobada del detector FYL original. No
    inferirla de capturas, nombres, valores de fixtures ni del código actual.
 4. Separar implementación, cobertura de tests y aceptación del plan. No concluir
-   COMPLETADO solo porque los tests pasen si ACT-S-007 requiere una especificación
-   que no existe.
+   COMPLETADO solo porque los tests pasen. La fila raíz está `POR_REVALIDAR` y
+   ACT-E-001 permanece `BLOQUEADO`; reportar ambas y cualquier contradicción histórica.
 
 CHECK — DESDE backend/
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_fyl.py tests/test_analysis_market_api.py
@@ -38,6 +52,8 @@ Desde raíz: `git diff --check`, `git diff --cached --check`.
 
 SALIDA / STOP
 Entregar matriz corta de criterios, rutas/tests/resultados, contradicciones y
-recomendación POR_REVALIDAR/COMPLETADO con evidencia. No editar archivos, plan,
-tests ni código; no inventar fórmulas ni abrir otro task. Sin staging, commit,
-push, red o instalaciones. STOP; el maestro decide aceptación y siguiente paso.
+recomendación POR_REVALIDAR/COMPLETADO con evidencia y límites explícitos. No editar
+archivos, plan, tests ni código; no inventar fórmulas ni abrir otro task. Sin staging,
+commit, push, red o instalaciones. STOP; el maestro revisa, decide aceptación y autoriza
+por separado cualquier cambio o task siguiente. Esta entrega preparada no autoriza la
+ejecución del revalidator.
