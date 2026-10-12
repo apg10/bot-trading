@@ -41,17 +41,30 @@ ejecutaron tests.
 ACT-S-007 permanece `PAUSADO`; ACT-E-001 permanece `BLOQUEADO`. El microtask read-only no
 reabre ninguno de esos trabajos.
 
-## Revisión del informe Qwen de IndicatorDefinition
+## Revisión del informe de diseño IndicatorDefinition
 
-Se acepta la tabla de hechos Keltner/MACD como inventario de la implementación actual. No se
-aprueban todavía sus decisiones de ID/versionado: el informe sugiere un slug y muestra
-`ind.v1`/`2026-10-12` como ejemplos pese a que el microtask dejó formato y literales pendientes.
-Esos valores no son contratos aceptados. La unidad de precio debe seguir al quote asset del
-símbolo; `USDT` no es una unidad universal. La precisión redondeada por API sigue separada de
-la precisión matemática.
+Se acepta la matriz Keltner/MACD como inventario de la implementación actual, no como catálogo
+canónico. El informe queda corregido así:
 
-El informe Qwen declara 13 tracked modificados y 25 untracked; el snapshot de este workspace
-continúa en 13 y 33, respectivamente. No se modificó código ni tests; la discrepancia impide
-aceptar el recuento Qwen como comparación de baseline pre/post. El diseño `IndicatorDefinition`
-sigue pendiente de decisión del maestro y no autoriza implementación, endpoint ni cambios a
-`CapabilitiesContract`.
+- FYL (`lookback`, `min_strength`) y cualquier decisión sobre su inclusión se excluyen; ACT-S-007
+  sigue `PAUSADO` y ACT-E-001 `BLOQUEADO`.
+- No se aprueban formatos de ID ni valores como `ind.v1`, fechas de implementación, UUID, slug
+  o SemVer. `indicator_id`, `schema_version` e `implementation_version` quedan como conceptos
+  separados pendientes de decisión, sin defaults ni literales.
+- Parámetros y warmup son defaults/reglas de la implementación actual, no valores canónicos de
+  estrategia. Los rangos no documentados son `NO ESPECIFICADO`; no equivalen a rango ilimitado.
+- Precio hereda las unidades del instrumento/quote asset; no se fija USDT. `time_ms` con fuente
+  de mercado es epoch ms; `i*60_000` sin timestamps es eje relativo de pruebas, no epoch.
+- La causalidad se describe como evidencia del flujo actual de índices; no como garantía formal.
+  El redondeo API (2/4 decimales) no define la precisión matemática.
+- Si se prepara una implementación futura, la recomendación es un módulo Python estático
+  separado de `CapabilitiesContract`; no añadir endpoint ni modificar schemas existentes en
+  este microtask.
+
+## Baseline / seguimiento
+
+Los informes Qwen mostraron recuentos distintos (2/16 y 13/25 tracked/untracked). El snapshot
+completo observado por el maestro es 13/33. No se puede confirmar el pre/post del run a partir
+de esos resúmenes; el status local no muestra cambios atribuibles a esta lectura. No hubo
+ediciones ni tests. ACT-C-001 global permanece `PENDIENTE`; `qwen-task-act-c-001-indicator-definition-design.txt`
+queda como propuesta de diseño pendiente, no autorización de implementación.
