@@ -46,3 +46,16 @@ los parámetros son aceptados por las funciones Keltner/MACD, pero no están exp
 importa directamente desde TypeScript; la distribución a UI/IA queda para una decisión
 posterior. Los IDs y valores de versiones no están aprobados, y no se autoriza endpoint ni
 cambio a `CapabilitiesContract`.
+
+## Aprobación del microtask de schema
+
+El maestro aprueba las aclaraciones A–G como **contrato del microtask**: ID string no vacío sin
+formato impuesto; `schema_version` separado de `implementation_version`; `consumer_exposed=None`
+significa no determinado; unidades distinguen origen instrumento/fijo/no especificado; warmup
+permite regla/barras/evidencia desconocida; checks usan el venv backend existente; implementación
+espera autorización explícita. Esta aprobación no asigna valores de ID/version ni autoriza
+entradas de catálogo, endpoints, cambios a consumidores o ejecución automática.
+
+Siguiente microtask preparado: `qwen-task-act-c-001-indicator-definition-schema.txt` (DTOs y tests
+de schema solamente). ACT-C-001 global sigue `PENDIENTE`; ejecutar ese task requiere orden
+explícita del maestro.
