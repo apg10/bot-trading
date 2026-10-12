@@ -1,0 +1,46 @@
+ACT-C-001 — MICROTASK DE DECISIÓN: EXPOSICIÓN Y ENTREGA DEL CATÁLOGO
+REV-001 · SOLO LECTURA · PREPARADO PARA REVISIÓN; no implementar.
+Usa `act-c-001-indicator-definition-review.md` como decisión parcial corregida.
+ACT-C-001 global continúa PENDIENTE.
+
+OBJETIVO
+Resolver solo dos huecos del diseño IndicatorDefinition: qué significa que un parámetro sea
+configurable y cómo distribuir el catálogo a backend/UI/IA. Recomendar opciones con impactos;
+no definir código ni valores/versiones.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `act-c-001-indicator-definition-review.md`.
+- `trading-bot-action-plan.md`: fila ACT-C-001.
+- `backend/src/api/analysis.py`: solo campos de `AnalysisRequest` y uso de parámetros.
+- `backend/src/bot/models.py`: solo `TradingStrategy` y sus campos.
+- `backend/src/indicators/keltner.py`, `backend/src/indicators/macd.py`: solo firmas de
+  funciones para confirmar parámetros de llamada.
+
+ESCRITURA: NINGUNA. No leer/editar frontend, router/API clients, indicators tests, FYL/N02,
+CapabilitiesContract, estrategia de reglas ni otros archivos. No ejecutar tests/build, red,
+servicios ni instalaciones.
+
+DECISIONES (máximo cuatro subtareas)
+1. Separar el hecho “parámetro de función” de “expuesto a estrategia/API/UI”. Confirmar desde
+   las fuentes permitidas que `AnalysisRequest` y `TradingStrategy` no exponen parámetros de
+   Keltner/MACD; recomendar cómo representarlo sin etiquetar esos parámetros como configurables
+   por estrategia cuando solo lo son en la función.
+2. Comparar tres opciones de distribución: Python estático para backend; JSON generado para
+   consumidores externos; endpoint GET de solo lectura. Indicar qué fuente es autoridad y
+   riesgos de desincronización/latencia; recomendar una fase mínima, sin diseñarla como tarea
+   de implementación.
+3. Delimitar qué queda pendiente del catálogo común (ID/versiones opacas, schema_version vs
+   implementation_version, rangos desconocidos, unidades derivadas del instrumento).
+4. Proponer el siguiente microtask de implementación y su allowlist mínima tras aprobación;
+   no asignar literals, defaults, IDs ni versiones.
+
+RESTRICCIONES
+- Solo Keltner/MACD; ACT-S-006 describe la implementación actual. No reabrir fórmula aceptada.
+- No leer ni mencionar detalles de FYL/N02; ACT-S-007 sigue PAUSADO y ACT-E-001 BLOQUEADO.
+- `CapabilitiesContract` permanece estático y separado del catálogo.
+- No afirmar que un módulo Python se consume directamente desde TypeScript.
+
+BASELINE / SALIDA
+Capturar status y diffs staged/unstaged al inicio/cierre; preservar cambios locales. Si
+baseline cambia, STOP. Entregar una tabla por decisión con recomendación, alternativa e impacto,
+desconocidos explícitos y STOP. Confirmar cero archivos alterados.
