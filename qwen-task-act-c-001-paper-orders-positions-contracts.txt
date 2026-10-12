@@ -1,12 +1,13 @@
-PROPUESTA DE MICROTASK — ACT-C-001 / CONTRATOS PAPER SPOT
-Estado: PREPARADO PARA ACEPTACIÓN DE ESPECIFICACIÓN. No ejecutar/implementar aún.
+MICROTASK ACT-C-001 — CONTRATOS PAPER SPOT
+Estado: IMPLEMENTADO; EN_REVISION para aceptación del maestro. El contrato fue autorizado; no reimplementar.
 DEC-5 se cierra solo como inventario; no se elige `bot.models` ni `models.state` como
 familia canónica. ACT-C-001 global sigue PENDIENTE.
 
-OBJETIVO
-Añadir DTOs Pydantic aditivos y pruebas de contrato para órdenes, fills, reservas OCO y
-vista de posición PAPER Spot. No alterar los dos modelos legacy ni conectarlos a runtime.
-La especificación propuesta está al final; si no se aprueba, detenerse sin editar.
+OBJETIVO / ESTADO DE ENTREGA
+El alcance autorizado fue añadir DTOs Pydantic aditivos y pruebas de contrato para órdenes,
+fills, reservas OCO y vista de posición PAPER Spot, sin alterar modelos legacy ni conectarlos
+a runtime. La implementación está presente en `e85fdb2`; esta ficha conserva el contrato
+aprobado para revisión de evidencia. No repetir la implementación ni extender el alcance.
 
 CONTRATO PROPUESTO (sin capital, costes ni riesgo numérico)
 - `StrategyRef`: `strategy_id` estable + `strategy_version` inmutable; `decision_id` refiere
@@ -77,7 +78,7 @@ CONTRATO PROPUESTO (sin capital, costes ni riesgo numérico)
 - Compra MARKET necesita cota explícita de quote para poder reservar; sin cota, rechazar.
   No definir monto inicial, fees, spread, slippage, capital ni porcentajes de riesgo.
 
-ALLOWLIST PROPUESTA (si se aprueba)
+ALLOWLIST AUTORIZADA PARA LA IMPLEMENTACIÓN YA PRESENTE
 - `backend/src/models/paper_contracts.py` — NEW: DTOs contract-only; reutilizar valores/types
   de enums existentes cuando encajen, sin modificar/reexportar `bot.models` ni `models.state`,
   sin adaptadores/runtime.
@@ -102,7 +103,7 @@ migración/eliminación de modelos legacy, N02, estrategia activa ni dependencia
 Idempotencia efectiva y transiciones runtime pertenecen a
 ACT-P-001/002/003; política de fill/costes a ACT-P-005; riesgo a ACT-P-004.
 
-DECISIONES QUE EL MAESTRO DEBE APROBAR
+DECISIONES DEL CONTRATO AUTORIZADAS POR EL MAESTRO
 1. Identidad de lotes por orden de entrada+`strategy_ref`; vista agregada por
    account+symbol+strategy_ref y ventas con lot allocations explícitas.
 2. `UNKNOWN_STATE` solo por incertidumbre de persistencia/reconciliación; `PENDING_SEND` fuera
@@ -111,11 +112,13 @@ DECISIONES QUE EL MAESTRO DEBE APROBAR
 4. Commission nullable distingue desconocido de cero; sin defaults monetarios.
 5. DTOs Paper nuevos y aditivos en módulo propio; legacy intacto, sin elegir familia actual.
 
-BASELINE Y CHECKS (solo después de autorización)
-Capturar status y diffs staged/unstaged; preservar cambios locales. Comparar el delta y
-editar solo allowlist. Ejecutar desde `backend/`: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+EVIDENCIA DEL MICRO-TASK IMPLEMENTADO
+`backend/src/models/paper_contracts.py` y `backend/tests/test_paper_contracts.py` están
+incluidos en `e85fdb2`; la implementación es contract-only y aditiva. Gate de revisión,
+ejecutado desde `backend/`: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys
-tests/test_paper_contracts.py tests/test_models.py tests/test_bot_api.py`; luego diff checks.
-Tests legacy existentes son solo regresión; no modificarlos.
+tests/test_paper_contracts.py tests/test_models.py tests/test_bot_api.py` → 129 passed,
+1 warning Starlette/httpx. No se modificaron archivos de código durante esta revisión.
 
-STOP: Esta propuesta no autoriza código. Esperar aprobación del contrato y allowlist.
+STOP: Entrega implementada y presentada EN_REVISION; esperar aceptación del maestro. No
+añadir ledger/runtime, no crear otro task, y mantener ACT-C-001 global PENDIENTE.

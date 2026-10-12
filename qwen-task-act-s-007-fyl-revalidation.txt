@@ -1,7 +1,7 @@
 MAESTRO: GROUP-BACKEND-001 / owner ACT-S-007
 TASK: ACT-S-007 — REVALIDAR AISLAMIENTO FYL
 RUN: RUN-ACT-S-007-REVALIDATE-002 / REV-002
-ESTADO: PREPARADO PARA AUTORIZACIÓN; no ejecutar ni editar hasta autorización expresa.
+ESTADO: ARCHIVADO; revalidación ejecutada y revisada (§14.16), decisión vigente de pausa en §14.13. No reejecutar ni usar como prerequisito de tareas independientes.
 
 TIPO
 Revalidación de solo lectura del item POR_REVALIDAR. No implementar detector ni
