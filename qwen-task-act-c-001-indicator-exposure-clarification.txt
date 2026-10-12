@@ -1,0 +1,36 @@
+ACT-C-001 — MICROTASK DE DECISIÓN: EXPOSICIÓN Y DISTRIBUCIÓN DE INDICADORES
+Solo lectura · preparado para revisión · no ejecutar tests ni implementar.
+Base: `act-c-001-indicator-definition-decision.md`; ACT-C-001 global PENDIENTE.
+
+OBJETIVO
+Cerrar la ambigüedad de `configurable` en el catálogo y recomendar cómo entregar metadatos a
+UI/IA sin asumir que un módulo Python se importa directamente desde TypeScript. No diseñar el
+catálogo completo ni cambiar contratos.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `act-c-001-indicator-definition-decision.md`.
+- `trading-bot-action-plan.md`: solo fila ACT-C-001.
+- `backend/src/api/analysis.py`: solo campos de `AnalysisRequest`.
+- `backend/src/bot/models.py`: solo campos de `TradingStrategy`.
+- `backend/src/indicators/keltner.py`, `backend/src/indicators/macd.py`: solo firmas de funciones.
+
+ESCRITURA: NINGUNA. No leer/editar tests, frontend, otros indicadores, FYL, N02, capacidades,
+reglas, órdenes/posiciones, plan fuera de la fila ACT-C-001 ni archivos fuera del allowlist.
+ACT-S-007 permanece PAUSADO y ACT-E-001 BLOQUEADO.
+
+DECISIONES (máximo cuatro)
+1. Definir conceptualmente dos ejes distintos: parámetro aceptado por la función vs expuesto
+   a estrategia/API/UI. No usar un único bool ambiguo.
+2. Para Keltner/MACD actuales, clasificar lo probado: argumentos disponibles en la función, pero
+   no campos en `AnalysisRequest` ni `TradingStrategy`. Marcar lo futuro como NO ESPECIFICADO.
+3. Comparar distribución de catálogo Python-only, JSON generado y API de solo lectura. Recomendar
+   fuente de verdad y si la entrega a UI/IA debe diferirse hasta que exista consumidor aprobado.
+   No implementar/exportar/crear endpoint.
+4. Recomendar un microtask posterior de esquema IndicatorDefinition, con allowlist y criterios;
+   no asignar IDs, versiones ni defaults nuevos.
+
+BASELINE / SALIDA
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al inicio
+y cierre; preservar lo existente. No ejecutar tests/build/servicios/red. Entregar tabla de cuatro
+decisiones con recomendación, alternativa, implicaciones y NO ESPECIFICADO; confirmar cero
+archivos alterados y STOP.
