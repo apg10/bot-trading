@@ -70,3 +70,19 @@ cambios locales; no limpiar ni revertir.
 
 Aceptar estas recomendaciones y definir referencias/compatibilidad antes de microtasks de
 implementación. El contrato común y su catálogo siguen abiertos; no se cierra ACT-C-001 global.
+
+## Decisión de revisión del maestro
+
+- Se aceptan DEC-6/DEC-7 como inventarios y se aprueba solo la dirección conceptual: `StrategyRef`
+  es un objeto único `{id, version}` sin defaults; `schema_version` y `dataset_ref` son distintos.
+- No se acepta la duplicación de `strategy_ref_id`/`strategy_ref_version` en `TradingStrategy`
+  junto con otro objeto en `TradingSignal`. `state.AnalysisResult.strategy_version` representa
+  solo la versión, no `id@version`; los dos `AnalysisResult` siguen separados.
+- `CapabilitiesContract` permanece inventario estático de capabilities, no es el catálogo
+  común. No se añaden campos a respuestas wire existentes en este paso.
+- `dataset_ref` no promete replay hasta que ACT-P-001 persista un conjunto inmutable. No se fijan
+  literal de versión, formato de ID, hashes ni rangos.
+- El inventario de indicadores no se cubrió en DEC-6/DEC-7 y queda pendiente; se preparó por
+  separado `qwen-task-act-c-001-indicator-catalog-map.txt`.
+- ACT-C-001 global sigue `PENDIENTE`; sin implementación, tests ni cambios al plan por esta
+  revisión.
