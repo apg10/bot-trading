@@ -37,3 +37,12 @@ El informe Qwen entrega recuentos que varían entre 2/16 y 13/25. El snapshot co
 sesión fue 13 tracked modificados y 33 untracked. No se toma ninguno de esos resúmenes como
 prueba pre/post si no viene acompañado de las salidas completas. No se cambió código, tests ni
 plan; ACT-C-001 global sigue abierto.
+
+## Dictamen sobre REV-001
+
+Se acepta el informe como **propuesta conceptual**, no como contrato final. En el estado actual,
+los parámetros son aceptados por las funciones Keltner/MACD, pero no están expuestos por
+`AnalysisRequest` ni `TradingStrategy`. Un módulo Python puede ser fuente backend, pero no se
+importa directamente desde TypeScript; la distribución a UI/IA queda para una decisión
+posterior. Los IDs y valores de versiones no están aprobados, y no se autoriza endpoint ni
+cambio a `CapabilitiesContract`.

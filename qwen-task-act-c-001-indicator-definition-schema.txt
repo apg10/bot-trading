@@ -1,0 +1,63 @@
+PROPUESTA DE MICROTASK — ACT-C-001 / SCHEMA `IndicatorDefinition`
+Estado: PREPARADO PARA REVISIÓN; no ejecutar ni editar hasta autorización expresa.
+ACT-C-001 global permanece PENDIENTE.
+
+OBJETIVO
+Implementar solo los DTOs Pydantic del contrato `IndicatorDefinition` y pruebas de schema.
+No poblar todavía el catálogo con registros Keltner/MACD ni elegir valores de ID/version;
+esos valores dependen de decisiones/versiones persistidas posteriores.
+
+CONTRATO A IMPLEMENTAR (estructura, sin instancias de catálogo)
+- `indicator_id: str`: obligatorio, no vacío, sin regex/formato impuesto.
+- `schema_version: str`: obligatorio, separado de la versión de implementación; sin valor
+  default ni literal de producción.
+- `implementation_version: str | None`: obligatorio nullable; `None` significa que aún no se
+  asignó una versión persistida. No generar hashes/fechas/versiones.
+- `ParameterSpec`: nombre, tipo escalar (`int|float|bool`), `function_configurable`,
+  `consumer_exposed: bool | None`, `implementation_default` tipado, min/max opcionales y un
+  estado explícito para rangos conocidos vs NO ESPECIFICADO. No marcar los parámetros actuales
+  como expuestos a estrategia/API si no existen esos campos.
+- Unidades por input/output deben admitir unidades heredadas del instrumento; no fijar USDT.
+- Warmup representa regla dependiente de parámetros, valor de ejemplo solo como fixture test y
+  evidencia clasificada (documentada/deducida/no especificada). Causalidad es evidencia, no una
+  promesa formal. Output schema separa unidades y redondeo de API de precisión matemática.
+- `IndicatorDefinition` agrupa estos componentes. Test placeholders de schema no se registran
+  como valores del catálogo de producción.
+
+ALLOWLIST DE ESCRITURA (exhaustiva)
+- `backend/src/indicators/catalog.py` — NEW: schemas/DTOs puros, sin catálogo poblado ni
+  funciones de cálculo.
+- `backend/tests/test_indicator_catalog.py` — NEW: validación de requeridos/tipos, unknowns,
+  rangos conocidos, unidades heredadas, warmup/evidencia, schema_version separado de
+  implementation_version y serialización.
+- `trading-bot-action-plan.md` — MOD solo fila ACT-C-001 si el gate pasa; registrar entrega
+  EN_REVISION y mantener ACT-C-001 global PENDIENTE.
+
+SOLO LECTURA
+- `act-c-001-indicator-definition-review.md` y esta propuesta.
+- `trading-bot-action-plan.md`: fila ACT-C-001.
+- `backend/src/indicators/keltner.py`, `backend/src/indicators/macd.py` y
+  `backend/src/indicators/__init__.py`: solo firmas/valores de implementación para validar que
+  el schema puede describirlos; no alterar fórmulas.
+- `backend/src/api/analysis.py`: solo outputs/serialización actual.
+
+NO INCLUYE
+Entradas de catálogo con IDs/versiones, generación de versiones, defaults canónicos, límites
+no documentados, APIs/endpoints, JSON export, CapabilitiesContract, frontend, ejecución,
+N02, FYL/ACT-S-007, tests existentes ni dependencias nuevas. El catálogo UI/IA y la persistencia
+ACT-P-001 requieren tasks posteriores y aprobación propia.
+
+CRITERIOS / CHECKS (ejecutar desde `backend/`)
+1. Modelo acepta solo la estructura propuesta y rechaza tipo/valor inválido; nunca inventa
+   defaults o rangos.
+2. `None` implementation_version y rangos NO ESPECIFICADOS se distinguen de valores presentes.
+3. Serialization conserva strings/unidades sin fijar instrumento ni precision de API.
+4. Solo se editan las tres rutas de escritura; test nuevo pasa. Gate:
+   `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_indicator_catalog.py`
+   y `git diff --check`, `git diff --cached --check`.
+
+BASELINE / STOP
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached`; preservar
+todos los cambios locales. En el plan, comparar el delta y tocar solo la fila ACT-C-001. Si hay
+cambios concurrentes o fuera de allowlist, STOP/BLOCKED sin limpiar ni revertir. No commit/push
+ni iniciar el microtask de poblar catálogo.
