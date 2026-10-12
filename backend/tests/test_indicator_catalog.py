@@ -446,3 +446,204 @@ class TestTypeValidation:
 #   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
 #     .venv/bin/python -B -m pytest -q -p no:cacheprovider \
 #     --capture=sys tests/test_indicator_catalog.py
+
+
+# ── 10. Catálogo poblado — entradas estáticas Keltner/MACD ───────────────────
+
+
+class TestCatalogPopulation:
+
+    @pytest.fixture
+    def catalog(self):
+        from src.indicators.catalog import INDICATOR_CATALOG
+        return INDICATOR_CATALOG
+
+    # ── IDs y schema_version ──────────────────────────────────────────────
+
+    def test_catalog_contains_keltner_and_macd(self, catalog):
+        """El catálogo debe contener exactamente los IDs 'keltner' y 'macd'."""
+        assert set(catalog.keys()) == {"keltner", "macd"}
+
+    def test_keltner_schema_version(self, catalog):
+        assert catalog["keltner"].schema_version == "indicator_definition.v1"
+
+    def test_macd_schema_version(self, catalog):
+        assert catalog["macd"].schema_version == "indicator_definition.v1"
+
+    def test_implementation_version_none(self, catalog):
+        """Ambos indicadores tienen implementation_version=None."""
+        assert catalog["keltner"].implementation_version is None
+        assert catalog["macd"].implementation_version is None
+
+    # ── Parámetros y defaults ─────────────────────────────────────────────
+
+    def test_keltner_parameters_count(self, catalog):
+        k = catalog["keltner"]
+        assert len(k.parameters) == 3
+
+    def test_keltner_ema_period_default(self, catalog):
+        k = catalog["keltner"]
+        ema_p = next(p for p in k.parameters if p.name == "ema_period")
+        assert ema_p.scalar_type == "int"
+        assert ema_p.function_configurable is True
+        assert ema_p.consumer_exposed is False
+        assert ema_p.implementation_default == 20
+
+    def test_keltner_atr_period_default(self, catalog):
+        k = catalog["keltner"]
+        atr_p = next(p for p in k.parameters if p.name == "atr_period")
+        assert atr_p.scalar_type == "int"
+        assert atr_p.implementation_default == 14
+
+    def test_keltner_multiplier_default(self, catalog):
+        k = catalog["keltner"]
+        mul_p = next(p for p in k.parameters if p.name == "multiplier")
+        assert mul_p.scalar_type == "float"
+        assert mul_p.implementation_default == 2.0
+
+    def test_macd_parameters_count(self, catalog):
+        m = catalog["macd"]
+        assert len(m.parameters) == 3
+
+    def test_macd_fast_period_default(self, catalog):
+        m = catalog["macd"]
+        fast_p = next(p for p in m.parameters if p.name == "fast_period")
+        assert fast_p.scalar_type == "int"
+        assert fast_p.function_configurable is True
+        assert fast_p.consumer_exposed is False
+        assert fast_p.implementation_default == 12
+
+    def test_macd_slow_period_default(self, catalog):
+        m = catalog["macd"]
+        slow_p = next(p for p in m.parameters if p.name == "slow_period")
+        assert slow_p.scalar_type == "int"
+        assert slow_p.implementation_default == 26
+
+    def test_macd_signal_period_default(self, catalog):
+        m = catalog["macd"]
+        sig_p = next(p for p in m.parameters if p.name == "signal_period")
+        assert sig_p.scalar_type == "int"
+        assert sig_p.implementation_default == 9
+
+    # ── Exposición (consumer_exposed) ─────────────────────────────────────
+
+    def test_all_keltner_consumer_exposed_false(self, catalog):
+        k = catalog["keltner"]
+        for p in k.parameters:
+            assert p.consumer_exposed is False
+
+    def test_all_macd_consumer_exposed_false(self, catalog):
+        m = catalog["macd"]
+        for p in m.parameters:
+            assert p.consumer_exposed is False
+
+    # ── Rangos desconocidos (no inventados) ───────────────────────────────
+
+    def test_keltner_no_ranges_specified(self, catalog):
+        """Ningún parámetro de Keltner tiene rango especificado."""
+        k = catalog["keltner"]
+        for p in k.parameters:
+            assert p.range_status == RangeStatus.NOT_SPECIFIED
+            assert p.min_value is None
+            assert p.max_value is None
+
+    def test_macd_no_ranges_specified(self, catalog):
+        """Ningún parámetro de MACD tiene rango especificado."""
+        m = catalog["macd"]
+        for p in m.parameters:
+            assert p.range_status == RangeStatus.NOT_SPECIFIED
+            assert p.min_value is None
+            assert p.max_value is None
+
+    # ── Unidades ──────────────────────────────────────────────────────────
+
+    def test_keltner_input_unit_instrument(self, catalog):
+        k = catalog["keltner"]
+        assert len(k.inputs) == 1
+        assert k.inputs[0].unit.origin == UnitOrigin.INSTRUMENT
+        assert k.inputs[0].unit.unit is None
+
+    def test_macd_input_unit_instrument(self, catalog):
+        m = catalog["macd"]
+        assert len(m.inputs) == 1
+        assert m.inputs[0].unit.origin == UnitOrigin.INSTRUMENT
+        assert m.inputs[0].unit.unit is None
+
+    def test_keltner_output_units(self, catalog):
+        k = catalog["keltner"]
+        output_names = {o.name for o in k.outputs}
+        assert output_names == {"time_ms", "ema_val", "upper", "lower", "atr"}
+        time_out = next(o for o in k.outputs if o.name == "time_ms")
+        assert time_out.unit.origin == UnitOrigin.FIXED
+        assert time_out.unit.unit == "ms"
+
+    def test_macd_output_units(self, catalog):
+        m = catalog["macd"]
+        output_names = {o.name for o in m.outputs}
+        assert output_names == {"time_ms", "macd_line", "signal_line", "histogram"}
+        time_out = next(o for o in m.outputs if o.name == "time_ms")
+        assert time_out.unit.origin == UnitOrigin.FIXED
+        assert time_out.unit.unit == "ms"
+
+    # ── Warmup ────────────────────────────────────────────────────────────
+
+    def test_keltner_warmup(self, catalog):
+        k = catalog["keltner"]
+        assert k.warmup.rule == "ema_period + atr_period"
+        assert k.warmup.bars == 34
+        assert k.warmup.evidence == WarmupEvidence.DOCUMENTED
+
+    def test_macd_warmup(self, catalog):
+        m = catalog["macd"]
+        assert m.warmup.rule == "max(fast_period, slow_period) + signal_period - 1"
+        assert m.warmup.bars == 34
+        assert m.warmup.evidence == WarmupEvidence.DOCUMENTED
+
+    # ── Outputs ───────────────────────────────────────────────────────────
+
+    def test_keltner_outputs_count(self, catalog):
+        k = catalog["keltner"]
+        assert len(k.outputs) == 5
+
+    def test_macd_outputs_count(self, catalog):
+        m = catalog["macd"]
+        assert len(m.outputs) == 4
+
+    def test_keltner_api_rounding(self, catalog):
+        k = catalog["keltner"]
+        for o in k.outputs:
+            if o.name != "time_ms":
+                assert o.api_rounding == "2dp"
+
+    def test_macd_api_rounding(self, catalog):
+        m = catalog["macd"]
+        for o in m.outputs:
+            if o.name != "time_ms":
+                assert o.api_rounding == "4dp"
+
+    # ── Ausencia de FYL ───────────────────────────────────────────────────
+
+    def test_catalog_does_not_contain_fyl(self, catalog):
+        """FYL no debe estar en el catálogo poblado."""
+        assert "fyl" not in catalog
+        assert "FYL" not in catalog
+
+    # ── Serialización ─────────────────────────────────────────────────────
+
+    def test_keltner_serialization_roundtrip(self, catalog):
+        k = catalog["keltner"]
+        dumped = k.model_dump()
+        assert dumped["indicator_id"] == "keltner"
+        assert dumped["schema_version"] == "indicator_definition.v1"
+        assert dumped["implementation_version"] is None
+        assert len(dumped["parameters"]) == 3
+        assert dumped["warmup"]["bars"] == 34
+
+    def test_macd_serialization_roundtrip(self, catalog):
+        m = catalog["macd"]
+        dumped = m.model_dump()
+        assert dumped["indicator_id"] == "macd"
+        assert dumped["schema_version"] == "indicator_definition.v1"
+        assert dumped["implementation_version"] is None
+        assert len(dumped["parameters"]) == 3
+        assert dumped["warmup"]["bars"] == 34

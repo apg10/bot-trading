@@ -174,3 +174,159 @@ class IndicatorDefinition(BaseModel):
     units: dict[str, UnitSpec] = Field(default_factory=dict)
     warmup: WarmupSpec = Field(default_factory=WarmupSpec)
     causality_note: Optional[str] = None  # evidencia causal, no promesa formal
+
+
+# ── Catálogo estático de indicadores ────────────────────────────────────────
+
+INDICATOR_CATALOG: dict[str, IndicatorDefinition] = {
+    "keltner": IndicatorDefinition(
+        indicator_id="keltner",
+        schema_version="indicator_definition.v1",
+        implementation_version=None,
+        parameters=[
+            ParameterSpec(
+                name="ema_period",
+                scalar_type="int",
+                function_configurable=True,
+                consumer_exposed=False,
+                implementation_default=20,
+                range_status=RangeStatus.NOT_SPECIFIED,
+            ),
+            ParameterSpec(
+                name="atr_period",
+                scalar_type="int",
+                function_configurable=True,
+                consumer_exposed=False,
+                implementation_default=14,
+                range_status=RangeStatus.NOT_SPECIFIED,
+            ),
+            ParameterSpec(
+                name="multiplier",
+                scalar_type="float",
+                function_configurable=True,
+                consumer_exposed=False,
+                implementation_default=2.0,
+                range_status=RangeStatus.NOT_SPECIFIED,
+            ),
+        ],
+        inputs=[
+            OutputSpec(
+                name="candles",
+                output_type="list[OHLCV]",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+            ),
+        ],
+        outputs=[
+            OutputSpec(
+                name="time_ms",
+                output_type="int",
+                unit=UnitSpec(unit="ms", origin=UnitOrigin.FIXED),
+            ),
+            OutputSpec(
+                name="ema_val",
+                output_type="float",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+                api_rounding="2dp",
+            ),
+            OutputSpec(
+                name="upper",
+                output_type="float",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+                api_rounding="2dp",
+            ),
+            OutputSpec(
+                name="lower",
+                output_type="float",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+                api_rounding="2dp",
+            ),
+            OutputSpec(
+                name="atr",
+                output_type="float",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+                api_rounding="2dp",
+            ),
+        ],
+        units={
+            "price": UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+        },
+        warmup=WarmupSpec(
+            rule="ema_period + atr_period",
+            bars=34,
+            evidence=WarmupEvidence.DOCUMENTED,
+        ),
+        causality_note="evidence: documented in implementation and tests; not a guarantee of equivalence with the original method",
+    ),
+    "macd": IndicatorDefinition(
+        indicator_id="macd",
+        schema_version="indicator_definition.v1",
+        implementation_version=None,
+        parameters=[
+            ParameterSpec(
+                name="fast_period",
+                scalar_type="int",
+                function_configurable=True,
+                consumer_exposed=False,
+                implementation_default=12,
+                range_status=RangeStatus.NOT_SPECIFIED,
+            ),
+            ParameterSpec(
+                name="slow_period",
+                scalar_type="int",
+                function_configurable=True,
+                consumer_exposed=False,
+                implementation_default=26,
+                range_status=RangeStatus.NOT_SPECIFIED,
+            ),
+            ParameterSpec(
+                name="signal_period",
+                scalar_type="int",
+                function_configurable=True,
+                consumer_exposed=False,
+                implementation_default=9,
+                range_status=RangeStatus.NOT_SPECIFIED,
+            ),
+        ],
+        inputs=[
+            OutputSpec(
+                name="closes",
+                output_type="list[float]",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+            ),
+        ],
+        outputs=[
+            OutputSpec(
+                name="time_ms",
+                output_type="int",
+                unit=UnitSpec(unit="ms", origin=UnitOrigin.FIXED),
+            ),
+            OutputSpec(
+                name="macd_line",
+                output_type="float",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+                api_rounding="4dp",
+            ),
+            OutputSpec(
+                name="signal_line",
+                output_type="float",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+                api_rounding="4dp",
+            ),
+            OutputSpec(
+                name="histogram",
+                output_type="float",
+                unit=UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+                api_rounding="4dp",
+            ),
+        ],
+        units={
+            "price": UnitSpec(unit=None, origin=UnitOrigin.INSTRUMENT),
+        },
+        warmup=WarmupSpec(
+            rule="max(fast_period, slow_period) + signal_period - 1",
+            bars=34,
+            evidence=WarmupEvidence.DOCUMENTED,
+        ),
+        causality_note="evidence: documented in docstring and tests; not a guarantee of equivalence with the original method",
+    ),
+}
