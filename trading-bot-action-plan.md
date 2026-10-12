@@ -202,7 +202,7 @@ Laboratorio estén terminadas. No habilitar una estrategia sin su validación.
 | ACT-S-001 | P0 | COMPLETADO | Declarar `httpx` como dependencia runtime | REV-001 aceptada manualmente; instalación limpia sigue NO EJECUTADA | Declaración y smoke existentes verificados; no certifica instalación limpia ni todas las dependencias del backend |
 | ACT-S-002 | P0 | COMPLETADO | Reconciliar inventario actual con plan/brief y marcar avances reales | Ninguna; lectura de código | Matriz implementado/parcial/ausente con rutas y pruebas; aceptación manual del maestro registrada en §14.10 |
 | ACT-S-003 | P0 | COMPLETADO | Verificar typecheck de aplicación y configuración | Dependencias existentes | Aceptado el 2026-10-13: ambos comandos TypeScript pasan (tsconfig.json y tsconfig.node.json; exit 0). Sin cambios de código. Build, tests frontend y QA visual no ejecutados. Evidencia §14.13. |
-| ACT-S-004 | P0 | PENDIENTE | Verificar build de producción frontend | ACT-S-003 | `npm run build` pasa; artifacts y efectos de escritura autorizados de antemano |
+| ACT-S-004 | P0 | COMPLETADO | Verificar build de producción frontend | ACT-S-003 | Aceptado el 2026-10-13: `npm run build` exit 0; `tsc -b` y Vite production build correctos. Artefactos observados y documentados en §14.14; no se cambió código. |
 | ACT-S-005 | P0 | COMPLETADO | Contratos de consulta/histórico, callbacks WS y estado temporal backend | ACT-S-002 | 189 tests verdes (REV-001 + REV-002). Criterio 1: Query(100, ge=1, le=500) — default 100 (test_candles_default_limit_is_100), bordes 1/500 aceptados (test_candles_limit_boundary_accepts_valid_values), inválidos 0/-1/501 rechazados (test_market_lifecycle.py:1096-1104). Criterio 2: símbolo malformado → 422 status/candles (test_market_api.py:324-336); válido no poseído → TEST_ONLY candles + unavailable status (test_another_symbol_never_receives_current_engine_history, test_custom_symbol_fixture_is_still_test_only). Criterio 3: market_engine real vs TEST_ONLY/unavailable; fixture no presentado como conectado. Criterio 4: close_time inclusivo, guard/rechazo WS 1m y controles aligned/non-1m, bootstrap 500 velas, frescura clock_ms+margin, pending_gaps/entries_allowed. Criterio 5: callbacks connect/disconnect/error, backfill simulado y exitoso con DelayedHTTP, release handlers/tareas, cancelación/shutdown limpia. Cap HTTP min(limit,1000) implementado sin test directo (no bloquea cierre); evidencia desglosada en §14.11. Aceptación manual del maestro registrada en §14.11. |
 | ACT-S-006 | P0 | COMPLETADO | Referencia numérica Keltner actual y semántica de datos insuficientes | ACT-S-002 | Microtasks separados aceptados: warmup 33/34/35 sin señal fabricada y referencia numérica independiente. Convención válida solo para la implementación actual (no equivale al método original): TR[0]=0; EMA SMA inicial + alpha=2/(n+1); ATR promedio inicial incluyendo TR[0] + Wilder; bandas EMA ± multiplier*ATR; warmup ema_period+atr_period. Fixture OHLCV 8bar-v1, parámetros de test 3/3/2 y expected exactos en §14.12; 40 passed. Defaults 20/14/2.0 siguen configurables por estrategia, no obligatorios. |
 | ACT-S-007 | P0 | POR_REVALIDAR | Aislar defectos del FYL experimental sin atribuirle el método | ACT-S-002 | Tests de timestamps/fuerza con especificación del detector; batch no causal permanece TEST_ONLY |
@@ -358,7 +358,7 @@ Typecheck, desde `frontend/` — EJECUTADO el 2026-10-13, ambos comandos exit 0:
 ./node_modules/.bin/tsc --noEmit --incremental false -p tsconfig.node.json
 ```
 
-Build, desde `frontend/` — NO EJECUTADO en esta conversación:
+Build, desde `frontend/` — EJECUTADO el 2026-10-13, exit 0:
 
 ```bash
 npm run build
@@ -2371,5 +2371,15 @@ exacto sigue sujeto a ACT-E-001, sin fórmulas ni evidencias inventadas.
 - **Base:** `master`, HEAD `e85fdb2e9284b1ad0c02ea813d1763b750e54904`; árbol limpio antes de ejecutar.
 - **Archivos/cambios:** solo esta ficha y la fila ACT-S-003 de este plan; sin cambios de código fuente.
 - **Comandos y resultados, desde `frontend/`:** `./node_modules/.bin/tsc --noEmit --incremental false -p tsconfig.json` → exit 0; `./node_modules/.bin/tsc --noEmit --incremental false -p tsconfig.node.json` → exit 0; ambos sin diagnósticos.
-- **Checks no ejecutados:** tests frontend, build, navegador y QA visual. ACT-S-004 (build) no iniciado.
+- **Checks no ejecutados al cierre de ACT-S-003:** tests frontend, navegador y QA visual. ACT-S-004 se ejecutó posteriormente; ver §14.14.
 - **Conservación/límites:** typecheck solamente; no se corrigieron ni alteraron archivos del frontend. La aceptación no certifica build ni comportamiento runtime.
+
+### 14.14. Cierre ACT-S-004 — Build de producción frontend
+
+- **Estado:** COMPLETADO el 2026-10-13; build autorizado explícitamente por el maestro.
+- **Responsable real:** agente ejecutor de esta sesión.
+- **Base:** `master`, HEAD `5db3fdbeac1390a5af17894da6d03ca6075790dd`; árbol limpio antes de ejecutar.
+- **Comando y resultado, desde `frontend/`:** `npm run build` → exit 0; `tsc -b` completó y Vite 6.4.3 transformó 41 módulos, emitió `dist/index.html` (0.41 kB), CSS (5.02 kB) y JS (415.59 kB); build 1.27s.
+- **Artefactos:** `frontend/dist/` queda ignorado por Git. `tsc -b` creó `frontend/tsconfig.tsbuildinfo`, untracked; preservado y no incluido en commit. No se limpió ni se modificó `.gitignore`.
+- **Checks no ejecutados:** tests frontend, navegador, accesibilidad, instalación limpia. El build no certifica QA visual ni runtime.
+- **Conservación/límites:** sin cambios de código fuente; solo documentación de seguimiento. ACT-S-004 no habilita el siguiente task automáticamente.
