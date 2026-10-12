@@ -40,3 +40,18 @@ ejecutaron tests.
 
 ACT-S-007 permanece `PAUSADO`; ACT-E-001 permanece `BLOQUEADO`. El microtask read-only no
 reabre ninguno de esos trabajos.
+
+## Revisión del informe Qwen de IndicatorDefinition
+
+Se acepta la tabla de hechos Keltner/MACD como inventario de la implementación actual. No se
+aprueban todavía sus decisiones de ID/versionado: el informe sugiere un slug y muestra
+`ind.v1`/`2026-10-12` como ejemplos pese a que el microtask dejó formato y literales pendientes.
+Esos valores no son contratos aceptados. La unidad de precio debe seguir al quote asset del
+símbolo; `USDT` no es una unidad universal. La precisión redondeada por API sigue separada de
+la precisión matemática.
+
+El informe Qwen declara 13 tracked modificados y 25 untracked; el snapshot de este workspace
+continúa en 13 y 33, respectivamente. No se modificó código ni tests; la discrepancia impide
+aceptar el recuento Qwen como comparación de baseline pre/post. El diseño `IndicatorDefinition`
+sigue pendiente de decisión del maestro y no autoriza implementación, endpoint ni cambios a
+`CapabilitiesContract`.
