@@ -1,0 +1,48 @@
+ACT-C-001 — MICROTASK DECISIÓN: DISEÑO DE `IndicatorDefinition`
+Solo lectura · preparado para revisión · no ejecutar tests ni implementar.
+Dependencia: `act-c-001-indicator-catalog-review.md`; ACT-C-001 global continúa PENDIENTE.
+
+OBJETIVO
+Proponer el contrato conceptual mínimo versionable de indicadores para UI/backend/IA usando
+solo Keltner y MACD como ejemplos de implementación actual. Separar valores documentados de
+defaults y desconocidos. No crear modelo, catálogo ni cambiar consumidores.
+
+ALLOWLIST DE LECTURA (exhaustiva)
+- `act-c-001-indicator-catalog-review.md`.
+- `trading-bot-action-plan.md`: fila ACT-C-001 y §14.12 (Keltner actual aceptado).
+- `trading-bot-development-plan.md`: §4 “Contratos y catálogos versionados”.
+- `backend/src/indicators/keltner.py`, `backend/src/indicators/macd.py`,
+  `backend/src/indicators/__init__.py`.
+- `backend/src/api/analysis.py`: solo schemas y serialización actual de outputs Keltner/MACD.
+- `backend/tests/test_keltner.py`, `backend/tests/test_macd.py`: solo evidencia documentada de
+  warmup y referencia numérica.
+
+ESCRITURA: NINGUNA. No leer/editar FYL, estrategia/reglas, N02, capacidades, frontend, orders,
+positions, proveedores, persistencia ni tests fuera de allowlist. ACT-S-007 sigue PAUSADO;
+ACT-E-001 BLOQUEADO. No reabrir ni inferir equivalencia con métodos originales.
+
+DECISIONES A PROPONER (máximo cuatro subtareas)
+1. Estructura de identidad: `indicator_id` estable + versión opaca; distinguir versión de
+   implementación de versión del schema. No elegir UUID, slug, SemVer, hash ni literales.
+2. Parámetros: proponer cómo expresar tipo, si es configurable, default de implementación y
+   rango permitido; unknowns deben quedar explícitos, nunca completar rangos por intuición.
+3. Unidades/warmup/causalidad: contrato en unidades explícitas, warmup como regla derivada de
+   parámetros, outputs y precisión matemática separados del redondeo API; clasificar cada
+   garantía como documentada, deducida del bucle o `NO ESPECIFICADO`.
+4. Compatibilidad/ubicación: comparar catálogo dedicado frente a ampliar contratos existentes;
+   recomendar una opción aditiva sin modificar `CapabilitiesContract` ni responses actuales.
+   Enumerar impacto para UI/IA y un único microtask de implementación posterior.
+
+NO INFERIR
+- Defaults Keltner 20/14/2 y MACD 12/26/9 describen implementación actual, no estrategia
+  canónica. Los rangos Keltner no están especificados.
+- No hacer que `time_ms=i*60_000` sea timestamp Unix; es eje relativo de fallback de pruebas.
+- El redondeo API (Keltner 2, MACD 4 decimales) no define precisión del cálculo.
+- No inventar output ranges, schema versions o garantías formales ausentes.
+- No proponer valores de capital, comisiones, límites de riesgo ni ejecución.
+
+BASELINE / SALIDA
+Capturar `git status --short --untracked-files=all`, `git diff` y `git diff --cached` al inicio
+y cierre; preservar todos los cambios locales. No ejecutar tests/build/servicios/red. Entregar
+propuesta recomendada + alternativa, implicaciones, tabla de hechos/desconocidos y archivos del
+microtask futuro. Confirmar cero archivos alterados y STOP para revisión del maestro.
