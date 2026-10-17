@@ -6,7 +6,9 @@ Cobertura:
   - PAPER-only (environment="paper" inmutable).
   - Comisión null vs cero.
   - Matriz estática de transiciones de estado.
-  - No overfill (remaining_qty >= 0, fills no exceden requested_qty).
+  - No overfill (remaining_qty >= 0), no fill_id repetidos por orden.
+  - qty/total_cost autoritativos; promedio derivado a 34 cifras, comisión separada.
+  - schema_version restringido a literal v1 e inmutable en cada DTO versionado.
   - Atribución/reconciliación de inventario (unattributed invariant).
   - Ecuación de balances (total = available + reserved).
   - Límite de reserva (reserved <= total).
@@ -15,7 +17,7 @@ Cobertura:
 """
 
 import json
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal, getcontext, setcontext
 from typing import Sequence
 
 import pytest
@@ -27,6 +29,7 @@ from src.models.paper_contracts import (
     AssetBalance,
     Commission,
     LotAllocation,
+    PaperAccountOpening,
     PaperBalanceView,
     PaperFill,
     PaperInventoryReconciliation,
@@ -250,6 +253,22 @@ class TestPaperOrder:
         with pytest.raises(ValidationError, match="must match parent order_id"):
             self._make_order(fills=[fill], status=PaperOrderStatus.PARTIALLY_FILLED)
 
+    def test_duplicate_fill_ids_are_rejected(self):
+        fills = [
+            PaperFill(
+                fill_id="same-fill", order_id="o1", qty=Decimal("0.5"),
+                price=Decimal("65000"), timestamp_ms=1700000000000,
+                commission=None,
+            ),
+            PaperFill(
+                fill_id="same-fill", order_id="o1", qty=Decimal("0.5"),
+                price=Decimal("65000"), timestamp_ms=1700000000000,
+                commission=None,
+            ),
+        ]
+        with pytest.raises(ValidationError, match="duplicate fill_id"):
+            self._make_order(fills=fills, status=PaperOrderStatus.FILLED)
+
     def test_remaining_qty(self):
         fills = [
             PaperFill(fill_id="f1", order_id="o1", qty=Decimal("0.6"),
@@ -416,6 +435,129 @@ class TestPaperPositionView:
         v = self._make_view(lots)
         assert v.avg_entry_price == Decimal("65000")
 
+    def test_lot_rejects_average_inconsistent_with_projection_policy(self):
+        with pytest.raises(ValidationError, match="34-significant-digit"):
+            PositionLot(
+                position_id="p1", entry_order_id="o1",
+                strategy_ref=StrategyRef(strategy_id="s1", strategy_version="v1"),
+                qty=Decimal("3"), avg_entry_price=Decimal("1.6"),
+                total_cost=Decimal("5"),
+            )
+
+    def test_average_projection_handles_non_terminating_cost_ratio_and_roundtrips(self):
+        avg = Decimal("1.666666666666666666666666666666667")
+        lot = PositionLot(
+            position_id="order-1", entry_order_id="order-1",
+            strategy_ref=StrategyRef(strategy_id="s1", strategy_version="v1"),
+            qty=Decimal("3"), avg_entry_price=avg, total_cost=Decimal("5"),
+        )
+        assert (lot.qty, lot.total_cost) == (Decimal("3"), Decimal("5"))
+        restored = PositionLot.model_validate_json(lot.model_dump_json())
+        assert restored == lot
+        assert restored.total_cost == Decimal("5")
+        view = self._make_view([lot], mark_price=Decimal("2"))
+        assert view.avg_entry_price == avg
+        assert view.unrealized_pnl == Decimal("1")
+
+    def test_average_projection_ignores_global_decimal_context(self):
+        original = getcontext().copy()
+        try:
+            getcontext().prec = 4
+            getcontext().rounding = ROUND_UP
+            avg = Decimal("1.666666666666666666666666666666667")
+            lot = PositionLot(
+                position_id="order-1", entry_order_id="order-1",
+                strategy_ref=StrategyRef(strategy_id="s1", strategy_version="v1"),
+                qty=Decimal("3"), avg_entry_price=avg, total_cost=Decimal("5"),
+            )
+            view = self._make_view([lot])
+            assert view.avg_entry_price == avg
+        finally:
+            setcontext(original)
+
+    def test_average_projection_uses_half_even_at_34_significant_digits(self):
+        original = getcontext().copy()
+        try:
+            getcontext().prec = 7
+            getcontext().rounding = ROUND_UP
+            avg = Decimal("1")
+            lot = PositionLot(
+                position_id="order-1", entry_order_id="order-1",
+                strategy_ref=StrategyRef(strategy_id="s1", strategy_version="v1"),
+                qty=Decimal("1"), avg_entry_price=avg,
+                total_cost=Decimal("1." + "0" * 33 + "5"),
+            )
+            assert lot.avg_entry_price == avg
+        finally:
+            setcontext(original)
+
+    def test_average_projection_outside_explicit_exponent_range_is_rejected(self):
+        with pytest.raises(ValidationError, match="cannot be projected"):
+            PositionLot(
+                position_id="order-1", entry_order_id="order-1",
+                strategy_ref=StrategyRef(strategy_id="s1", strategy_version="v1"),
+                qty=Decimal("1E+999999999999999999"),
+                avg_entry_price=Decimal("1"),
+                total_cost=Decimal("1E-999999999999999999"),
+            )
+
+    def test_accounting_sums_and_pnl_remain_exact_over_34_digits(self):
+        original = getcontext().copy()
+        qty_text = "9" * 50
+        expected_text = "1" + "0" * 50
+        try:
+            getcontext().prec = 6
+            getcontext().rounding = ROUND_DOWN
+            strategy = StrategyRef(strategy_id="s1", strategy_version="v1")
+            lots = [
+                PositionLot(
+                    position_id="order-1", entry_order_id="order-1",
+                    strategy_ref=strategy, qty=Decimal(qty_text),
+                    avg_entry_price=Decimal("1"), total_cost=Decimal(qty_text),
+                ),
+                PositionLot(
+                    position_id="order-2", entry_order_id="order-2",
+                    strategy_ref=strategy, qty=Decimal("1"),
+                    avg_entry_price=Decimal("1"), total_cost=Decimal("1"),
+                ),
+            ]
+            view = self._make_view(lots, mark_price=Decimal("2"))
+            expected = Decimal(expected_text)
+            assert sum(len(lot.qty.as_tuple().digits) for lot in lots) > 34
+            assert view.total_qty == expected
+            assert view.unrealized_pnl == expected
+        finally:
+            setcontext(original)
+
+    def test_unrealized_pnl_cost_negation_preserves_global_context_and_flags(self):
+        cost = Decimal("9" * 50)
+        qty = Decimal("1")
+        mark = Decimal("1E50")
+        strategy = StrategyRef(strategy_id="s1", strategy_version="v1")
+        lot = PositionLot(
+            position_id="order-1", entry_order_id="order-1",
+            strategy_ref=strategy, qty=qty, avg_entry_price=Decimal("1E50"),
+            total_cost=cost,
+        )
+        view = self._make_view([lot], mark_price=mark)
+
+        original = getcontext().copy()
+        try:
+            context = getcontext()
+            context.prec = 6
+            context.rounding = ROUND_DOWN
+            context.clear_flags()
+            flags_before = context.flags.copy()
+
+            pnl = view.unrealized_pnl
+
+            assert pnl == Decimal("1")
+            assert context.prec == 6
+            assert context.rounding == ROUND_DOWN
+            assert context.flags == flags_before
+        finally:
+            setcontext(original)
+
     def test_is_open(self):
         lots = [PositionLot(position_id="p1", entry_order_id="o1",
                             strategy_ref=StrategyRef(strategy_id="s1", strategy_version="v1"),
@@ -495,6 +637,72 @@ class TestPaperBalanceView:
         balance = AssetBalance(asset="USDT", total=Decimal("1"), available=Decimal("1"), reserved=Decimal("0"))
         with pytest.raises(ValidationError, match="duplicate asset"):
             PaperBalanceView(account_id="acc1", balances=[balance, balance])
+
+
+class TestPaperAccountOpening:
+    @staticmethod
+    def _balance(asset="USD", amount=Decimal("10"), reserved=Decimal("0")):
+        return AssetBalance(
+            asset=asset,
+            total=amount,
+            available=amount - reserved,
+            reserved=reserved,
+        )
+
+    def test_opening_requires_explicit_nonempty_balances_and_paper_environment(self):
+        with pytest.raises(ValidationError):
+            PaperAccountOpening(account_id="account-1")
+        with pytest.raises(ValidationError):
+            PaperAccountOpening(
+                account_id="account-1",
+                balances=[self._balance()],
+                environment="live",
+            )
+
+    def test_account_id_is_strict_nonblank_and_not_normalized(self):
+        with pytest.raises(ValidationError):
+            PaperAccountOpening(account_id="   ", balances=[self._balance()])
+        with pytest.raises(ValidationError):
+            PaperAccountOpening(account_id=123, balances=[self._balance()])
+        opening = PaperAccountOpening(
+            account_id=" account-1 ", balances=[self._balance()]
+        )
+        assert opening.account_id == " account-1 "
+
+    def test_opening_rejects_duplicate_assets_and_reserved_amounts(self):
+        usd = self._balance()
+        with pytest.raises(ValidationError, match="duplicate assets"):
+            PaperAccountOpening(account_id="account-1", balances=[usd, usd])
+        with pytest.raises(ValidationError, match="must not include reserved"):
+            PaperAccountOpening(
+                account_id="account-1",
+                balances=[self._balance(reserved=Decimal("1"))],
+            )
+
+    def test_opening_sorts_assets_and_accepts_explicit_zero(self):
+        opening = PaperAccountOpening(
+            account_id="account-1",
+            balances=[
+                self._balance("USD", Decimal("0")),
+                self._balance("BTC", Decimal("2.5")),
+            ],
+        )
+        assert [balance.asset for balance in opening.balances] == ["BTC", "USD"]
+        assert opening.balances[1].total == Decimal("0")
+        assert opening.schema_version == "paper_account_opening.v1"
+        assert opening.environment == "paper"
+
+    def test_opening_and_nested_balances_are_immutable_copies(self):
+        supplied_balance = self._balance()
+        opening = PaperAccountOpening(
+            account_id="account-1", balances=[supplied_balance]
+        )
+        supplied_balance.total = Decimal("20")
+        assert opening.balances[0].total == Decimal("10")
+        with pytest.raises(ValidationError):
+            opening.account_id = "changed"
+        with pytest.raises(ValidationError):
+            opening.balances[0].total = Decimal("20")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1092,3 +1300,57 @@ class TestNoImplicitFinancialDefaults:
         )
         assert not hasattr(o, "spread")
         assert not hasattr(o, "slippage")
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (StrategyRef, {"strategy_id": "s1", "strategy_version": "v1"}),
+        (PaperFill, {
+            "fill_id": "f1", "order_id": "o1", "qty": Decimal("1"),
+            "price": Decimal("100"), "timestamp_ms": 1, "commission": None,
+        }),
+        (PaperOrder, {
+            "order_id": "o1", "client_order_id": "c1", "paper_account_id": "a1",
+            "paper_session_id": "s1", "symbol": "BTC/USDT", "side": PaperOrderSide.BUY,
+            "order_type": PaperOrderType.MARKET, "requested_qty": Decimal("1"),
+            "max_quote_amount": Decimal("100"),
+            "strategy_ref": StrategyRef(strategy_id="s1", strategy_version="v1"),
+            "timestamp_ms": 1,
+        }),
+        (PaperPositionView, {
+            "account_id": "a1", "symbol": "BTC/USDT",
+            "strategy_ref": StrategyRef(strategy_id="s1", strategy_version="v1"),
+        }),
+        (PaperBalanceView, {"account_id": "a1"}),
+        (PaperAccountOpening, {
+            "account_id": "a1",
+            "balances": [AssetBalance(
+                asset="USD", total=Decimal("1"), available=Decimal("1"),
+                reserved=Decimal("0"),
+            )],
+        }),
+        (UnattributedInventoryView, {"account_id": "a1"}),
+        (PaperReservationRef, {
+            "reservation_id": "r1", "owner_order_id": "o1",
+            "amount": ReservationAmount(asset="BTC", amount=Decimal("1")),
+        }),
+        (PaperProtectionGroup, {
+            "protection_group_id": "g1", "position_id": "p1", "symbol": "BTC/USDT",
+            "open_position_qty": Decimal("1"), "stop_order_id": "stop1",
+            "take_order_id": "take1",
+            "reserved_amount": ReservationAmount(asset="BTC", amount=Decimal("1")),
+            "remaining_protected_qty": Decimal("1"),
+        }),
+    ],
+    ids=[
+        "strategy-ref", "fill", "order", "position-view", "balance-view",
+        "account-opening", "unattributed-inventory", "reservation-ref", "protection-group",
+    ],
+)
+def test_schema_version_rejects_unsupported_values(model, payload):
+    instance = model(**payload)  # The currently declared v1 is accepted by default.
+    with pytest.raises(ValidationError):
+        model(**payload, schema_version="unsupported.v99")
+    with pytest.raises(ValidationError):
+        instance.schema_version = "unsupported.v99"

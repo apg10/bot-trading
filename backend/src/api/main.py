@@ -15,6 +15,7 @@ from src.config import config as app_config
 from src.models.state import EngineInfo, EngineState, MarketStatus, Environment
 from src.market.binance_client import BinanceConfig
 from src.market.engine import MarketEngine
+from src.persistence.sqlite_store import SQLiteStore
 from .market import router as market_router, set_market_engine
 from .analysis import router as analysis_router
 from .bot import router as bot_router
@@ -45,48 +46,72 @@ _VALID_TRANSITIONS: dict[EngineState, set[EngineAction]] = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Un motor de datos público por aplicación; nunca por pestaña/suscripción."""
+    """Un motor de datos público por aplicación; nunca por pestaña/suscripción.
+
+    Ciclo de vida SQLiteStore (ACT-P-001 microtask):
+    1. Resolver ``TRADING_DB_PATH`` y crear directorio padre.
+    2. Inicializar el store antes del MarketEngine.
+    3. Publicar store en ``app.state`` mientras el lifespan esté activo.
+    4. Si apertura/migración o startup del motor falla, propagar el error.
+    5. En shutdown o startup fallido, cerrar store en cleanup blindado.
+    """
     if app_config.is_live or app_config.env == "live":
         raise RuntimeError("LIVE está deshabilitado")
     if getattr(app.state, "market_engine", None) is not None:
         raise RuntimeError("El ciclo de vida del mercado ya está iniciado")
-    engine = MarketEngine(
-        BinanceConfig(kline_interval=app_config.market_interval),
-        freshness_margin_seconds=app_config.market_freshness_margin_seconds,
-    )
-    app.state.market_engine = engine
-    set_market_engine(engine)
-    task = asyncio.create_task(engine.start(app_config.market_symbol))
-    ready = asyncio.create_task(engine.started.wait())
 
-    async def shutdown():
-        try:
-            await engine.stop()
-            with suppress(asyncio.CancelledError):
-                await task
-        finally:
-            set_market_engine(None)
-            app.state.market_engine = None
-
+    db_path = app_config.database_path
+    store = SQLiteStore(db_path)
+    engine: MarketEngine | None = None
+    task: asyncio.Task[None] | None = None
+    ready: asyncio.Task[bool] | None = None
     try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        await store.initialize()
+        app.state._sqlite_store = store
+
+        # Open/migrate persistence before starting the market engine.
+        engine = MarketEngine(
+            BinanceConfig(kline_interval=app_config.market_interval),
+            freshness_margin_seconds=app_config.market_freshness_margin_seconds,
+        )
+        app.state.market_engine = engine
+        set_market_engine(engine)
+        task = asyncio.create_task(engine.start(app_config.market_symbol))
+        ready = asyncio.create_task(engine.started.wait())
+
         done, _ = await asyncio.wait((task, ready), return_when=asyncio.FIRST_COMPLETED)
         if task in done:
+            # Preserve the existing startup contract: failed engine startup fails
+            # the lifespan, while the finally block still closes SQLite safely.
             task.result()
         # Histórico y conexión no bloquean la apertura de la API: el estado
         # permanecerá no apto hasta terminar bootstrap/recuperación.
         yield
     finally:
         with anyio.CancelScope(shield=True):
-            ready.cancel()
-            with suppress(asyncio.CancelledError):
-                await ready
-            cleanup = asyncio.create_task(shutdown())
             try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                # Una cancelación del lifespan no debe abandonar clientes abiertos.
-                await cleanup
-                raise
+                if ready is not None:
+                    ready.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await ready
+
+                if engine is not None:
+                    try:
+                        await engine.stop()
+                    finally:
+                        if task is not None:
+                            if not task.done():
+                                task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await task
+            finally:
+                set_market_engine(None)
+                app.state.market_engine = None
+                try:
+                    await store.close()
+                finally:
+                    app.state._sqlite_store = None
 
 
 app = FastAPI(

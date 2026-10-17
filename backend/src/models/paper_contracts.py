@@ -8,7 +8,22 @@ compatibilidad con los enums existentes en ``src.models.state``.
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import (
+    MAX_EMAX,
+    MIN_EMIN,
+    Clamped,
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Subnormal,
+    Underflow,
+    localcontext,
+)
 from typing import Annotated, Literal, Optional, Sequence
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
@@ -36,6 +51,77 @@ def _paper_decimal(value: object) -> Decimal:
 
 
 PaperDecimal = Annotated[Decimal, BeforeValidator(_paper_decimal)]
+
+
+_POSITION_AVERAGE_CONTEXT = Context(
+    prec=34,
+    rounding=ROUND_HALF_EVEN,
+    Emin=MIN_EMIN,
+    Emax=MAX_EMAX,
+    clamp=0,
+    traps=[Clamped, DivisionByZero, InvalidOperation, Overflow, Subnormal, Underflow],
+)
+
+
+def _average_projection(qty: Decimal, total_cost: Decimal) -> Decimal:
+    """Derive the 34-significant-digit average without consulting global context.
+
+    The projection uses ROUND_HALF_EVEN, 34 significant digits, Emin=-999999999999999999,
+    Emax=999999999999999999 and clamp=0. Clamped, division-by-zero, invalid, overflow,
+    underflow and subnormal signal a validation error; ordinary inexact/rounded division
+    is the intended projection. The explicit context is copied per operation, never
+    inherited from the process/thread Decimal context.
+    """
+    try:
+        with localcontext(_POSITION_AVERAGE_CONTEXT):
+            return total_cost / qty
+    except DecimalException as exc:
+        raise ValueError(
+            "avg_entry_price cannot be projected within the explicit Decimal context"
+        ) from exc
+
+
+def _exact_sum(values: Sequence[Decimal]) -> Decimal:
+    """Add finite Decimals exactly using enough local precision for alignment/carry."""
+    if not values:
+        return Decimal("0")
+    min_exponent = min(value.as_tuple().exponent for value in values)
+    max_adjusted = max(value.adjusted() if value else 0 for value in values)
+    precision = max(1, max_adjusted - min_exponent + 1 + len(str(len(values))))
+    context = Context(
+        prec=precision,
+        rounding=ROUND_HALF_EVEN,
+        Emin=MIN_EMIN,
+        Emax=MAX_EMAX,
+        clamp=0,
+        traps=[Clamped, DivisionByZero, Inexact, InvalidOperation, Overflow, Underflow],
+    )
+    try:
+        with localcontext(context):
+            result = Decimal("0")
+            for value in values:
+                result += value
+            return result
+    except DecimalException as exc:
+        raise ValueError("exact Decimal sum exceeds supported exponent range") from exc
+
+
+def _exact_product(left: Decimal, right: Decimal) -> Decimal:
+    """Multiply finite Decimals exactly with operand-derived local precision."""
+    precision = max(1, len(left.as_tuple().digits) + len(right.as_tuple().digits))
+    context = Context(
+        prec=precision,
+        rounding=ROUND_HALF_EVEN,
+        Emin=MIN_EMIN,
+        Emax=MAX_EMAX,
+        clamp=0,
+        traps=[Clamped, DivisionByZero, Inexact, InvalidOperation, Overflow, Underflow],
+    )
+    try:
+        with localcontext(context):
+            return left * right
+    except DecimalException as exc:
+        raise ValueError("exact Decimal product exceeds supported exponent range") from exc
 
 # ── Reutilización de enums legacy (solo lectura) ────────────────────────────────
 # Los tests pueden verificar compatibilidad con estos valores sin importar los
@@ -71,7 +157,9 @@ class StrategyRef(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: str = "paper_strategy_ref.v1"
+    schema_version: Literal["paper_strategy_ref.v1"] = Field(
+        default="paper_strategy_ref.v1", frozen=True
+    )
     strategy_id: str = Field(..., min_length=1)
     strategy_version: str = Field(..., frozen=True)
     decision_id: Optional[str] = None
@@ -121,7 +209,9 @@ class PaperFill(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: str = "paper_fill.v1"
+    schema_version: Literal["paper_fill.v1"] = Field(
+        default="paper_fill.v1", frozen=True
+    )
     fill_id: str = Field(..., min_length=1)
     order_id: str = Field(..., min_length=1)
     qty: PaperDecimal = Field(..., gt=Decimal("0"))
@@ -157,7 +247,9 @@ class PaperOrder(BaseModel):
       - Todos los fills deben referir al mismo ``order_id``.
     """
 
-    schema_version: str = "paper_order.v1"
+    schema_version: Literal["paper_order.v1"] = Field(
+        default="paper_order.v1", frozen=True
+    )
     order_id: str = Field(..., min_length=1)
     client_order_id: str = Field(..., min_length=1)
     paper_account_id: str = Field(..., min_length=1)
@@ -196,7 +288,11 @@ class PaperOrder(BaseModel):
     @model_validator(mode="after")
     def validate_fills(self) -> PaperOrder:
         """Validar fills: mismo order_id y no exceder requested_qty."""
+        fill_ids: set[str] = set()
         for f in self.fills:
+            if f.fill_id in fill_ids:
+                raise ValueError(f"duplicate fill_id in order: {f.fill_id}")
+            fill_ids.add(f.fill_id)
             if f.order_id != self.order_id:
                 raise ValueError(
                     f"fill order_id ({f.order_id}) must match parent order_id ({self.order_id})"
@@ -281,7 +377,7 @@ class PaperOrder(BaseModel):
 # ── PaperPositionView / PositionLot ───────────────────────────────────────────
 
 class PositionLot(BaseModel):
-    """Lote individual de posición."""
+    """Lot with authoritative gross quantity/cost and a derived average projection."""
 
     position_id: str = Field(..., min_length=1)
     entry_order_id: str = Field(..., min_length=1)
@@ -290,11 +386,24 @@ class PositionLot(BaseModel):
     avg_entry_price: PaperDecimal = Field(..., gt=Decimal("0"))
     total_cost: PaperDecimal = Field(..., ge=Decimal("0"))
 
+    @model_validator(mode="after")
+    def average_matches_authoritative_cost(self) -> "PositionLot":
+        expected_average = _average_projection(self.qty, self.total_cost)
+        if self.avg_entry_price != expected_average:
+            raise ValueError(
+                "avg_entry_price must equal the 34-significant-digit "
+                "ROUND_HALF_EVEN projection of total_cost / qty; "
+                "qty and total_cost are authoritative and commissions are separate"
+            )
+        return self
+
 
 class PaperPositionView(BaseModel):
     """Proyección no autoritativa de lotes agregados por account+symbol+strategy_ref."""
 
-    schema_version: str = "paper_position_view.v1"
+    schema_version: Literal["paper_position_view.v1"] = Field(
+        default="paper_position_view.v1", frozen=True
+    )
     account_id: str = Field(..., min_length=1)
     symbol: str = Field(..., min_length=3)
     strategy_ref: StrategyRef
@@ -316,14 +425,15 @@ class PaperPositionView(BaseModel):
 
     @property
     def total_qty(self) -> Decimal:
-        return sum(l.qty for l in self.lots) if self.lots else Decimal("0")
+        return _exact_sum(tuple(l.qty for l in self.lots))
 
     @property
     def avg_entry_price(self) -> Optional[Decimal]:
+        """34-significant-digit projection; summed quantity/cost remain authoritative."""
         if not self.lots or self.total_qty == Decimal("0"):
             return None
-        total_cost = sum(l.total_cost for l in self.lots)
-        return total_cost / self.total_qty
+        total_cost = _exact_sum(tuple(l.total_cost for l in self.lots))
+        return _average_projection(self.total_qty, total_cost)
 
     @property
     def is_open(self) -> bool:
@@ -331,12 +441,12 @@ class PaperPositionView(BaseModel):
 
     @property
     def unrealized_pnl(self) -> Optional[Decimal]:
+        """Gross unrealized P&L from exact mark value less gross cost; fees excluded."""
         if self.mark_price is None or not self.is_open:
             return None
-        avg_entry_price = self.avg_entry_price
-        if avg_entry_price is None:
-            return None
-        return (self.mark_price - avg_entry_price) * self.total_qty
+        market_value = _exact_product(self.mark_price, self.total_qty)
+        total_cost = _exact_sum(tuple(l.total_cost for l in self.lots))
+        return _exact_sum((market_value, total_cost.copy_negate()))
 
 
 # ── PaperBalanceView / AssetBalance ───────────────────────────────────────────
@@ -358,10 +468,68 @@ class AssetBalance(BaseModel):
         return self
 
 
+class _PaperAccountOpeningAssetBalance(AssetBalance):
+    """Frozen nested copy; AssetBalance's shared mutability stays unchanged."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class PaperAccountOpening(BaseModel):
+    """Explicit, immutable opening snapshot for one PAPER account.
+
+    ``account_id`` is account-scoped, not session-scoped. Every asset amount is
+    supplied explicitly; opening balances cannot include reservations.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["paper_account_opening.v1"] = Field(
+        default="paper_account_opening.v1", frozen=True
+    )
+    environment: Literal["paper"] = Field(default="paper", frozen=True)
+    account_id: str = Field(..., strict=True, min_length=1)
+    balances: tuple[_PaperAccountOpeningAssetBalance, ...] = Field(
+        ..., min_length=1
+    )
+
+    @field_validator("account_id")
+    @classmethod
+    def account_id_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("account_id must not be blank")
+        return value
+
+    @field_validator("balances", mode="before")
+    @classmethod
+    def copy_asset_balances(cls, values):
+        if isinstance(values, (tuple, list)):
+            return tuple(
+                balance.model_dump(mode="python")
+                if isinstance(balance, AssetBalance)
+                else balance
+                for balance in values
+            )
+        return values
+
+    @field_validator("balances")
+    @classmethod
+    def opening_balances_are_explicit_and_canonical(
+        cls, values: tuple[_PaperAccountOpeningAssetBalance, ...]
+    ) -> tuple[_PaperAccountOpeningAssetBalance, ...]:
+        assets = [balance.asset for balance in values]
+        if len(assets) != len(set(assets)):
+            raise ValueError("PaperAccountOpening cannot contain duplicate assets")
+        if any(balance.reserved != Decimal("0") for balance in values):
+            raise ValueError("PaperAccountOpening must not include reserved balances")
+        return tuple(sorted(values, key=lambda balance: balance.asset))
+
+
 class PaperBalanceView(BaseModel):
     """Vista de balances paper. Ledger ACT-P-002 es única autoridad."""
 
-    schema_version: str = "paper_balance_view.v1"
+    schema_version: Literal["paper_balance_view.v1"] = Field(
+        default="paper_balance_view.v1", frozen=True
+    )
     account_id: str = Field(..., min_length=1)
     balances: Sequence[AssetBalance] = Field(default_factory=list)
 
@@ -383,7 +551,9 @@ class UnattributedInventory(BaseModel):
 
 
 class UnattributedInventoryView(BaseModel):
-    schema_version: str = "unattributed_inventory_view.v1"
+    schema_version: Literal["unattributed_inventory_view.v1"] = Field(
+        default="unattributed_inventory_view.v1", frozen=True
+    )
     account_id: str = Field(..., min_length=1)
     items: Sequence[UnattributedInventory] = Field(default_factory=list)
 
@@ -442,7 +612,9 @@ class PaperReservationRef(BaseModel):
     La reserva OCO es por lote y compartida (no se suma por orden).
     """
 
-    schema_version: str = "paper_reservation_ref.v1"
+    schema_version: Literal["paper_reservation_ref.v1"] = Field(
+        default="paper_reservation_ref.v1", frozen=True
+    )
     reservation_id: str = Field(..., min_length=1)
     owner_order_id: Optional[str] = None
     owner_group_id: Optional[str] = None
@@ -492,7 +664,9 @@ class PaperProtectionGroup(BaseModel):
     - Cancelar el grupo cancela remanentes de ambos y libera solo reserva no consumida.
     """
 
-    schema_version: str = "paper_protection_group.v1"
+    schema_version: Literal["paper_protection_group.v1"] = Field(
+        default="paper_protection_group.v1", frozen=True
+    )
     protection_group_id: str = Field(..., min_length=1)
     position_id: str = Field(..., min_length=1)
     symbol: str = Field(..., min_length=3)

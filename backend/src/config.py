@@ -9,10 +9,14 @@ La referencia es UTC actual menos close_time Binance de la última vela cerrada.
 
 import math
 import os
+from pathlib import Path
 from typing import Optional
 
 # Fuente canónica del tipo Environment (reutiliza models.state.Environment)
 from .models.state import Environment
+
+# Directorio raíz del paquete de backend (independiente del CWD)
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Config:
@@ -47,6 +51,16 @@ class Config:
             raise ValueError("El margen de frescura debe ser finito y no negativo")
         self.market_freshness_margin_seconds = float(margin)
         self.market_max_candle_age_seconds = 60.0 + self.market_freshness_margin_seconds
+
+    # SQLite persistence path — read from env at access time so tests can
+    # monkeypatch TRADING_DB_PATH after the Config singleton is created.
+    @property
+    def database_path(self) -> Path:
+        raw_db = os.getenv("TRADING_DB_PATH")
+        if raw_db:
+            configured = Path(raw_db).expanduser()
+            return configured if configured.is_absolute() else _BACKEND_ROOT / configured
+        return _BACKEND_ROOT / "data" / "trading_bot.sqlite3"
 
 
 # Instancia global para importación directa
