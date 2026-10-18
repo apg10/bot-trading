@@ -195,6 +195,14 @@ class PaperOrderAcceptanceScopeError(ValueError):
     """Order is outside the authorized BUY LIMIT/MARKET acceptance slice."""
 
 
+class PaperOrderCancellationStateError(ValueError):
+    """Order cannot be cancelled in its current state or is not a BUY order."""
+
+
+class PaperOrderCancellationConflictError(ValueError):
+    """Order cancellation identity already has a different stable payload."""
+
+
 # ── SQL DDL (idempotent) ──────────────────────────────────────────────────────────
 
 _SCHEMA_V1_STATEMENTS = (
@@ -909,6 +917,29 @@ class SQLiteStore:
             raise ValueError("fill_id must be a non-empty string")
         return await self._write(
             lambda conn: self._apply_paper_fill_inner(conn, fill_id)
+        )
+
+    async def cancel_paper_order(self, order_id: str) -> PaperOrder:
+        """Cancel the remaining quantity of one accepted BUY order.
+
+        Admits only orders in ACCEPTED or PARTIALLY_FILLED state.  Changes
+        status to CANCELLED, preserves fills / executed_qty / lot / cost /
+        inventory / commissions already accounted for, and releases the active
+        reservation remainder (total unchanged, reserved decreases by the
+        remainder, available increases by the same amount).
+
+        Idempotent: repeating cancellation of an order already CANCELLED with
+        its reservation already released returns the stored state without side
+        effects.  FILLED / REJECTED / EXPIRED are rejected without changes.
+        """
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(order_id, str) or not order_id:
+            raise ValueError("order_id must be a non-empty string")
+        return await self._write(
+            lambda conn: self._cancel_paper_order_inner(conn, order_id)
         )
 
     async def load_paper_reservation(
@@ -2142,6 +2173,155 @@ class SQLiteStore:
         )
 
         return fill
+
+    # ── paper order cancellation (ACT-P-003) ─────────────────────────────
+
+    @staticmethod
+    async def _cancel_paper_order_inner(
+        conn: aiosqlite.Connection,
+        order_id: str,
+    ) -> PaperOrder:
+        """Cancel the remaining quantity of one accepted BUY order.
+
+        Admits only ACCEPTED / PARTIALLY_FILLED BUY orders.  Idempotent for
+        CANCELLED orders whose reservation has already been released.
+        FILLED / REJECTED / EXPIRED are rejected without changes.
+        """
+        # 1. Load current order.
+        cursor = await conn.execute(
+            "SELECT order_id, paper_account_id, paper_session_id, environment, "
+            "client_order_id, order_json FROM paper_orders WHERE order_id = ?",
+            (order_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise PaperOrderAcceptanceStateError(
+                f"paper order {order_id} not found"
+            )
+        current_order = SQLiteStore._validate_paper_order_row(row)
+
+        # 2. Idempotency: already CANCELLED with reservation released → no-op.
+        if current_order.status == PaperOrderStatus.CANCELLED:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM paper_reservations WHERE owner_order_id = ?",
+                (order_id,),
+            )
+            if (await cursor.fetchone())[0] == 0:
+                return current_order  # idempotent no-op
+
+        # 3. Reject terminal states without changes.
+        if current_order.status in (
+            PaperOrderStatus.FILLED,
+            PaperOrderStatus.REJECTED,
+            PaperOrderStatus.EXPIRED,
+        ):
+            raise PaperOrderCancellationStateError(
+                f"order {order_id} is in terminal state '{current_order.status.value}'; "
+                "cannot cancel"
+            )
+
+        # 4. Only ACCEPTED / PARTIALLY_FILLED BUY orders are admitted.
+        if current_order.status not in (
+            PaperOrderStatus.ACCEPTED,
+            PaperOrderStatus.PARTIALLY_FILLED,
+        ):
+            raise PaperOrderCancellationStateError(
+                f"order {order_id} status '{current_order.status.value}' is outside "
+                "the cancellation scope (ACCEPTED / PARTIALLY_FILLED only)"
+            )
+
+        if current_order.side != PaperOrderSide.BUY:
+            raise PaperOrderCancellationStateError(
+                f"order {order_id} side '{current_order.side.value}' is not BUY; "
+                "cancellation scope limited to BUY orders"
+            )
+
+        # 5. Load active reservation — the authority for the current remainder.
+        cursor = await conn.execute(
+            "SELECT reservation_id, owner_order_id, account_id, paper_session_id, "
+            "environment, asset, amount_json, reservation_json "
+            "FROM paper_reservations WHERE owner_order_id = ?",
+            (order_id,),
+        )
+        active_reservation_row = await cursor.fetchone()
+        if active_reservation_row is None:
+            raise PaperOrderAcceptanceStateError(
+                f"order {order_id} has no active reservation to release"
+            )
+
+        active_reservation = PaperReservationRef.model_validate_json(
+            active_reservation_row[7]
+        )
+        remainder_amount = active_reservation.amount.amount
+
+        # Validate indexed columns match the loaded reservation.
+        if (
+            active_reservation.reservation_id != active_reservation_row[0]
+            or active_reservation.owner_order_id != active_reservation_row[1]
+            or active_reservation_row[2] != current_order.paper_account_id
+            or active_reservation_row[3] != current_order.paper_session_id
+            or active_reservation_row[4] != current_order.environment
+            or active_reservation.amount.asset != active_reservation_row[5]
+            or active_reservation.amount.model_dump_json() != active_reservation_row[6]
+        ):
+            raise PaperOrderAcceptanceIntegrityError(
+                f"active reservation for order {order_id} disagrees with indexed columns"
+            )
+
+        # 6. Load QUOTE balance (reserve asset).
+        cursor = await conn.execute(
+            "SELECT asset, balance_json FROM paper_account_balances "
+            "WHERE account_id = ? AND asset = ?",
+            (current_order.paper_account_id, active_reservation.amount.asset),
+        )
+        quote_row = await cursor.fetchone()
+        if quote_row is None:
+            raise PaperOrderAcceptanceFundsError(
+                f"no balance for {active_reservation.amount.asset} on account "
+                f"{current_order.paper_account_id}"
+            )
+        try:
+            quote_balance = AssetBalance.model_validate_json(quote_row[1])
+        except Exception as exc:
+            raise PaperOrderAcceptanceIntegrityError(
+                f"account {current_order.paper_account_id} has invalid QUOTE balance JSON"
+            ) from exc
+
+        # 7. Release the remainder: reserved decreases, available increases by remainder_amount.
+        new_reserved = quote_balance.reserved - remainder_amount
+        new_available = quote_balance.available + remainder_amount
+        updated_quote = AssetBalance(
+            asset=quote_balance.asset,
+            total=quote_balance.total,  # total unchanged
+            available=new_available,
+            reserved=new_reserved,
+        )
+
+        # 8. Delete the active reservation row (total of paper_reservations does not change).
+        await conn.execute(
+            "DELETE FROM paper_reservations WHERE owner_order_id = ?",
+            (order_id,),
+        )
+
+        # 9. Update QUOTE balance row.
+        await conn.execute(
+            "UPDATE paper_account_balances SET balance_json = ? "
+            "WHERE account_id = ? AND asset = ?",
+            (updated_quote.model_dump_json(), current_order.paper_account_id, quote_balance.asset),
+        )
+
+        # 10. Persist CANCELLED order — fills / executed_qty / lot / cost / inventory /
+        #     commissions already accounted for are preserved exactly.
+        updated_values = current_order.model_dump(mode="python")
+        updated_values["status"] = PaperOrderStatus.CANCELLED
+        cancelled_order = _PAPER_ORDER_ADAPTER.validate_python(updated_values)
+
+        await conn.execute(
+            "UPDATE paper_orders SET order_json = ? WHERE order_id = ?",
+            (cancelled_order.model_dump_json(), order_id),
+        )
+
+        return cancelled_order
 
     async def _read(self, fn, *args: Any) -> Any:
         """Run all reads in one snapshot transaction."""
