@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from src.persistence.sqlite_store import _SCHEMA_V9_TABLES, _SCHEMA_V10_TABLES
+from src.persistence.sqlite_store import _SCHEMA_V9_TABLES, _SCHEMA_V10_TABLES, _SCHEMA_V11_TABLES
 
 # ── Fake MarketEngine that mimics the real interface without external calls ─────
 
@@ -80,7 +80,7 @@ def test_lifespan_store_initialized_with_user_version_10(
         conn = sqlite3.connect(str(db_path))
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 10
+        assert version == 11
 
 
 # ── 2. Normal shutdown: store closed and reference removed ──────────────────────
@@ -284,10 +284,10 @@ def test_reopen_preserves_data_no_duplicate_migration(
     store = SQLiteStore(db_path)
     _run(store.initialize())
 
-    # Verify the schema remains at current v10 after re-open.
+    # Verify the schema remains at current v11 after re-open.
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 10
+    assert version == 11
 
     # Tables should exist exactly once
     tables = {
@@ -295,7 +295,7 @@ def test_reopen_preserves_data_no_duplicate_migration(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V10_TABLES
+    assert tables == _SCHEMA_V11_TABLES
     conn.close()
 
     _run(store.close())
@@ -375,11 +375,11 @@ def test_multiple_lifespan_cycles_safe(tmp_path: Path, monkeypatch: pytest.Monke
             resp = c.get("/health")
             assert resp.status_code == 200
 
-    # Final verification: schema remains current v10.
+    # Final verification: schema remains current v11.
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 10
+    assert version == 11
 
 
 # ── 10. Store is not accessible outside lifespan ───────────────────────────────

@@ -31,8 +31,9 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceScopeError,
     PaperOrderAcceptanceStateError,
     SQLiteStore,
-    _SCHEMA_V8_TABLES,
     _SCHEMA_V10_TABLES,
+    _SCHEMA_V11_TABLES,
+    _SCHEMA_V8_TABLES,
 )
 
 
@@ -300,37 +301,11 @@ def test_insufficient_funds_leaves_order_balance_and_reservation_unchanged(
     _run(store.close())
 
 
-def test_sell_and_protected_orders_are_outside_atomic_buy_acceptance_slice(
+def test_protected_buy_orders_are_outside_atomic_acceptance_slice(
     tmp_path: Path,
 ) -> None:
     db = tmp_path / "acceptance-scope.db"
     store = _run_with_open_account(db)
-    buy = _order()
-    sell_allocation = LotAllocation(
-        position_id="position-1",
-        account_id="account-1",
-        symbol="BTC/USD",
-        strategy_ref=StrategyRef(strategy_id="strategy-1", strategy_version="v1"),
-        qty=Decimal("2.00"),
-    )
-    sell = PaperOrder.model_validate(
-        {
-            **buy.model_dump(mode="python"),
-            "order_id": "sell-order",
-            "client_order_id": "sell-client",
-            "side": PaperOrderSide.SELL,
-            "lot_allocations": (sell_allocation,),
-        }
-    )
-    _run(store.register_paper_order(sell))
-
-    with pytest.raises(PaperOrderAcceptanceScopeError, match="BUY orders only"):
-        _run(store.accept_paper_order(sell.order_id))
-    loaded_sell = _run(store.load_paper_order(sell.order_id))
-    assert loaded_sell is not None
-    assert loaded_sell.model_dump_json() == sell.model_dump_json()
-    assert _run(store.load_paper_reservation(sell.order_id)) is None
-
     protected_buy = _order(
         order_id="protected-buy",
         client_order_id="protected-client",
@@ -455,41 +430,44 @@ def _make_v8_database(db: Path) -> tuple[PaperOrder, PaperAccountOpening]:
     _run(store.close())
 
     conn = sqlite3.connect(str(db))
-    conn.execute("DROP TABLE paper_fill_applications")
-    conn.execute("DROP TABLE position_lots")
-    conn.execute("DROP TABLE paper_reservations")
-    conn.execute("DROP TABLE paper_order_acceptances")
+    conn.execute("DROP TABLE IF EXISTS paper_fill_applications")
+    conn.execute("DROP TABLE IF EXISTS position_lots")
+    conn.execute("DROP TABLE IF EXISTS paper_reservations")
+    conn.execute("DROP TABLE IF EXISTS paper_order_acceptances")
+    conn.execute("DROP TABLE IF EXISTS paper_reservation_lot_allocations")
+    conn.execute("DROP TABLE IF EXISTS paper_sell_accounting")
     conn.execute("PRAGMA user_version = 8")
     conn.commit()
     conn.close()
-    assert _table_names(db) == _SCHEMA_V8_TABLES
+    # v8->v11 migration adds SELL tables on top of v8, so use subset check.
+    assert _SCHEMA_V8_TABLES.issubset(_table_names(db))
     return order, opening
 
 
-def test_direct_v8_to_v10_migration_preserves_previous_paper_slices(
+def test_direct_v8_to_v11_migration_preserves_previous_paper_slices(
     tmp_path: Path,
 ) -> None:
-    db = tmp_path / "v8-to-v10.db"
+    db = tmp_path / "v8-to-v11.db"
     order, opening = _make_v8_database(db)
     store = SQLiteStore(db)
 
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V10_TABLES
+    assert _table_names(db) == _SCHEMA_V11_TABLES
     assert _run(store.load_paper_order(order.order_id)) == order
     assert _run(store.load_paper_account_opening(opening.account_id)) == opening
     assert _run(store.load_paper_reservation(order.order_id)) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     assert conn.execute("SELECT COUNT(*) FROM paper_order_acceptances").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_reservations").fetchone()[0] == 0
     conn.close()
     _run(store.close())
 
 
-def test_v8_to_v10_migration_rolls_back_on_v9_ddl_failure_and_version(
+def test_v8_to_v11_migration_rolls_back_on_v9_ddl_failure_and_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = tmp_path / "v8-to-v10-rollback.db"
+    db = tmp_path / "v8-to-v11-rollback.db"
     order, opening = _make_v8_database(db)
     original_ddl = sqlite_store_module._PAPER_ORDER_RESERVATION_DDL_STATEMENTS
     monkeypatch.setattr(

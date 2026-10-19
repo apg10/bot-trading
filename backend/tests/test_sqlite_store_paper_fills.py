@@ -41,6 +41,7 @@ from src.persistence.sqlite_store import (
     StoreClosedError,
     _SCHEMA_V9_TABLES,
     _SCHEMA_V10_TABLES,
+    _SCHEMA_V11_TABLES,
 )
 
 
@@ -487,12 +488,12 @@ def test_v5_to_v10_migration_creates_current_tables(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
     # All historical tables and current account-opening tables are present.
-    assert _SCHEMA_V10_TABLES <= tables
+    assert _SCHEMA_V11_TABLES <= tables
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
     conn.close()
     _run(upgraded.close())
@@ -560,11 +561,11 @@ def test_reopen_v10_is_idempotent(tmp_path: Path) -> None:
     _run(store1.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert _SCHEMA_V10_TABLES <= tables
+    assert _SCHEMA_V11_TABLES <= tables
     conn.close()
     _run(store1.close())
 
@@ -650,11 +651,11 @@ def test_new_database_initializes_directly_at_v10(tmp_path: Path) -> None:
     _run(store.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert _SCHEMA_V10_TABLES <= tables
+    assert _SCHEMA_V11_TABLES <= tables
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 0
     conn.close()
     _run(store.close())
@@ -787,7 +788,7 @@ def test_v10_schema_version_mismatch_on_missing_tables(tmp_path: Path) -> None:
     conn.close()
 
     store = SQLiteStore(db)
-    with pytest.raises(SchemaVersionMismatchError, match="required tables are missing"):
+    with pytest.raises(SchemaVersionMismatchError, match="schema version is 10 but required v10 tables are missing"):
         _run(store.initialize())
 
 
@@ -924,11 +925,11 @@ def test_v4_to_v10_migration_creates_current_tables(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert _SCHEMA_V10_TABLES <= tables
+    assert _SCHEMA_V11_TABLES <= tables
     assert conn.execute("SELECT COUNT(*) FROM sessions WHERE session_id=?", ("preserved-v4",)).fetchone()[0] == 1
     conn.close()
     _run(upgraded.close())
@@ -962,7 +963,7 @@ def test_v3_to_v10_migration_preserves_all_data(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}

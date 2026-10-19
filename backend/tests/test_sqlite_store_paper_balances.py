@@ -20,6 +20,7 @@ from src.persistence.sqlite_store import (
     _SCHEMA_V6_TABLES,
     _SCHEMA_V9_TABLES,
     _SCHEMA_V10_TABLES,
+    _SCHEMA_V11_TABLES,
 )
 
 
@@ -337,6 +338,8 @@ def _make_v6_database(db: Path) -> None:
     conn.execute("DROP TABLE paper_account_openings")
     conn.execute("DROP TABLE paper_fill_applications")
     conn.execute("DROP TABLE position_lots")
+    conn.execute("DROP TABLE IF EXISTS paper_reservation_lot_allocations")
+    conn.execute("DROP TABLE IF EXISTS paper_sell_accounting")
     conn.execute("PRAGMA user_version = 6")
     conn.commit()
     assert _table_names(db) == _SCHEMA_V6_TABLES
@@ -349,9 +352,9 @@ def test_v6_to_v10_migration_preserves_paper_fill(tmp_path: Path) -> None:
 
     store = SQLiteStore(db)
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V10_TABLES
+    assert _table_names(db) == _SCHEMA_V11_TABLES
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.close()
     assert _run(store.load_paper_fill("historical-fill")) is not None
     _run(store.close())

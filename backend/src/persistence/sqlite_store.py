@@ -16,9 +16,11 @@ tables variant_dispositions + result_exclusions (v5), paper fills (v6), explicit
 account openings/current balances by asset (v7), and initial order-context lookup
 (v8), and atomic BUY order acceptance/reservation (v9). It also persists durable
 fill application marks (paper_fill_applications) and aggregated position lots
-(position_lots) required by ACT-P-002 fill application (v10). It does NOT apply fills,
-implement fills/order lifecycle beyond initial acceptance, SELL/OCO reservations,
-risk, matching, execution, backtesting or replay.
+(position_lots) required by ACT-P-002 fill application (v10). It applies BUY and SELL
+fill execution, admits BUY and SELL order cancellation (ACCEPTED / PARTIALLY_FILLED),
+and implements SELL lot reservations with paper_reservation_lot_allocations and
+paper_sell_accounting tables (v11). It does NOT implement OCO order branching, risk
+management, matching, execution, backtesting or replay.
 
 Schema versions:
     v0 — original session/config/dataset schema (no tables by default).
@@ -33,6 +35,7 @@ Schema versions:
     v9 — adds stable order acceptance payloads and active account reservations.
     v10 — adds durable fill application marks (paper_fill_applications) and
         aggregated position lots by order_id (position_lots).
+    v11 — adds paper_reservation_lot_allocations and paper_sell_accounting tables.
 """
 
 from __future__ import annotations
@@ -40,12 +43,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from decimal import Decimal
+from decimal import Decimal, DecimalException, localcontext
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import aiosqlite
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from src.models.dataset_ref import DatasetRef
 from src.models.experiment_contracts import (
@@ -61,6 +64,8 @@ from src.models.experiment_contracts import (
 )
 from src.models.paper_contracts import (
     AssetBalance,
+    Commission,
+    PaperDecimal,
     PaperAccountOpening,
     PaperBalanceView,
     PaperFill,
@@ -71,12 +76,16 @@ from src.models.paper_contracts import (
     PaperReservationRef,
     PaperReservationRequest,
     ReservationAmount,
+    StrategyRef,
+    _POSITION_AVERAGE_CONTEXT,
+    _exact_product,
+    _exact_sum,
 )
 from src.models.strategy_config import StrategyConfig
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -95,6 +104,200 @@ class PositionLot(BaseModel):
     total_qty: Decimal = Field(..., ge=Decimal("0"))
     total_cost: Decimal = Field(..., ge=Decimal("0"))
 
+
+# ── Internal versioned Pydantic models (v11) ───────────────────────────────
+
+
+class _PaperLotReservationAllocationV1(BaseModel):
+    """Internal v1 model for paper_reservation_lot_allocations rows.
+
+    schema_version is frozen to "paper_lot_reservation_allocation.v1".
+    Validates that allocation context matches the active reservation and lot.
+    Context validation (account/session/environment) happens in the store layer
+    by cross-referencing reservation, order, and lot — not by deriving fields
+    from position_id text.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["paper_lot_reservation_allocation.v1"] = Field(
+        default="paper_lot_reservation_allocation.v1", frozen=True
+    )
+    reservation_id: str = Field(..., min_length=1)
+    owner_order_id: str = Field(..., min_length=1)
+    position_id: str = Field(..., min_length=1)
+    account_id: str = Field(..., min_length=1)
+    paper_session_id: str = Field(..., min_length=1)
+    environment: Literal["paper"] = Field(default="paper", frozen=True)
+    symbol: str = Field(..., min_length=3)
+    base_asset: str = Field(..., min_length=1)
+    strategy_ref: StrategyRef
+    initial_qty: PaperDecimal = Field(..., gt=Decimal("0"))
+    remaining_qty: PaperDecimal = Field(..., gt=Decimal("0"))
+
+    @model_validator(mode="after")
+    def validate_strategy_ref(self) -> "_PaperLotReservationAllocationV1":
+        """Validate fields intrinsic to one active lot reservation."""
+        if not self.strategy_ref.strategy_id or not self.strategy_ref.strategy_version:
+            raise ValueError(
+                "strategy_ref must have non-empty strategy_id and strategy_version"
+            )
+        parts = self.symbol.split("/")
+        if len(parts) != 2 or parts[0] != self.base_asset:
+            raise ValueError("base_asset must match the BASE component of symbol")
+        if self.remaining_qty > self.initial_qty:
+            raise ValueError("remaining_qty cannot exceed initial_qty")
+        return self
+
+
+class _PaperSellAllocationSlotV1(BaseModel):
+    """One lot-allocation slot inside a PaperSellAccountingRecordV1.
+
+    Represents a single position_lot consumed by a sell fill, with its own
+    quantity sold, cost basis removed, and per-slot proceeds attribution.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    slot_version: Literal["sell_allocation_slot.v1"] = Field(
+        default="sell_allocation_slot.v1", frozen=True
+    )
+    position_id: str = Field(..., min_length=1)
+    qty_sold: PaperDecimal = Field(..., gt=Decimal("0"))
+    cost_basis_removed: PaperDecimal = Field(..., ge=Decimal("0"))
+    proceeds_attributed: PaperDecimal = Field(..., ge=Decimal("0"))
+
+
+class _PaperSellAccountingRecordV1(BaseModel):
+    """Internal v1 model for paper_sell_accounting rows.
+
+    One row per fill_id containing a typed/versioned sequence of lot-allocation
+    slots plus aggregate financials (gross proceeds, fee in quote asset, net
+    proceeds, total cost basis removed, gross and net P&L).
+
+    Invariants enforced at construction:
+      - sum(slot.qty_sold) == total_qty_filled  (checked by caller/store)
+      - sum(slot.cost_basis_removed) == total_cost_basis_removed
+      - sum(slot.proceeds_attributed) == proceeds_gross
+      - proceeds_net = proceeds_gross - fee_amount
+      - pnl_gross = proceeds_gross - total_cost_basis_removed
+      - pnl_net = proceeds_net - total_cost_basis_removed
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["paper_sell_accounting.v1"] = Field(
+        default="paper_sell_accounting.v1", frozen=True
+    )
+    fill_id: str = Field(..., min_length=1)
+    order_id: str = Field(..., min_length=1)
+    account_id: str = Field(..., min_length=1)
+    paper_session_id: str = Field(..., min_length=1)
+    environment: Literal["paper"] = Field(default="paper", frozen=True)
+    quote_asset: str = Field(..., min_length=1)
+    strategy_ref: StrategyRef
+
+    # Aggregate fields
+    total_qty_filled: PaperDecimal = Field(..., gt=Decimal("0"))
+    proceeds_gross: PaperDecimal = Field(..., gt=Decimal("0"))
+    fee_asset: str = Field(..., min_length=1)
+    fee_amount: PaperDecimal = Field(..., ge=Decimal("0"))
+    proceeds_net: PaperDecimal = Field(..., ge=Decimal("0"))
+    total_cost_basis_removed: PaperDecimal = Field(..., ge=Decimal("0"))
+    # Realized P&L is signed; the finite Decimal contract applies without an
+    # arbitrary lower bound.
+    pnl_gross: PaperDecimal
+    pnl_net: PaperDecimal
+
+    # Typed immutable sequence of per-lot allocation slots (frozen via tuple)
+    allocation_slots: tuple[_PaperSellAllocationSlotV1, ...] = Field(
+        default_factory=tuple, frozen=True
+    )
+
+    @model_validator(mode="after")
+    def validate_quote_context(self) -> "_PaperSellAccountingRecordV1":
+        """The sell fee must be known in the symbol's QUOTE asset."""
+        if self.fee_asset != self.quote_asset:
+            raise ValueError("sell commission must use the quote asset")
+        return self
+
+    @model_validator(mode="after")
+    def validate_proceeds_net(self) -> "_PaperSellAccountingRecordV1":
+        """proceeds_net must equal proceeds_gross - fee_amount (explicit arithmetic)."""
+        expected = _exact_sum(
+            (self.proceeds_gross, self.fee_amount.copy_negate())
+        )
+        if self.proceeds_net != expected:
+            raise ValueError(
+                f"proceeds_net ({self.proceeds_net}) must equal "
+                f"proceeds_gross ({self.proceeds_gross}) - fee_amount ({self.fee_amount})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_pnl(self) -> "_PaperSellAccountingRecordV1":
+        """Validate gross and net P&L using explicit arithmetic."""
+        expected_gross = _exact_sum(
+            (self.proceeds_gross, self.total_cost_basis_removed.copy_negate())
+        )
+        if self.pnl_gross != expected_gross:
+            raise ValueError(
+                f"pnl_gross ({self.pnl_gross}) must equal "
+                f"proceeds_gross ({self.proceeds_gross}) - total_cost_basis_removed "
+                f"({self.total_cost_basis_removed})"
+            )
+        expected_net = _exact_sum(
+            (self.proceeds_net, self.total_cost_basis_removed.copy_negate())
+        )
+        if self.pnl_net != expected_net:
+            raise ValueError(
+                f"pnl_net ({self.pnl_net}) must equal "
+                f"proceeds_net ({self.proceeds_net}) - total_cost_basis_removed "
+                f"({self.total_cost_basis_removed})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_allocation_slots_sum(self) -> "_PaperSellAccountingRecordV1":
+        """Validate that allocation slots sum to aggregate quantities."""
+        if not self.allocation_slots:
+            raise ValueError("allocation_slots must contain at least one slot")
+        position_ids = [slot.position_id for slot in self.allocation_slots]
+        if len(position_ids) != len(set(position_ids)):
+            raise ValueError("allocation_slots cannot repeat a position_id")
+
+        total_qty = _exact_sum(tuple(slot.qty_sold for slot in self.allocation_slots))
+        total_cost = _exact_sum(
+            tuple(slot.cost_basis_removed for slot in self.allocation_slots)
+        )
+        total_proceeds = _exact_sum(
+            tuple(slot.proceeds_attributed for slot in self.allocation_slots)
+        )
+        if total_qty != self.total_qty_filled:
+            raise ValueError(
+                f"sum(slot.qty_sold)={total_qty} must equal "
+                f"total_qty_filled={self.total_qty_filled}"
+            )
+        if total_cost != self.total_cost_basis_removed:
+            raise ValueError(
+                f"sum(slot.cost_basis_removed)={total_cost} must equal "
+                f"total_cost_basis_removed={self.total_cost_basis_removed}"
+            )
+        if total_proceeds != self.proceeds_gross:
+            raise ValueError(
+                f"sum(slot.proceeds_attributed)={total_proceeds} must equal "
+                f"proceeds_gross={self.proceeds_gross}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_fee_asset_matches_quote(self) -> "_PaperSellAccountingRecordV1":
+        """fee_asset must equal quote_asset for sell accounting records."""
+        if self.fee_asset != self.quote_asset:
+            raise ValueError(
+                f"fee_asset ({self.fee_asset}) must equal quote_asset ({self.quote_asset})"
+            )
+        return self
 
 # ── Custom exceptions ─────────────────────────────────────────────────────────────
 
@@ -302,6 +505,10 @@ _SCHEMA_V10_TABLES = _SCHEMA_V9_TABLES | {
     "paper_fill_applications",
     "position_lots",
 }
+_SCHEMA_V11_TABLES = _SCHEMA_V10_TABLES | {
+    "paper_reservation_lot_allocations",
+    "paper_sell_accounting",
+}
 
 _PAPER_FILL_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS paper_fills (
@@ -376,6 +583,45 @@ _PAPER_FILL_APPLICATION_DDL_STATEMENTS = (
         paper_session_id TEXT NOT NULL,
         environment TEXT NOT NULL CHECK (environment = 'paper'),
         lot_json TEXT NOT NULL
+    )""",
+)
+
+_PAPER_SELL_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS paper_reservation_lot_allocations (
+        reservation_id TEXT NOT NULL
+            REFERENCES paper_reservations(reservation_id) ON DELETE CASCADE,
+        owner_order_id TEXT NOT NULL REFERENCES paper_orders(order_id),
+        position_id TEXT NOT NULL REFERENCES position_lots(order_id),
+        account_id TEXT NOT NULL REFERENCES paper_account_openings(account_id),
+        paper_session_id TEXT NOT NULL,
+        environment TEXT NOT NULL CHECK (environment = 'paper'),
+        symbol TEXT NOT NULL,
+        base_asset TEXT NOT NULL,
+        strategy_ref_json TEXT NOT NULL,
+        initial_qty TEXT NOT NULL,
+        remaining_qty TEXT NOT NULL,
+        allocation_json TEXT NOT NULL,
+        PRIMARY KEY (reservation_id, position_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS paper_sell_accounting (
+        fill_id TEXT PRIMARY KEY REFERENCES paper_fill_applications(fill_id),
+        order_id TEXT NOT NULL REFERENCES paper_orders(order_id),
+        account_id TEXT NOT NULL REFERENCES paper_account_openings(account_id),
+        paper_session_id TEXT NOT NULL,
+        environment TEXT NOT NULL CHECK (environment = 'paper'),
+        quote_asset TEXT NOT NULL,
+        strategy_ref_json TEXT NOT NULL,
+        total_qty_filled TEXT NOT NULL,
+        proceeds_gross TEXT NOT NULL,
+        fee_asset TEXT NOT NULL,
+        fee_amount TEXT NOT NULL,
+        proceeds_net TEXT NOT NULL,
+        total_cost_basis_removed TEXT NOT NULL,
+        pnl_gross TEXT NOT NULL,
+        pnl_net TEXT NOT NULL,
+        allocation_slots_json TEXT NOT NULL,
+        accounting_json TEXT NOT NULL,
+        CHECK (fee_asset = quote_asset)
     )""",
 )
 
@@ -866,7 +1112,7 @@ class SQLiteStore:
         )
 
     async def accept_paper_order(self, order_id: str) -> PaperOrder:
-        """Atomically reserve quote principal and accept one BUY order.
+        """Atomically reserve BUY quote or SELL base and accept one order.
 
         The service derives the reservation from the persisted order and current
         account balance; callers cannot supply a reserve amount or stale balance.
@@ -920,7 +1166,7 @@ class SQLiteStore:
         )
 
     async def cancel_paper_order(self, order_id: str) -> PaperOrder:
-        """Cancel the remaining quantity of one accepted BUY order.
+        """Cancel the remaining quantity of one accepted BUY or SELL order.
 
         Admits only orders in ACCEPTED or PARTIALLY_FILLED state.  Changes
         status to CANCELLED, preserves fills / executed_qty / lot / cost /
@@ -941,6 +1187,27 @@ class SQLiteStore:
         return await self._write(
             lambda conn: self._cancel_paper_order_inner(conn, order_id)
         )
+
+    @staticmethod
+    async def _cancel_paper_order_inner(
+        conn: aiosqlite.Connection,
+        order_id: str,
+    ) -> PaperOrder:
+        """Dispatch cancellation to BUY or SELL handler after loading the order."""
+        cursor = await conn.execute(
+            "SELECT order_id, paper_account_id, paper_session_id, environment, "
+            "client_order_id, order_json FROM paper_orders WHERE order_id = ?",
+            (order_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise PaperOrderAcceptanceStateError(
+                f"paper order {order_id} not found"
+            )
+        order = SQLiteStore._validate_paper_order_row(row)
+        if order.side == PaperOrderSide.SELL:
+            return await SQLiteStore._cancel_paper_sell_order_inner(conn, order_id)
+        return await SQLiteStore._cancel_paper_order_buy_inner(conn, order_id)
 
     async def load_paper_reservation(
         self, reservation_id: str
@@ -1549,14 +1816,10 @@ class SQLiteStore:
 
     @staticmethod
     def _compute_order_reservation(order: PaperOrder) -> ReservationAmount:
-        """Compute principal-only quote reserve for the authorized BUY subset."""
-        if order.side != PaperOrderSide.BUY:
-            raise PaperOrderAcceptanceScopeError(
-                "atomic acceptance currently supports BUY orders only"
-            )
+        """Compute BUY quote or SELL base reserve without estimated fees."""
         if order.protection_group_id is not None:
             raise PaperOrderAcceptanceScopeError(
-                "OCO/protection-group orders are outside atomic BUY acceptance"
+                "OCO/protection-group orders are outside atomic acceptance"
             )
         symbol_parts = order.symbol.split("/")
         if len(symbol_parts) != 2 or any(
@@ -1566,24 +1829,44 @@ class SQLiteStore:
             raise PaperOrderAcceptanceStateError(
                 "BUY order symbol must use canonical BASE/QUOTE form"
             )
-        quote_asset = symbol_parts[1]
-        if order.order_type == PaperOrderType.LIMIT:
-            if order.price is None:
-                raise PaperOrderAcceptanceStateError(
-                    "LIMIT BUY has no explicit price for reservation"
-                )
-            amount = order.requested_qty * order.price
-        elif order.order_type == PaperOrderType.MARKET:
-            if order.max_quote_amount is None:
-                raise PaperOrderAcceptanceStateError(
-                    "MARKET BUY requires an explicit max_quote_amount"
-                )
-            amount = order.max_quote_amount
-        else:
+        base_asset, quote_asset = symbol_parts
+        if order.order_type not in (PaperOrderType.LIMIT, PaperOrderType.MARKET):
             raise PaperOrderAcceptanceScopeError(
-                "atomic acceptance supports BUY LIMIT and BUY MARKET only"
+                "atomic acceptance supports LIMIT and MARKET orders only"
             )
-        return ReservationAmount(asset=quote_asset, amount=amount)
+        if order.order_type == PaperOrderType.LIMIT and order.price is None:
+            raise PaperOrderAcceptanceStateError(
+                f"LIMIT {order.side} has no explicit price"
+            )
+
+        if order.side == PaperOrderSide.BUY:
+            if order.order_type == PaperOrderType.LIMIT:
+                amount = _exact_product(order.requested_qty, order.price)
+            else:
+                if order.max_quote_amount is None:
+                    raise PaperOrderAcceptanceStateError(
+                        "MARKET BUY requires an explicit max_quote_amount"
+                    )
+                amount = order.max_quote_amount
+            return ReservationAmount(asset=quote_asset, amount=amount)
+
+        if order.side == PaperOrderSide.SELL:
+            if not order.lot_allocations:
+                raise PaperOrderAcceptanceStateError(
+                    "SELL order requires explicit lot_allocations"
+                )
+            allocated_qty = _exact_sum(
+                tuple(allocation.qty for allocation in order.lot_allocations)
+            )
+            if allocated_qty != order.requested_qty:
+                raise PaperOrderAcceptanceStateError(
+                    "SELL lot_allocations must sum to requested_qty"
+                )
+            return ReservationAmount(asset=base_asset, amount=allocated_qty)
+
+        raise PaperOrderAcceptanceScopeError(
+            f"unsupported order side for atomic acceptance: {order.side}"
+        )
 
     @staticmethod
     async def _load_paper_reservation_inner(
@@ -1638,11 +1921,189 @@ class SQLiteStore:
         return reservation
 
     @staticmethod
+    async def _validate_sell_allocations_for_acceptance_inner(
+        conn: aiosqlite.Connection,
+        order: PaperOrder,
+    ) -> tuple[_PaperLotReservationAllocationV1, ...]:
+        """Validate that an accepted SELL reserves only owned, unreserved lots."""
+        if order.side != PaperOrderSide.SELL:
+            return ()
+        if not order.lot_allocations:
+            raise PaperOrderAcceptanceStateError(
+                "SELL order requires explicit lot allocations"
+            )
+
+        symbol_parts = order.symbol.split("/")
+        if len(symbol_parts) != 2:
+            raise PaperOrderAcceptanceStateError(
+                "SELL symbol must use canonical BASE/QUOTE form"
+            )
+        base_asset, _quote_asset = symbol_parts
+        seen_positions: set[str] = set()
+        reservations: list[_PaperLotReservationAllocationV1] = []
+
+        for allocation in order.lot_allocations:
+            position_id = allocation.position_id
+            if position_id in seen_positions:
+                raise PaperOrderAcceptanceStateError(
+                    f"SELL order repeats lot allocation {position_id}"
+                )
+            seen_positions.add(position_id)
+            if (
+                allocation.account_id != order.paper_account_id
+                or allocation.symbol != order.symbol
+                or allocation.strategy_ref != order.strategy_ref
+            ):
+                raise PaperOrderAcceptanceStateError(
+                    f"SELL allocation {position_id} has a different account, symbol, "
+                    "or strategy context"
+                )
+
+            cursor = await conn.execute(
+                "SELECT account_id, paper_session_id, environment, lot_json "
+                "FROM position_lots WHERE order_id = ?",
+                (position_id,),
+            )
+            lot_row = await cursor.fetchone()
+            if lot_row is None:
+                raise PaperOrderAcceptanceFundsError(
+                    f"SELL allocation references unavailable lot {position_id}"
+                )
+            try:
+                lot = PositionLot.model_validate_json(lot_row[3])
+            except Exception as exc:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"position lot {position_id} has invalid JSON"
+                ) from exc
+            if (
+                lot.order_id != position_id
+                or lot.account_id != lot_row[0]
+                or lot.paper_session_id != lot_row[1]
+                or lot.environment != lot_row[2]
+                or lot.account_id != order.paper_account_id
+                or lot.paper_session_id != order.paper_session_id
+                or lot.environment != order.environment
+                or lot.total_qty <= Decimal("0")
+                or lot.total_cost <= Decimal("0")
+            ):
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"position lot {position_id} has inconsistent owner or inventory"
+                )
+
+            cursor = await conn.execute(
+                "SELECT order_json FROM paper_orders WHERE order_id = ?",
+                (position_id,),
+            )
+            entry_order_row = await cursor.fetchone()
+            if entry_order_row is None:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"position lot {position_id} has no entry order"
+                )
+            try:
+                entry_order = PaperOrder.model_validate_json(entry_order_row[0])
+            except Exception as exc:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"entry order for position lot {position_id} has invalid JSON"
+                ) from exc
+            if (
+                entry_order.side != PaperOrderSide.BUY
+                or entry_order.paper_account_id != order.paper_account_id
+                or entry_order.paper_session_id != order.paper_session_id
+                or entry_order.environment != order.environment
+                or entry_order.symbol != order.symbol
+                or entry_order.strategy_ref != allocation.strategy_ref
+                or entry_order.strategy_ref != order.strategy_ref
+            ):
+                raise PaperOrderAcceptanceStateError(
+                    f"SELL allocation {position_id} is outside the order's account, "
+                    "symbol, or strategy context"
+                )
+
+            cursor = await conn.execute(
+                "SELECT reservation_id, owner_order_id, position_id, account_id, "
+                "paper_session_id, environment, symbol, base_asset, strategy_ref_json, "
+                "initial_qty, remaining_qty, allocation_json "
+                "FROM paper_reservation_lot_allocations WHERE position_id = ?",
+                (position_id,),
+            )
+            existing_rows = await cursor.fetchall()
+            already_reserved: list[Decimal] = []
+            for row in existing_rows:
+                try:
+                    existing = _PaperLotReservationAllocationV1.model_validate_json(
+                        row[11]
+                    )
+                except Exception as exc:
+                    raise PaperOrderAcceptanceIntegrityError(
+                        f"existing lot reservation for {position_id} has invalid JSON"
+                    ) from exc
+                indexed = (
+                    existing.reservation_id,
+                    existing.owner_order_id,
+                    existing.position_id,
+                    existing.account_id,
+                    existing.paper_session_id,
+                    existing.environment,
+                    existing.symbol,
+                    existing.base_asset,
+                    existing.strategy_ref.model_dump_json(),
+                    str(existing.initial_qty),
+                    str(existing.remaining_qty),
+                )
+                if indexed != tuple(str(value) for value in row[:11]):
+                    raise PaperOrderAcceptanceIntegrityError(
+                        f"lot reservation for {position_id} disagrees with indexed columns"
+                    )
+                if (
+                    existing.account_id != order.paper_account_id
+                    or existing.symbol != order.symbol
+                    or existing.base_asset != base_asset
+                    or existing.strategy_ref != allocation.strategy_ref
+                ):
+                    raise PaperOrderAcceptanceIntegrityError(
+                        f"lot reservation for {position_id} has conflicting context"
+                    )
+                already_reserved.append(existing.remaining_qty)
+
+            total_reserved = _exact_sum(tuple(already_reserved))
+            unreserved_qty = _exact_sum((lot.total_qty, total_reserved.copy_negate()))
+            if allocation.qty > unreserved_qty:
+                raise PaperOrderAcceptanceFundsError(
+                    f"SELL allocation {allocation.qty} exceeds unreserved lot quantity "
+                    f"{unreserved_qty} for {position_id}"
+                )
+
+            reservations.append(
+                _PaperLotReservationAllocationV1(
+                    reservation_id=order.order_id,
+                    owner_order_id=order.order_id,
+                    position_id=position_id,
+                    account_id=order.paper_account_id,
+                    paper_session_id=order.paper_session_id,
+                    environment=order.environment,
+                    symbol=order.symbol,
+                    base_asset=base_asset,
+                    strategy_ref=allocation.strategy_ref,
+                    initial_qty=allocation.qty,
+                    remaining_qty=allocation.qty,
+                )
+            )
+
+        allocated_qty = _exact_sum(
+            tuple(allocation.qty for allocation in order.lot_allocations)
+        )
+        if allocated_qty != order.requested_qty:
+            raise PaperOrderAcceptanceStateError(
+                "SELL lot allocation quantity must equal requested_qty"
+            )
+        return tuple(reservations)
+
+    @staticmethod
     async def _accept_paper_order_inner(
         conn: aiosqlite.Connection,
         order_id: str,
     ) -> PaperOrder:
-        """Reserve BUY principal and persist ACCEPTED state in one transaction."""
+        """Reserve the order's asset and persist ACCEPTED state atomically."""
         existing_acceptance = await SQLiteStore._load_paper_order_acceptance_inner(
             conn, order_id
         )
@@ -1667,6 +2128,13 @@ class SQLiteStore:
             )
 
         reserve_amount = SQLiteStore._compute_order_reservation(order)
+        sell_lot_reservations: tuple[_PaperLotReservationAllocationV1, ...] = ()
+        if order.side == PaperOrderSide.SELL:
+            sell_lot_reservations = (
+                await SQLiteStore._validate_sell_allocations_for_acceptance_inner(
+                    conn, order
+                )
+            )
         cursor = await conn.execute(
             "SELECT asset, balance_json FROM paper_account_balances "
             "WHERE account_id = ? AND asset = ?",
@@ -1752,6 +2220,28 @@ class SQLiteStore:
                 reservation_json,
             ),
         )
+        for lot_reservation in sell_lot_reservations:
+            await conn.execute(
+                "INSERT INTO paper_reservation_lot_allocations "
+                "(reservation_id, owner_order_id, position_id, account_id, "
+                "paper_session_id, environment, symbol, base_asset, strategy_ref_json, "
+                "initial_qty, remaining_qty, allocation_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    lot_reservation.reservation_id,
+                    lot_reservation.owner_order_id,
+                    lot_reservation.position_id,
+                    lot_reservation.account_id,
+                    lot_reservation.paper_session_id,
+                    lot_reservation.environment,
+                    lot_reservation.symbol,
+                    lot_reservation.base_asset,
+                    lot_reservation.strategy_ref.model_dump_json(),
+                    str(lot_reservation.initial_qty),
+                    str(lot_reservation.remaining_qty),
+                    lot_reservation.model_dump_json(),
+                ),
+            )
 
         updated_balance = AssetBalance(
             asset=balance.asset,
@@ -1854,6 +2344,8 @@ class SQLiteStore:
             raise PaperOrderAcceptanceStateError(
                 f"order {fill.order_id} is not open for fills (status={order.status})"
             )
+        if order.side == PaperOrderSide.SELL:
+            return await SQLiteStore._apply_paper_sell_fill_inner(conn, fill, order)
         if order.position_id is not None and order.position_id != order.order_id:
             raise PaperOrderAcceptanceStateError(
                 "an order with a different position_id is not supported in this slice"
@@ -2174,10 +2666,410 @@ class SQLiteStore:
 
         return fill
 
+    @staticmethod
+    async def _apply_paper_sell_fill_inner(
+        conn: aiosqlite.Connection,
+        fill: PaperFill,
+        order: PaperOrder,
+    ) -> PaperFill:
+        """Apply a SELL fill against its accepted lot reservations atomically."""
+        if not fill.lot_allocations:
+            raise PaperOrderAcceptanceStateError(
+                "SELL fill requires explicit lot allocations"
+            )
+        if (
+            fill.commission is None
+            or fill.commission.asset != order.symbol.split("/")[-1]
+        ):
+            raise PaperOrderAcceptanceStateError(
+                "a known QUOTE commission is required to apply a SELL fill"
+            )
+        if (
+            order.order_type == PaperOrderType.LIMIT
+            and (order.price is None or fill.price < order.price)
+        ):
+            raise PaperOrderAcceptanceStateError(
+                "LIMIT SELL fill price must not be below the order limit"
+            )
+
+        cursor = await conn.execute(
+            "SELECT initial_order_json FROM paper_order_acceptances WHERE order_id=?",
+            (order.order_id,),
+        )
+        accepted_row = await cursor.fetchone()
+        if accepted_row is None:
+            raise PaperOrderAcceptanceStateError(
+                f"order {order.order_id} has no acceptance record"
+            )
+        initial_order = PaperOrder.model_validate_json(accepted_row[0])
+        immutable_fields = (
+            "order_id", "client_order_id", "paper_account_id", "paper_session_id",
+            "environment", "symbol", "side", "order_type", "requested_qty", "price",
+            "trigger_price", "strategy_ref", "decision_id", "timestamp_ms",
+            "position_id", "protection_group_id", "lot_allocations",
+        )
+        if any(getattr(order, name) != getattr(initial_order, name) for name in immutable_fields):
+            raise PaperOrderAcceptanceIntegrityError(
+                f"order {order.order_id} immutable terms differ from acceptance snapshot"
+            )
+
+        cursor = await conn.execute(
+            "SELECT reservation_id, owner_order_id, account_id, paper_session_id, "
+            "environment, asset, amount_json, reservation_json "
+            "FROM paper_reservations WHERE owner_order_id=?",
+            (order.order_id,),
+        )
+        reservation_row = await cursor.fetchone()
+        if reservation_row is None:
+            raise PaperOrderAcceptanceStateError(
+                f"SELL order {order.order_id} has no active reservation"
+            )
+        reservation = PaperReservationRef.model_validate_json(reservation_row[7])
+        if (
+            reservation.reservation_id != reservation_row[0]
+            or reservation.owner_order_id != reservation_row[1]
+            or reservation_row[2] != order.paper_account_id
+            or reservation_row[3] != order.paper_session_id
+            or reservation_row[4] != order.environment
+            or reservation.amount.asset != reservation_row[5]
+            or reservation.amount.asset != order.symbol.split("/")[0]
+            or reservation.amount.model_dump_json() != reservation_row[6]
+        ):
+            raise PaperOrderAcceptanceIntegrityError(
+                f"active SELL reservation for {order.order_id} has inconsistent identity"
+            )
+
+        cursor = await conn.execute(
+            "SELECT reservation_id, owner_order_id, position_id, account_id, "
+            "paper_session_id, environment, symbol, base_asset, strategy_ref_json, "
+            "initial_qty, remaining_qty, allocation_json "
+            "FROM paper_reservation_lot_allocations WHERE owner_order_id=? ORDER BY position_id",
+            (order.order_id,),
+        )
+        lot_rows = await cursor.fetchall()
+        active_lots: dict[str, _PaperLotReservationAllocationV1] = {}
+        for lot_row in lot_rows:
+            lot_reservation = _PaperLotReservationAllocationV1.model_validate_json(lot_row[11])
+
+            # Normalize TEXT columns to Decimal before comparing with payload.
+            try:
+                idx_initial_qty = Decimal(lot_row[9])
+            except (InvalidOperation, ValueError, TypeError) as exc:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"lot reservation {lot_row[0]} has invalid initial_qty indexed column: {lot_row[9]!r}"
+                ) from exc
+            try:
+                idx_remaining_qty = Decimal(lot_row[10])
+            except (InvalidOperation, ValueError, TypeError) as exc:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"lot reservation {lot_row[0]} has invalid remaining_qty indexed column: {lot_row[10]!r}"
+                ) from exc
+
+            if (
+                lot_reservation.reservation_id != lot_row[0]
+                or lot_reservation.owner_order_id != lot_row[1]
+                or lot_row[2] != lot_reservation.position_id
+                or lot_reservation.account_id != lot_row[3]
+                or lot_reservation.paper_session_id != lot_row[4]
+                or lot_reservation.environment != lot_row[5]
+                or lot_reservation.symbol != lot_row[6]
+                or lot_reservation.base_asset != lot_row[7]
+                or lot_reservation.strategy_ref.model_dump_json() != lot_row[8]
+                or idx_initial_qty != lot_reservation.initial_qty
+                or idx_remaining_qty != lot_reservation.remaining_qty
+            ):
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"lot reservation {lot_row[2]} has inconsistent SELL context"
+                )
+            active_lots[lot_row[2]] = lot_reservation
+
+        fill_allocations: dict[str, Decimal] = {}
+        for allocation in fill.lot_allocations:
+            if allocation.position_id in fill_allocations:
+                raise PaperOrderAcceptanceStateError(
+                    f"SELL fill repeats lot allocation {allocation.position_id}"
+                )
+            lot_reservation = active_lots.get(allocation.position_id)
+            if lot_reservation is None:
+                raise PaperOrderAcceptanceStateError(
+                    f"SELL fill allocation {allocation.position_id} is not reserved by this order"
+                )
+            if (
+                allocation.account_id != order.paper_account_id
+                or allocation.symbol != order.symbol
+                or allocation.strategy_ref != order.strategy_ref
+                or allocation.qty > lot_reservation.remaining_qty
+            ):
+                raise PaperOrderAcceptanceFundsError(
+                    f"SELL fill allocation exceeds or conflicts with reservation for "
+                    f"{allocation.position_id}"
+                )
+            fill_allocations[allocation.position_id] = allocation.qty
+        if _exact_sum(tuple(fill_allocations.values())) != fill.qty:
+            raise PaperOrderAcceptanceStateError(
+                "SELL fill allocations must sum exactly to fill qty"
+            )
+
+        applied_fills = (*order.fills, fill)
+        total_filled = _exact_sum(tuple(item.qty for item in applied_fills))
+        if total_filled > initial_order.requested_qty:
+            raise PaperOrderAcceptanceStateError(
+                f"applied fills exceed requested quantity for order {order.order_id}"
+            )
+        remaining_qty = _exact_sum(
+            (initial_order.requested_qty, total_filled.copy_negate())
+        )
+        base_asset, quote_asset = order.symbol.split("/")
+        proceeds_gross = _exact_product(fill.qty, fill.price)
+        fee_amount = fill.commission.amount
+        proceeds_net = _exact_sum((proceeds_gross, fee_amount.copy_negate()))
+        if proceeds_net < Decimal("0"):
+            raise PaperOrderAcceptanceFundsError(
+                "SELL commission exceeds gross fill proceeds"
+            )
+
+        cursor = await conn.execute(
+            "SELECT asset, balance_json FROM paper_account_balances "
+            "WHERE account_id=? AND asset IN (?,?)",
+            (order.paper_account_id, base_asset, quote_asset),
+        )
+        balances = {row[0]: AssetBalance.model_validate_json(row[1]) for row in await cursor.fetchall()}
+        if base_asset not in balances or quote_asset not in balances:
+            raise PaperOrderAcceptanceFundsError(
+                "SELL fill requires existing BASE and QUOTE account balances"
+            )
+        base_balance = balances[base_asset]
+        quote_balance = balances[quote_asset]
+        if base_balance.reserved < fill.qty or reservation.amount.amount < fill.qty:
+            raise PaperOrderAcceptanceFundsError(
+                "SELL fill exceeds active BASE reservation"
+            )
+
+        slots: list[_PaperSellAllocationSlotV1] = []
+        next_lot_reservations = dict(active_lots)
+        fully_closed_positions: set[str] = set()
+        for position_id, qty_sold in fill_allocations.items():
+            cursor = await conn.execute(
+                "SELECT account_id, paper_session_id, environment, lot_json "
+                "FROM position_lots WHERE order_id=?",
+                (position_id,),
+            )
+            lot_row = await cursor.fetchone()
+            if lot_row is None:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"reserved SELL position lot {position_id} is missing"
+                )
+            lot = PositionLot.model_validate_json(lot_row[3])
+            lot_reservation = active_lots[position_id]
+            if (
+                lot.order_id != position_id
+                or lot.account_id != order.paper_account_id
+                or lot.paper_session_id != order.paper_session_id
+                or lot.environment != order.environment
+                or lot_row[0] != lot.account_id
+                or lot_row[1] != lot.paper_session_id
+                or lot_row[2] != lot.environment
+                or qty_sold > lot.total_qty
+            ):
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"reserved SELL position lot {position_id} has inconsistent inventory"
+                )
+            if qty_sold == lot.total_qty:
+                cost_removed = lot.total_cost
+                new_lot_qty = Decimal("0")
+                new_lot_cost = Decimal("0")
+            else:
+                try:
+                    with localcontext(_POSITION_AVERAGE_CONTEXT):
+                        numerator = _exact_product(lot.total_cost, qty_sold)
+                        cost_removed = numerator / lot.total_qty
+                except DecimalException as exc:
+                    raise ValueError(
+                        "partial SELL cost basis cannot be calculated within the "
+                        "approved Decimal context"
+                    ) from exc
+                if cost_removed > lot.total_cost:
+                    cost_removed = lot.total_cost
+                new_lot_qty = _exact_sum((lot.total_qty, qty_sold.copy_negate()))
+                new_lot_cost = _exact_sum((lot.total_cost, cost_removed.copy_negate()))
+            proceeds = _exact_product(qty_sold, fill.price)
+            slots.append(
+                _PaperSellAllocationSlotV1(
+                    position_id=position_id,
+                    qty_sold=qty_sold,
+                    cost_basis_removed=cost_removed,
+                    proceeds_attributed=proceeds,
+                )
+            )
+            # Defer lot deletion until after reservation rows are cleaned up
+            # to avoid FK constraint violations (position_id references
+            # position_lots(order_id) without ON DELETE CASCADE).
+            if new_lot_qty == Decimal("0"):
+                fully_closed_positions.add(position_id)
+            else:
+                await conn.execute(
+                    "UPDATE position_lots SET lot_json=? WHERE order_id=?",
+                    (
+                        PositionLot(
+                            order_id=position_id,
+                            account_id=lot.account_id,
+                            paper_session_id=lot.paper_session_id,
+                            environment=lot.environment,
+                            total_qty=new_lot_qty,
+                            total_cost=new_lot_cost,
+                        ).model_dump_json(),
+                        position_id,
+                    ),
+                )
+
+            reservation_remaining = _exact_sum(
+                (lot_reservation.remaining_qty, qty_sold.copy_negate())
+            )
+            if reservation_remaining > Decimal("0"):
+                next_lot_reservations[position_id] = lot_reservation.model_copy(
+                    update={"remaining_qty": reservation_remaining}
+                )
+            else:
+                next_lot_reservations.pop(position_id)
+
+        total_cost_removed = _exact_sum(
+            tuple(slot.cost_basis_removed for slot in slots)
+        )
+        accounting = _PaperSellAccountingRecordV1(
+            fill_id=fill.fill_id,
+            order_id=order.order_id,
+            account_id=order.paper_account_id,
+            paper_session_id=order.paper_session_id,
+            environment=order.environment,
+            quote_asset=quote_asset,
+            strategy_ref=order.strategy_ref,
+            total_qty_filled=fill.qty,
+            proceeds_gross=proceeds_gross,
+            fee_asset=fill.commission.asset,
+            fee_amount=fee_amount,
+            proceeds_net=proceeds_net,
+            total_cost_basis_removed=total_cost_removed,
+            pnl_gross=_exact_sum((proceeds_gross, total_cost_removed.copy_negate())),
+            pnl_net=_exact_sum((proceeds_net, total_cost_removed.copy_negate())),
+            allocation_slots=tuple(slots),
+        )
+        new_reserved = _exact_sum(
+            tuple(item.remaining_qty for item in next_lot_reservations.values())
+        )
+        if new_reserved != _exact_sum(
+            (reservation.amount.amount, fill.qty.copy_negate())
+        ):
+            raise PaperOrderAcceptanceIntegrityError(
+                "lot reservation remainder does not match active BASE reservation"
+            )
+        updated_base = AssetBalance(
+            asset=base_asset,
+            total=_exact_sum((base_balance.total, fill.qty.copy_negate())),
+            available=base_balance.available,
+            reserved=_exact_sum((base_balance.reserved, fill.qty.copy_negate())),
+        )
+        updated_quote = AssetBalance(
+            asset=quote_asset,
+            total=_exact_sum((quote_balance.total, proceeds_net)),
+            available=_exact_sum((quote_balance.available, proceeds_net)),
+            reserved=quote_balance.reserved,
+        )
+        new_status = (
+            PaperOrderStatus.FILLED
+            if remaining_qty == Decimal("0")
+            else PaperOrderStatus.PARTIALLY_FILLED
+        )
+        updated_order_values = order.model_dump(mode="python")
+        updated_order_values["status"] = new_status
+        updated_order_values["fills"] = [*order.fills, fill]
+        updated_order = _PAPER_ORDER_ADAPTER.validate_python(updated_order_values)
+
+        await conn.execute(
+            "INSERT INTO paper_fill_applications "
+            "(fill_id, order_id, account_id, paper_session_id, environment, applied_at_ms, application_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (fill.fill_id, order.order_id, order.paper_account_id, order.paper_session_id,
+             order.environment, fill.timestamp_ms, fill.model_dump_json()),
+        )
+        await conn.execute(
+            "INSERT INTO paper_sell_accounting "
+            "(fill_id, order_id, account_id, paper_session_id, environment, quote_asset, "
+            "strategy_ref_json, total_qty_filled, proceeds_gross, fee_asset, fee_amount, "
+            "proceeds_net, total_cost_basis_removed, pnl_gross, pnl_net, "
+            "allocation_slots_json, accounting_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (fill.fill_id, order.order_id, order.paper_account_id, order.paper_session_id,
+             order.environment, quote_asset, order.strategy_ref.model_dump_json(),
+             str(fill.qty), str(proceeds_gross), fill.commission.asset, str(fee_amount),
+             str(proceeds_net), str(total_cost_removed), str(accounting.pnl_gross),
+             str(accounting.pnl_net),
+             json.dumps([slot.model_dump(mode="json") for slot in slots]),
+             accounting.model_dump_json()),
+        )
+
+        await conn.execute(
+            "UPDATE paper_account_balances SET balance_json=? WHERE account_id=? AND asset=?",
+            (updated_base.model_dump_json(), order.paper_account_id, base_asset),
+        )
+        await conn.execute(
+            "UPDATE paper_account_balances SET balance_json=? WHERE account_id=? AND asset=?",
+            (updated_quote.model_dump_json(), order.paper_account_id, quote_asset),
+        )
+        await conn.execute(
+            "DELETE FROM paper_reservation_lot_allocations WHERE owner_order_id=?",
+            (order.order_id,),
+        )
+        if new_status == PaperOrderStatus.FILLED:
+            await conn.execute(
+                "DELETE FROM paper_reservations WHERE owner_order_id=?", (order.order_id,)
+            )
+        else:
+            updated_reservation = PaperReservationRef(
+                reservation_id=reservation.reservation_id,
+                owner_order_id=reservation.owner_order_id,
+                owner_group_id=reservation.owner_group_id,
+                amount=ReservationAmount(asset=base_asset, amount=new_reserved),
+            )
+            await conn.execute(
+                "UPDATE paper_reservations SET amount_json=?, reservation_json=? "
+                "WHERE owner_order_id=?",
+                (updated_reservation.amount.model_dump_json(),
+                 updated_reservation.model_dump_json(), order.order_id),
+            )
+            for lot_reservation in next_lot_reservations.values():
+                await conn.execute(
+                    "INSERT INTO paper_reservation_lot_allocations "
+                    "(reservation_id, owner_order_id, position_id, account_id, paper_session_id, "
+                    "environment, symbol, base_asset, strategy_ref_json, initial_qty, "
+                    "remaining_qty, allocation_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (lot_reservation.reservation_id, lot_reservation.owner_order_id,
+                     lot_reservation.position_id, lot_reservation.account_id,
+                     lot_reservation.paper_session_id, lot_reservation.environment,
+                     lot_reservation.symbol, lot_reservation.base_asset,
+                     lot_reservation.strategy_ref.model_dump_json(),
+                     str(lot_reservation.initial_qty), str(lot_reservation.remaining_qty),
+                      lot_reservation.model_dump_json()),
+                 )
+
+        # Defer deletion of fully-closed lots until after reservation rows
+        # are cleaned up to avoid FK constraint violations.
+        if fully_closed_positions:
+            placeholders = ",".join("?" for _ in fully_closed_positions)
+            await conn.execute(
+                f"DELETE FROM position_lots WHERE order_id IN ({placeholders})",
+                tuple(fully_closed_positions),
+            )
+
+        await conn.execute(
+            "UPDATE paper_orders SET order_json=? WHERE order_id=?",
+            (updated_order.model_dump_json(), order.order_id),
+        )
+        return fill
+
     # ── paper order cancellation (ACT-P-003) ─────────────────────────────
 
+
     @staticmethod
-    async def _cancel_paper_order_inner(
+    async def _cancel_paper_order_buy_inner(
         conn: aiosqlite.Connection,
         order_id: str,
     ) -> PaperOrder:
@@ -2323,6 +3215,230 @@ class SQLiteStore:
 
         return cancelled_order
 
+    async def _cancel_paper_sell_order_inner(
+        conn: aiosqlite.Connection,
+        order_id: str,
+    ) -> PaperOrder:
+        """Cancel the remaining quantity of one accepted SELL order.
+
+        Admits only ACCEPTED / PARTIALLY_FILLED SELL orders.  Idempotent for
+        CANCELLED orders whose BASE and per-lot reservations have already been
+        released.  FILLED / REJECTED / EXPIRED are rejected without changes.
+        """
+        # 1. Load current order.
+        cursor = await conn.execute(
+            "SELECT order_id, paper_account_id, paper_session_id, environment, "
+            "client_order_id, order_json FROM paper_orders WHERE order_id = ?",
+            (order_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise PaperOrderAcceptanceStateError(
+                f"paper order {order_id} not found"
+            )
+        current_order = SQLiteStore._validate_paper_order_row(row)
+
+        # 2. Idempotency: already CANCELLED with all reservations released → no-op.
+        if current_order.status == PaperOrderStatus.CANCELLED:
+            # Check that no active reservations remain (BASE + per-lot).
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM paper_reservations WHERE owner_order_id = ?",
+                (order_id,),
+            )
+            if (await cursor.fetchone())[0] == 0:
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM paper_reservation_lot_allocations "
+                    "WHERE owner_order_id = ?",
+                    (order_id,),
+                )
+                if (await cursor.fetchone())[0] == 0:
+                    return current_order  # idempotent no-op
+
+        # 3. Reject terminal states without changes.
+        if current_order.status in (
+            PaperOrderStatus.FILLED,
+            PaperOrderStatus.REJECTED,
+            PaperOrderStatus.EXPIRED,
+        ):
+            raise PaperOrderCancellationStateError(
+                f"order {order_id} is in terminal state '{current_order.status.value}'; "
+                "cannot cancel"
+            )
+
+        # 4. Only ACCEPTED / PARTIALLY_FILLED SELL orders are admitted.
+        if current_order.status not in (
+            PaperOrderStatus.ACCEPTED,
+            PaperOrderStatus.PARTIALLY_FILLED,
+        ):
+            raise PaperOrderCancellationStateError(
+                f"order {order_id} status '{current_order.status.value}' is outside "
+                "the cancellation scope (ACCEPTED / PARTIALLY_FILLED only)"
+            )
+
+        if current_order.side != PaperOrderSide.SELL:
+            raise PaperOrderCancellationStateError(
+                f"order {order_id} side '{current_order.side.value}' is not SELL; "
+                "cancellation scope limited to SELL orders"
+            )
+
+        # 5. Load active BASE reservation — the authority for the current remainder.
+        cursor = await conn.execute(
+            "SELECT reservation_id, owner_order_id, account_id, paper_session_id, "
+            "environment, asset, amount_json, reservation_json "
+            "FROM paper_reservations WHERE owner_order_id = ?",
+            (order_id,),
+        )
+        active_reservation_row = await cursor.fetchone()
+        if active_reservation_row is None:
+            raise PaperOrderAcceptanceStateError(
+                f"order {order_id} has no active BASE reservation to release"
+            )
+
+        active_reservation = PaperReservationRef.model_validate_json(
+            active_reservation_row[7]
+        )
+        remainder_amount = active_reservation.amount.amount
+
+        # Verify the reservation asset matches the BASE asset from the order symbol.
+        expected_base_asset = current_order.symbol.split("/")[0]
+        if active_reservation.amount.asset != expected_base_asset:
+            raise PaperOrderAcceptanceIntegrityError(
+                f"BASE reservation asset '{active_reservation.amount.asset}' "
+                f"does not match expected BASE asset '{expected_base_asset}' "
+                f"from symbol '{current_order.symbol}'"
+            )
+
+        # Validate indexed columns match the loaded reservation.
+        if (
+            active_reservation.reservation_id != active_reservation_row[0]
+            or active_reservation.owner_order_id != active_reservation_row[1]
+            or active_reservation_row[2] != current_order.paper_account_id
+            or active_reservation_row[3] != current_order.paper_session_id
+            or active_reservation_row[4] != current_order.environment
+            or active_reservation.amount.asset != active_reservation_row[5]
+            or active_reservation.amount.model_dump_json() != active_reservation_row[6]
+        ):
+            raise PaperOrderAcceptanceIntegrityError(
+                f"active BASE reservation for order {order_id} disagrees with indexed columns"
+            )
+
+        # 6. Load BASE balance (reserve asset for SELL).
+        cursor = await conn.execute(
+            "SELECT asset, balance_json FROM paper_account_balances "
+            "WHERE account_id = ? AND asset = ?",
+            (current_order.paper_account_id, active_reservation.amount.asset),
+        )
+        base_row = await cursor.fetchone()
+        if base_row is None:
+            raise PaperOrderAcceptanceFundsError(
+                f"no balance for {active_reservation.amount.asset} on account "
+                f"{current_order.paper_account_id}"
+            )
+        try:
+            base_balance = AssetBalance.model_validate_json(base_row[1])
+        except Exception as exc:
+            raise PaperOrderAcceptanceIntegrityError(
+                f"account {current_order.paper_account_id} has invalid BASE balance JSON"
+            ) from exc
+
+        # 7. Load per-lot reservations to verify consistency before releasing.
+        cursor = await conn.execute(
+            "SELECT reservation_id, owner_order_id, position_id, account_id, "
+            "paper_session_id, environment, symbol, base_asset, strategy_ref_json, "
+            "initial_qty, remaining_qty, allocation_json "
+            "FROM paper_reservation_lot_allocations WHERE owner_order_id = ?",
+            (order_id,),
+        )
+        lot_rows = await cursor.fetchall()
+
+        # Validate each lot reservation's indexed columns against its payload and sum remainders.
+        sum_remainder: Decimal = Decimal("0")
+        for lot_row in lot_rows:
+            lot_reservation = _PaperLotReservationAllocationV1.model_validate_json(lot_row[11])
+
+            # Normalize TEXT columns to Decimal before comparing with payload.
+            try:
+                idx_initial_qty = Decimal(lot_row[9])
+            except (InvalidOperation, ValueError, TypeError) as exc:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"lot reservation {lot_row[0]} has invalid initial_qty indexed column: {lot_row[9]!r}"
+                ) from exc
+            try:
+                idx_remaining_qty = Decimal(lot_row[10])
+            except (InvalidOperation, ValueError, TypeError) as exc:
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"lot reservation {lot_row[0]} has invalid remaining_qty indexed column: {lot_row[10]!r}"
+                ) from exc
+
+            if (
+                lot_reservation.reservation_id != lot_row[0]
+                or lot_reservation.owner_order_id != lot_row[1]
+                or lot_row[2] != lot_reservation.position_id
+                or lot_reservation.account_id != lot_row[3]
+                or lot_reservation.paper_session_id != lot_row[4]
+                or lot_reservation.environment != lot_row[5]
+                or lot_reservation.symbol != lot_row[6]
+                or lot_reservation.base_asset != lot_row[7]
+                or lot_reservation.strategy_ref.model_dump_json() != lot_row[8]
+                or idx_initial_qty != lot_reservation.initial_qty
+                or idx_remaining_qty != lot_reservation.remaining_qty
+            ):
+                raise PaperOrderAcceptanceIntegrityError(
+                    f"lot reservation {lot_row[2]} has inconsistent indexed columns"
+                )
+            sum_remainder = _exact_sum((sum_remainder, lot_reservation.remaining_qty))
+
+        if sum_remainder != remainder_amount:
+            raise PaperOrderAcceptanceIntegrityError(
+                f"sum of lot remainders ({sum_remainder}) does not match "
+                f"BASE reservation amount ({remainder_amount})"
+            )
+
+        # 8. Release BASE balance: reserved decreases, available increases by remainder.
+        new_reserved = base_balance.reserved - remainder_amount
+        new_available = base_balance.available + remainder_amount
+        updated_base = AssetBalance(
+            asset=base_balance.asset,
+            total=base_balance.total,  # total unchanged
+            available=new_available,
+            reserved=new_reserved,
+        )
+
+        # 9. Delete per-lot reservation rows first (FK: position_id → position_lots).
+        if lot_rows:
+            for lot_row in lot_rows:
+                await conn.execute(
+                    "DELETE FROM paper_reservation_lot_allocations "
+                    "WHERE reservation_id = ? AND position_id = ?",
+                    (lot_row[0], lot_row[2]),
+                )
+
+        # 10. Delete the active BASE reservation row.
+        await conn.execute(
+            "DELETE FROM paper_reservations WHERE owner_order_id = ?",
+            (order_id,),
+        )
+
+        # 11. Update BASE balance row.
+        await conn.execute(
+            "UPDATE paper_account_balances SET balance_json = ? "
+            "WHERE account_id = ? AND asset = ?",
+            (updated_base.model_dump_json(), current_order.paper_account_id, base_balance.asset),
+        )
+
+        # 12. Persist CANCELLED order — fills / executed_qty / cost basis removed /
+        #     proceeds / accounting already applied are preserved exactly.
+        updated_values = current_order.model_dump(mode="python")
+        updated_values["status"] = PaperOrderStatus.CANCELLED
+        cancelled_order = _PAPER_ORDER_ADAPTER.validate_python(updated_values)
+
+        await conn.execute(
+            "UPDATE paper_orders SET order_json = ? WHERE order_id = ?",
+            (cancelled_order.model_dump_json(), order_id),
+        )
+
+        return cancelled_order
+
     async def _read(self, fn, *args: Any) -> Any:
         """Run all reads in one snapshot transaction."""
         conn = await aiosqlite.connect(self._db_path)
@@ -2349,23 +3465,23 @@ class SQLiteStore:
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0, 1, 2, 3, 4, 5, 6, 7, 8 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0, 1, 2, 3, 4, 5, 6, 7, 8, 10 or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         table_names = {row[0] for row in await cursor.fetchall()}
 
-        # Already at v10 — just verify completeness.
+        # Already at v11 — just verify completeness.
         if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V10_TABLES <= table_names:
+            if not _SCHEMA_V11_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
-                    "schema version is 10 but required tables are missing"
+                    "schema version is 11 but required tables are missing"
                 )
             return
 
-        # v8 → v10: add both v9 and v10 tables (for direct v8→v10 migration).
+        # v8 → v11: add order reservations, fill application, and SELL tables (for direct v8→v11 migration).
         if version == 8:
             if not _SCHEMA_V8_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2375,10 +3491,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v9 → v10: add durable fill application marks and position lots.
+        # v9 → v10: add durable fill application marks, position lots, and SELL tables.
         if version == 9:
             if not _SCHEMA_V9_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2386,10 +3504,23 @@ class SQLiteStore:
                 )
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v7 → v10: add order context, reservations, and fill application tables.
+        # v10 → v11: add paper_reservation_lot_allocations and paper_sell_accounting tables.
+        if version == 10:
+            if not _SCHEMA_V10_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 10 but required v10 tables are missing"
+                )
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            return
+
+        # v7 → v11: add order context, reservations, fill application, and SELL tables.
         if version == 7:
             if not _SCHEMA_V7_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2401,10 +3532,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v6 → v10: add account openings/balances, order context/reservations, and fill application tables.
+        # v6 → v11: add account openings/balances, order context/reservations, fill application, and SELL tables.
         if version == 6:
             if not _SCHEMA_V6_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2418,10 +3551,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v5 → current: add paper_fills and account opening/balance tables, order context/reservations, and fill application tables.
+        # v5 → v11: add paper_fills, account openings/balances, order context/reservations, fill application, and SELL tables.
         if version == 5:
             if not _SCHEMA_V5_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2437,10 +3572,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v4 → current: add dispositions, paper_fills, account balances, order context/reservations, and fill application tables.
+        # v4 → v11: add dispositions, paper_fills, account openings/balances, order context/reservations, fill application, and SELL tables.
         if version == 4:
             if not _SCHEMA_V4_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2458,10 +3595,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v3 → current: rebuild run_attempts and add all later schema tables.
+        # v3 → v11: rebuild run_attempts and add all later schema tables.
         if version == 3:
             if not _SCHEMA_V3_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2500,10 +3639,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v2 → current: apply all later schema versions atomically.
+        # v2 → v11: apply all later schema versions atomically.
         if version == 2:
             if not _SCHEMA_V2_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2525,10 +3666,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v1 → current: apply all later schema versions atomically.
+        # v1 → v11: apply all later schema versions atomically.
         if version == 1:
             if not _SCHEMA_V1_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -2552,10 +3695,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_SELL_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v0 (new database): initialise directly at v10.
+        # v0 (new database): initialise directly at v11.
         for statement in _SCHEMA_V1_STATEMENTS:
             await conn.execute(statement)
         for statement in _SCHEMA_V2_STATEMENTS:
@@ -2575,6 +3720,8 @@ class SQLiteStore:
         for statement in _PAPER_ORDER_RESERVATION_DDL_STATEMENTS:
             await conn.execute(statement)
         for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
+            await conn.execute(statement)
+        for statement in _PAPER_SELL_DDL_STATEMENTS:
             await conn.execute(statement)
         await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 

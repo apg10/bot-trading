@@ -35,6 +35,7 @@ from src.persistence.sqlite_store import (
     _SCHEMA_V7_TABLES,
     _SCHEMA_V9_TABLES,
     _SCHEMA_V10_TABLES,
+    _SCHEMA_V11_TABLES,
 )
 
 
@@ -295,6 +296,8 @@ def _make_v7_database(db: Path) -> None:
     conn.execute("DROP TABLE paper_orders")
     conn.execute("DROP TABLE paper_fill_applications")
     conn.execute("DROP TABLE position_lots")
+    conn.execute("DROP TABLE IF EXISTS paper_reservation_lot_allocations")
+    conn.execute("DROP TABLE IF EXISTS paper_sell_accounting")
     conn.execute("PRAGMA user_version = 7")
     conn.commit()
     conn.close()
@@ -309,12 +312,12 @@ def test_direct_v7_to_v9_migration_preserves_accepted_paper_data(
 
     store = SQLiteStore(db)
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V10_TABLES
+    assert _table_names(db) == _SCHEMA_V11_TABLES
     assert _run(store.load_paper_fill("fill-before-v8")) is not None
     assert _run(store.load_paper_account_opening("account-before-v8")) is not None
     assert _run(store.load_paper_order("order-not-registered")) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.close()
     _run(store.close())
 
