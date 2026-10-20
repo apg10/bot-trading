@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from decimal import Decimal, ROUND_DOWN, getcontext, localcontext
+from decimal import Context, Decimal, ROUND_DOWN, ROUND_HALF_EVEN, getcontext, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -1436,3 +1436,261 @@ def test_fill_sell_with_corrupted_lot_base_asset_raises_integrity_error(
     ).fetchone()[0]
     conn.close()
     assert fill_count == 0
+
+
+def test_partial_sell_fill_with_precision_collapse_rejects_and_preserves_state(
+    tmp_path: Path,
+) -> None:
+    """Regression: partial SELL fill that leaves remaining_qty > 0 and remaining_cost == 0
+    must be rejected. Fill remains journalized in paper_fills but not applied to accounting.
+    Order, balances, global reserve, per-lot reserves, and lot remain identical post-rejection.
+    """
+    db = tmp_path / "precision-collapse.db"
+    store = _open_account(db, base="1")
+    buy = _seed_buy_lot(store, "buy-prec", qty="1.0")
+
+    # Capture BUY lot before SELL operations: qty=1, cost=40
+    pre_buy_lot = sqlite3.connect(str(db)).execute(
+        "SELECT lot_json FROM position_lots WHERE order_id=?", (buy.order_id,)
+    ).fetchone()
+    assert pre_buy_lot is not None
+    pre_buy_lot_data = PositionLot.model_validate_json(pre_buy_lot[0])
+    assert pre_buy_lot_data.total_qty == Decimal("1")
+    assert pre_buy_lot_data.total_cost == Decimal("40")
+
+    # SELL lot: qty=1, cost=40
+    allocation = LotAllocation(
+        position_id=buy.order_id,
+        account_id=buy.paper_account_id,
+        symbol=buy.symbol,
+        strategy_ref=buy.strategy_ref,
+        qty=Decimal("1"),
+    )
+    sell = _sell_order("sell-prec", (allocation,), price=Decimal("45"), strategy_ref=buy.strategy_ref)
+    _run(store.register_paper_order(sell))
+    _run(store.accept_paper_order(sell.order_id))
+
+    # Capture pre-apply snapshots
+    pre_order = _run(store.load_paper_order(sell.order_id))
+    pre_balances = _run(store.load_paper_balance_view("acct-sell"))
+    pre_reservation = _run(store.load_paper_reservation(sell.order_id))
+    pre_conn = sqlite3.connect(str(db))
+    pre_lot_rows = pre_conn.execute(
+        "SELECT lot_json FROM position_lots WHERE order_id=?", (sell.order_id,)
+    ).fetchall()
+    pre_alloc_rows = pre_conn.execute(
+        "SELECT allocation_json FROM paper_reservation_lot_allocations WHERE reservation_id=?",
+        (sell.order_id,),
+    ).fetchall()
+    pre_buy_lot_row = pre_conn.execute(
+        "SELECT lot_json FROM position_lots WHERE order_id=?", (buy.order_id,)
+    ).fetchone()
+    pre_conn.close()
+
+    # Partial fill: qty=0.9999999999999999999999999999999999999999
+    # This triggers remaining_qty=1E-40 and remaining_cost=0 due to prec=34 collapse
+    partial_qty = Decimal("0.9999999999999999999999999999999999999999")
+    # Use localcontext with high precision so Pydantic validation doesn't collapse the qty
+    with localcontext(Context(prec=999999, rounding=ROUND_HALF_EVEN)):
+        fill = PaperFill(
+            fill_id="fill-prec",
+            order_id=sell.order_id,
+            qty=partial_qty,
+            price=Decimal("45"),
+            timestamp_ms=1_700_000_003_000,
+            commission=Commission(amount=Decimal("0.6"), asset="USDT"),
+            lot_allocations=(
+                LotAllocation(
+                    position_id=sell.lot_allocations[0].position_id,
+                    account_id=sell.lot_allocations[0].account_id,
+                    symbol=sell.lot_allocations[0].symbol,
+                    strategy_ref=sell.lot_allocations[0].strategy_ref,
+                    qty=partial_qty,
+                ),
+            ),
+        )
+        # Persist directly to avoid re-validation under prec=28
+        fill_json = fill.model_dump_json()
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "INSERT INTO paper_fills (fill_id, record_json) VALUES (?, ?)",
+            ("fill-prec", fill_json),
+        )
+        conn.commit()
+        conn.close()
+
+        # Apply must raise ValueError due to residual-cost guard
+        with pytest.raises(ValueError, match="partial SELL fill leaves residual cost at or below zero"):
+            _run(store.apply_paper_fill(fill.fill_id))
+
+    # Post-rejection: verify BUY lot unchanged (qty=1, cost=40)
+    post_buy_lot = sqlite3.connect(str(db)).execute(
+        "SELECT lot_json FROM position_lots WHERE order_id=?", (buy.order_id,)
+    ).fetchone()
+    assert post_buy_lot is not None
+    assert post_buy_lot[0] == pre_buy_lot_row[0]
+    post_buy_lot_data = PositionLot.model_validate_json(post_buy_lot[0])
+    assert post_buy_lot_data.total_qty == Decimal("1")
+    assert post_buy_lot_data.total_cost == Decimal("40")
+
+    # Post-rejection: verify all state identical
+    post_order = _run(store.load_paper_order(sell.order_id))
+    assert post_order.status == pre_order.status
+    assert len(post_order.fills) == len(pre_order.fills)
+
+    post_balances = _run(store.load_paper_balance_view("acct-sell"))
+    for pb, pbo in zip(post_balances.balances, pre_balances.balances):
+        assert pb.asset == pbo.asset
+        assert pb.total == pbo.total
+        assert pb.available == pbo.available
+        assert pb.reserved == pbo.reserved
+
+    post_reservation = _run(store.load_paper_reservation(sell.order_id))
+    assert post_reservation is not None
+    assert post_reservation.amount == pre_reservation.amount
+
+    post_lot_rows = sqlite3.connect(str(db)).execute(
+        "SELECT lot_json FROM position_lots WHERE order_id=?", (sell.order_id,)
+    ).fetchall()
+    # Guard rejected the fill: no position_lots row should exist for the SELL order
+    assert len(post_lot_rows) == 0
+
+    # Verify paper_reservation_lot_allocations unchanged
+    post_alloc_rows = sqlite3.connect(str(db)).execute(
+        "SELECT allocation_json FROM paper_reservation_lot_allocations WHERE reservation_id=?",
+        (sell.order_id,),
+    ).fetchall()
+    assert len(post_alloc_rows) == len(pre_alloc_rows)
+    for pa, paa in zip(post_alloc_rows, pre_alloc_rows):
+        assert pa[0] == paa[0]
+
+    # Fill remains in paper_fills but not in paper_fill_applications or accounting
+    conn = sqlite3.connect(str(db))
+    fill_in_journal = conn.execute(
+        "SELECT COUNT(*) FROM paper_fills WHERE fill_id=?", ("fill-prec",)
+    ).fetchone()[0]
+    fill_in_applications = conn.execute(
+        "SELECT COUNT(*) FROM paper_fill_applications WHERE fill_id=?", ("fill-prec",)
+    ).fetchone()[0]
+    sell_accounting_count = conn.execute(
+        "SELECT COUNT(*) FROM paper_sell_accounting WHERE fill_id=?", ("fill-prec",)
+    ).fetchone()[0]
+    conn.close()
+
+    assert fill_in_journal == 1
+    assert fill_in_applications == 0
+    assert sell_accounting_count == 0
+
+    _run(store.close())
+
+
+def test_partial_sell_fill_with_zero_residual_cost_rejects_without_mutation(
+    tmp_path: Path,
+) -> None:
+    """Reject a partial SELL fill that leaves positive quantity with zero residual cost.
+    No state is mutated; the BUY lot (qty=1, cost=40) stays intact.
+    Fill remains journalized in paper_fills but not in paper_fill_applications or accounting.
+    """
+    db = tmp_path / "zero-residual-cost.db"
+    store = _open_account(db, base="1")
+    buy = _seed_buy_lot(store, "buy-exceed", qty="1.0")
+
+    # Capture BUY lot: qty=1, cost=40
+    pre_buy_lot = sqlite3.connect(str(db)).execute(
+        "SELECT lot_json FROM position_lots WHERE order_id=?", (buy.order_id,)
+    ).fetchone()
+    assert pre_buy_lot is not None
+    pre_buy_lot_data = PositionLot.model_validate_json(pre_buy_lot[0])
+    assert pre_buy_lot_data.total_qty == Decimal("1")
+    assert pre_buy_lot_data.total_cost == Decimal("40")
+
+    # SELL lot: qty=1, cost=40 (full BUY lot)
+    allocation = LotAllocation(
+        position_id=buy.order_id,
+        account_id=buy.paper_account_id,
+        symbol=buy.symbol,
+        strategy_ref=buy.strategy_ref,
+        qty=Decimal("1"),
+    )
+    sell = _sell_order("sell-exceed", (allocation,), price=Decimal("100"), strategy_ref=buy.strategy_ref)
+    _run(store.register_paper_order(sell))
+    _run(store.accept_paper_order(sell.order_id))
+
+    # Pre-apply snapshots
+    pre_balances = _run(store.load_paper_balance_view("acct-sell"))
+    pre_reservation = _run(store.load_paper_reservation(sell.order_id))
+
+    # Partial fill: qty=0.9999999999999999999999999999999999999999 (40 nines)
+    partial_qty = Decimal("0.9999999999999999999999999999999999999999")
+    # Triggers remaining_qty=1E-40, remaining_cost=0 -> guard rejects
+
+    with localcontext(Context(prec=999999, rounding=ROUND_HALF_EVEN)):
+        fill_exc = PaperFill(
+            fill_id="fill-exceed",
+            order_id=sell.order_id,
+            qty=partial_qty,
+            price=Decimal("100"),
+            timestamp_ms=1_700_000_004_000,
+            commission=Commission(amount=Decimal("1.0"), asset="USDT"),
+            lot_allocations=(
+                LotAllocation(
+                    position_id=sell.lot_allocations[0].position_id,
+                    account_id=sell.lot_allocations[0].account_id,
+                    symbol=sell.lot_allocations[0].symbol,
+                    strategy_ref=sell.lot_allocations[0].strategy_ref,
+                    qty=partial_qty,
+                ),
+            ),
+        )
+        fill_exc_json = fill_exc.model_dump_json()
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "INSERT INTO paper_fills (fill_id, record_json) VALUES (?, ?)",
+            ("fill-exceed", fill_exc_json),
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(ValueError, match="partial SELL fill leaves residual cost at or below zero"):
+            _run(store.apply_paper_fill(fill_exc.fill_id))
+
+    # Post-rejection: verify BUY lot unchanged
+    post_buy_lot = sqlite3.connect(str(db)).execute(
+        "SELECT lot_json FROM position_lots WHERE order_id=?", (buy.order_id,)
+    ).fetchone()
+    assert post_buy_lot is not None
+    assert post_buy_lot[0] == pre_buy_lot[0]
+    post_buy_lot_data = PositionLot.model_validate_json(post_buy_lot[0])
+    assert post_buy_lot_data.total_qty == Decimal("1")
+    assert post_buy_lot_data.total_cost == Decimal("40")
+
+    # Post-rejection: verify all state identical
+    post_balances = _run(store.load_paper_balance_view("acct-sell"))
+    for pb, pbo in zip(post_balances.balances, pre_balances.balances):
+        assert pb.asset == pbo.asset
+        assert pb.total == pbo.total
+        assert pb.available == pbo.available
+        assert pb.reserved == pbo.reserved
+
+    post_reservation = _run(store.load_paper_reservation(sell.order_id))
+    assert post_reservation is not None
+    assert post_reservation.amount == pre_reservation.amount
+
+    # Fill remains in paper_fills but not in paper_fill_applications or accounting
+    conn = sqlite3.connect(str(db))
+    fill_in_journal = conn.execute(
+        "SELECT COUNT(*) FROM paper_fills WHERE fill_id=?", ("fill-exceed",)
+    ).fetchone()[0]
+    fill_in_applications = conn.execute(
+        "SELECT COUNT(*) FROM paper_fill_applications WHERE fill_id=?", ("fill-exceed",)
+    ).fetchone()[0]
+    sell_accounting_count = conn.execute(
+        "SELECT COUNT(*) FROM paper_sell_accounting WHERE fill_id=?", ("fill-exceed",)
+    ).fetchone()[0]
+    conn.close()
+
+    assert fill_in_journal == 1
+    assert fill_in_applications == 0
+    assert sell_accounting_count == 0
+
+    _run(store.close())

@@ -2960,10 +2960,15 @@ class SQLiteStore:
                         "partial SELL cost basis cannot be calculated within the "
                         "approved Decimal context"
                     ) from exc
-                if cost_removed > lot.total_cost:
-                    cost_removed = lot.total_cost
                 new_lot_qty = _exact_sum((lot.total_qty, qty_sold.copy_negate()))
                 new_lot_cost = _exact_sum((lot.total_cost, cost_removed.copy_negate()))
+                # Residual-cost guard: reject partial fills that leave zero/negative
+                # residual cost while still carrying quantity (precision collapse).
+                if new_lot_qty > Decimal("0") and new_lot_cost <= Decimal("0"):
+                    raise ValueError(
+                        "partial SELL fill leaves residual cost at or below zero "
+                        f"(remaining_qty={new_lot_qty!r}, remaining_cost={new_lot_cost!r})"
+                    )
             proceeds = _exact_product(qty_sold, fill.price)
             slots.append(
                 _PaperSellAllocationSlotV1(
