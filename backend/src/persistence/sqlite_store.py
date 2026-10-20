@@ -43,7 +43,19 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from decimal import Decimal, DecimalException, localcontext
+from decimal import (
+    Clamped,
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Underflow,
+    localcontext,
+)
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -82,6 +94,56 @@ from src.models.paper_contracts import (
     _exact_sum,
 )
 from src.models.strategy_config import StrategyConfig
+
+# ── AssetBalance JSON loader con precisión contractual ───────────────────────────
+
+def _asset_balance_json_to_model(json_str: str) -> AssetBalance:
+    """Parse JSON *and* validate under sufficient precision so the validator
+    (total == available + reserved) sees exact operands even when the global
+    decimal context is restricted (e.g. prec=6, ROUND_DOWN).
+
+    Precision is derived contractually from the JSON payload itself: the
+    maximum adjusted exponent minus the minimum exponent plus one, which is
+    exactly the number of significant digits required to represent the
+    largest operand without loss.  This avoids hard-coding a magic number.
+    """
+    raw = json.loads(json_str)
+    total = Decimal(str(raw["total"]))
+    avail = Decimal(str(raw["available"]))
+    reserved = Decimal(str(raw["reserved"]))
+
+    # Contractual bound: precision must cover all three fields exactly.
+    min_exp = min(total.as_tuple().exponent, avail.as_tuple().exponent, reserved.as_tuple().exponent)
+    max_adj = max(total.adjusted(), avail.adjusted(), reserved.adjusted())
+    required_prec = max(1, max_adj - min_exp + 1)
+
+    ctx = Context(prec=required_prec, rounding=ROUND_HALF_EVEN,
+                  Emin=-999999999, Emax=999999999, clamp=0,
+                  traps=[Clamped, DivisionByZero, Inexact,
+                         InvalidOperation, Overflow, Underflow])
+    with localcontext(ctx):
+        return AssetBalance.model_validate_json(json_str)
+
+
+def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, reserved: Decimal) -> AssetBalance:
+    """Construct an AssetBalance under sufficient precision so the validator
+    (total == available + reserved) sees exact operands even when the global
+    decimal context is restricted.
+
+    Precision is derived contractually from the provided values.
+    """
+    vals = [total, available, reserved]
+    min_exp = min(v.as_tuple().exponent for v in vals)
+    max_adj = max(v.adjusted() for v in vals)
+    required_prec = max(1, max_adj - min_exp + 1)
+
+    ctx = Context(prec=required_prec, rounding=ROUND_HALF_EVEN,
+                  Emin=-999999999, Emax=999999999, clamp=0,
+                  traps=[Clamped, DivisionByZero, Inexact,
+                         InvalidOperation, Overflow, Underflow])
+    with localcontext(ctx):
+        return AssetBalance(asset=asset, total=total, available=available, reserved=reserved)
+
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
@@ -2432,14 +2494,14 @@ class SQLiteStore:
                 f"no balance for {active_reservation.amount.asset} on account {order.paper_account_id}"
             )
         try:
-            quote_balance = AssetBalance.model_validate_json(quote_row[1])
+            quote_balance = _asset_balance_json_to_model(quote_row[1])
         except Exception as exc:
             raise PaperOrderAcceptanceIntegrityError(
                 f"account {order.paper_account_id} has invalid QUOTE balance JSON"
             ) from exc
 
         # 6. Compute principal and commission.
-        principal = fill.qty * fill.price
+        principal = _exact_product(fill.qty, fill.price)
         if fill.commission is None:
             raise PaperOrderAcceptanceStateError(
                 "a known QUOTE commission is required to apply a fill"
@@ -2452,14 +2514,14 @@ class SQLiteStore:
         commission_amount = fill.commission.amount
 
         applied_fills = (*order.fills, fill)
-        total_filled_qty = sum((applied.qty for applied in applied_fills), Decimal("0"))
+        total_filled_qty = _exact_sum(tuple(applied.qty for applied in applied_fills))
         if total_filled_qty > initial_order.requested_qty:
             raise PaperOrderAcceptanceStateError(
                 f"applied fills exceed requested quantity for order {order.order_id}"
             )
-        remaining_qty = initial_order.requested_qty - total_filled_qty
-        total_filled_notional = sum(
-            (applied.qty * applied.price for applied in applied_fills), Decimal("0")
+        remaining_qty = _exact_sum((initial_order.requested_qty, total_filled_qty.copy_negate()))
+        total_filled_notional = _exact_sum(
+            tuple(_exact_product(applied.qty, applied.price) for applied in applied_fills)
         )
         if initial_order.order_type == PaperOrderType.MARKET:
             if initial_order.max_quote_amount is None:
@@ -2482,11 +2544,11 @@ class SQLiteStore:
                     raise PaperOrderAcceptanceIntegrityError(
                         f"LIMIT BUY order {order.order_id} has no original limit price"
                     )
-                target_reservation_amount = remaining_qty * initial_order.price
+                target_reservation_amount = _exact_product(remaining_qty, initial_order.price)
             else:
                 assert initial_order.max_quote_amount is not None
-                target_reservation_amount = (
-                    initial_order.max_quote_amount - total_filled_notional
+                target_reservation_amount = _exact_sum(
+                    (initial_order.max_quote_amount, total_filled_notional.copy_negate())
                 )
                 if target_reservation_amount < Decimal("0"):
                     raise PaperOrderAcceptanceFundsError(
@@ -2494,7 +2556,7 @@ class SQLiteStore:
                         f"max_quote_amount {initial_order.max_quote_amount}"
                     )
 
-        if active_reservation.amount.amount < principal + target_reservation_amount:
+        if active_reservation.amount.amount < _exact_sum((principal, target_reservation_amount)):
             raise PaperOrderAcceptanceFundsError(
                 "active reservation cannot cover the fill and required remaining coverage"
             )
@@ -2506,7 +2568,7 @@ class SQLiteStore:
                 f"insufficient available {quote_balance.asset}: "
                 f"commission needs {commission_amount}, have {quote_balance.available}"
             )
-        needed = principal + commission_amount
+        needed = _exact_sum((principal, commission_amount))
 
         # 7. Load BASE balance (fill asset) from original accepted symbol terms.
         # Symbol is "BASE/QUOTE"; base asset is the first part.
@@ -2520,39 +2582,49 @@ class SQLiteStore:
         base_row = await cursor.fetchone()
         if base_row is None:
             # Create BASE balance from zero.
-            base_balance = AssetBalance(
+            base_balance = _asset_balance_construct(
                 asset=base_asset,
-                total=fill.qty,
-                available=fill.qty,
+                total=_exact_product(fill.qty, Decimal("1")),
+                available=_exact_product(fill.qty, Decimal("1")),
                 reserved=Decimal("0"),
             )
         else:
             try:
-                base_balance = AssetBalance.model_validate_json(base_row[1])
+                base_balance = _asset_balance_json_to_model(base_row[1])
             except Exception:
                 raise PaperOrderAcceptanceIntegrityError(
                     f"account {order.paper_account_id} has invalid BASE balance JSON"
                 )
-            base_balance = AssetBalance(
+            base_balance = _asset_balance_construct(
                 asset=base_asset,
-                total=base_balance.total + fill.qty,
-                available=base_balance.available + fill.qty,
+                total=_exact_sum((base_balance.total, fill.qty)),
+                available=_exact_sum((base_balance.available, fill.qty)),
                 reserved=base_balance.reserved,
             )
 
         # 8. Consume this fill's principal and retain only the required remainder.
-        new_total = quote_balance.total - needed
-        other_reserved = quote_balance.reserved - active_reservation.amount.amount
-        new_reserved = other_reserved + target_reservation_amount
-        updated_quote = AssetBalance(
-            asset=quote_balance.asset,
-            total=new_total,
-            available=new_total - new_reserved,
-            reserved=new_reserved,
-        )
+        # Derive precision from all operands to avoid truncation under restricted global context.
+        _bal_vals = [quote_balance.total, quote_balance.available, quote_balance.reserved, needed, active_reservation.amount.amount, target_reservation_amount]
+        _min_exp = min(v.as_tuple().exponent for v in _bal_vals)
+        _max_adj = max(v.adjusted() for v in _bal_vals)
+        _fill_prec = max(1, _max_adj - _min_exp + 1)
+
+        with localcontext(Context(prec=_fill_prec, rounding=ROUND_HALF_EVEN,
+                                  Emin=-999999999, Emax=999999999, clamp=0,
+                                  traps=[Clamped, DivisionByZero, Inexact,
+                                         InvalidOperation, Overflow, Underflow])):
+            new_total = _exact_sum((quote_balance.total, -needed))
+            other_reserved = _exact_sum((quote_balance.reserved, -active_reservation.amount.amount))
+            new_reserved = _exact_sum((other_reserved, target_reservation_amount))
+            updated_quote = _asset_balance_construct(
+                asset=quote_balance.asset,
+                total=new_total,
+                available=_exact_sum((new_total, -new_reserved)),
+                reserved=new_reserved,
+            )
 
         # 9. Update BASE balance.
-        updated_base = AssetBalance(
+        updated_base = _asset_balance_construct(
             asset=base_balance.asset,
             total=base_balance.total,
             available=base_balance.available,
@@ -2630,8 +2702,8 @@ class SQLiteStore:
             new_lot_cost = principal
         else:
             existing_lot = PositionLot.model_validate_json(lot_row[0])
-            new_lot_qty = existing_lot.total_qty + fill.qty
-            new_lot_cost = existing_lot.total_cost + principal
+            new_lot_qty = _exact_sum((existing_lot.total_qty, fill.qty))
+            new_lot_cost = _exact_sum((existing_lot.total_cost, principal))
 
         new_lot = PositionLot(
             order_id=fill.order_id,

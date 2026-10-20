@@ -39,6 +39,7 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceStateError,
     SQLiteStore,
     _PAPER_ORDER_ADAPTER,
+    _asset_balance_json_to_model,
 )
 
 
@@ -1909,3 +1910,167 @@ def test_save_paper_fill_rollback_on_journal_insert(tmp_path: Path) -> None:
     ).fetchone()[0]
     assert fill_count == 0
     conn.close()
+
+
+# ── Precisión decimal en BUY (regresión pre-fix) ───────────────────────────────
+
+def test_buy_fill_precision_under_restricted_global_context(tmp_path: Path) -> None:
+    """BUY con qty=1, price=1.23456789 y commission=0 debe registrar coste exacto 1.23456789
+    incluso cuando el contexto decimal global tiene prec=6 y ROUND_DOWN.
+
+    El bug actual redondea el principal a 1.23456 en lugar de 1.23456789.
+    Este test es una regresión de integración que debe FALLAR antes del fix y PASAR después.
+    """
+    import decimal as dec_mod
+
+    # 1. Preparar y aceptar órdenes con contexto normal
+    db = tmp_path / "buy-precision.db"
+    store = _make_store(db)
+    _open_account(store)
+
+    order = _make_order(
+        order_id="order-prec",
+        order_type=PaperOrderType.MARKET,
+        requested_qty="1.0",
+        max_quote_amount="10.0",
+    )
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+
+    fill = _make_fill(
+        fill_id="fill-prec",
+        order_id="order-prec",
+        qty="1.0",
+        price="1.23456789",
+        commission=Commission(amount=Decimal("0"), asset="QUOTE"),
+    )
+    _run(store.save_paper_fill(fill))
+
+    order2 = _make_order(
+        order_id="order-prec-2",
+        order_type=PaperOrderType.MARKET,
+        requested_qty="1.0",
+        max_quote_amount="10.0",
+    )
+    _run(store.register_paper_order(order2))
+    _accept_order(store, order2)
+
+    fill2 = _make_fill(
+        fill_id="fill-prec-2",
+        order_id="order-prec-2",
+        qty="1.0",
+        price="2.34567890",
+        commission=Commission(amount=Decimal("0"), asset="QUOTE"),
+    )
+    _run(store.save_paper_fill(fill2))
+
+    # 2. Aplicar ambos fills bajo prec=6, ROUND_DOWN en la misma cuenta
+    old_ctx = dec_mod.getcontext().copy()
+    try:
+        dec_mod.getcontext().prec = 6
+        dec_mod.getcontext().rounding = dec_mod.ROUND_DOWN
+
+        # Guardar copia del contexto restringido (incluye flags) para comparar después
+        ctx_restricted_copy = dec_mod.getcontext().copy()
+
+        applied = _run(store.apply_paper_fill("fill-prec"))
+        assert applied.fill_id == "fill-prec"
+
+        # ── Releer balance modificado tras primer BUY (misma cuenta) ──
+        conn = sqlite3.connect(str(db))
+        quote_bal_1 = _asset_balance_json_to_model(
+            conn.execute("SELECT balance_json FROM paper_account_balances WHERE account_id='acc-1' AND asset='QUOTE'").fetchone()[0]
+        )
+        # tras primer BUY: total = 9998.76543211, available = 9998.76543211 - 10.0 (reserved), reserved = 10.0
+        assert quote_bal_1.total == Decimal("9998.76543211"), \
+            f"QUOTE total tras primer BUY esperado 9998.76543211, obtenido {quote_bal_1.total}"
+        assert quote_bal_1.available == Decimal("9988.76543211"), \
+            f"QUOTE available esperado 9988.76543211, obtenido {quote_bal_1.available}"
+        assert quote_bal_1.reserved == Decimal("10.0"), \
+            f"QUOTE reserved esperado 10.0, obtenido {quote_bal_1.reserved}"
+
+        # Este segundo apply_paper_fill lee balances existentes bajo prec=6;
+        # con el fix debe pasar sin ValueError del validador.
+        applied2 = _run(store.apply_paper_fill("fill-prec-2"))
+        assert applied2.fill_id == "fill-prec-2"
+
+        # 3. Comparar contexto actual con la copia restringida ANTES de restaurar old_ctx
+        ctx_during = dec_mod.getcontext()
+        assert ctx_during.prec == ctx_restricted_copy.prec, \
+            f"prec alterado durante operaciones: {ctx_during.prec} != {ctx_restricted_copy.prec}"
+        assert ctx_during.rounding == ctx_restricted_copy.rounding, \
+            f"rounding alterado durante operaciones: {ctx_during.rounding} != {ctx_restricted_copy.rounding}"
+        # Comparar flags explícitamente
+        assert ctx_during.flags == ctx_restricted_copy.flags, \
+            f"flags alterado durante operaciones: {ctx_during.flags} != {ctx_restricted_copy.flags}"
+        # Comparar traps explícitamente
+        for trap_name in ("traps",):
+            assert getattr(ctx_during, trap_name) == getattr(ctx_restricted_copy, trap_name), \
+                f"trap {trap_name} alterado: {getattr(ctx_during, trap_name)} != {getattr(ctx_restricted_copy, trap_name)}"
+
+        # 4. Restaurar contexto original y calcular expectativas EXACTAS fuera del contexto reducido
+        dec_mod.setcontext(old_ctx)
+
+        # Verificar que el contexto global quedó intacto tras restaurar
+        ctx_after = dec_mod.getcontext()
+        assert ctx_after.prec == old_ctx.prec, "El prec global fue alterado tras restaurar"
+        assert ctx_after.rounding == old_ctx.rounding, "El rounding global fue alterado tras restaurar"
+
+        # expectativas exactas (fuera del contexto reducido)
+        expected_principal = Decimal("1.23456789")
+        expected_commission = Decimal("0")
+        expected_total_debit = expected_principal + expected_commission  # 1.23456789
+
+        # 5. Verificar balances y lote con valores exactos (cuenta 1)
+        # QUOTE balance: total = available == 9996.41975321, reserved == 0
+        quote_bal = AssetBalance.model_validate_json(
+            conn.execute("SELECT balance_json FROM paper_account_balances WHERE account_id='acc-1' AND asset='QUOTE'").fetchone()[0]
+        )
+        assert quote_bal.total == Decimal("9996.41975321"), \
+            f"QUOTE total esperado 9996.41975321, obtenido {quote_bal.total}"
+        assert quote_bal.available == Decimal("9996.41975321"), \
+            f"QUOTE available esperado 9996.41975321, obtenido {quote_bal.available}"
+        assert quote_bal.reserved == Decimal("0"), \
+            f"QUOTE reserved esperado 0, obtenido {quote_bal.reserved}"
+
+        # BASE balance: total == available == 2.0
+        base_bal = AssetBalance.model_validate_json(
+            conn.execute("SELECT balance_json FROM paper_account_balances WHERE account_id='acc-1' AND asset='BASE'").fetchone()[0]
+        )
+        assert base_bal.total == Decimal("2.0"), f"BASE total esperado 2.0, obtenido {base_bal.total}"
+        assert base_bal.available == Decimal("2.0"), f"BASE available esperado 2.0, obtenido {base_bal.available}"
+
+        # position_lots: total_cost debe ser EXACTAMENTE 1.23456789
+        lot_row = conn.execute("SELECT lot_json FROM position_lots WHERE order_id='order-prec'").fetchone()
+        assert lot_row is not None, "position_lots no encontrado para order-prec"
+        from src.persistence.sqlite_store import PositionLot
+        lot = PositionLot.model_validate_json(lot_row[0])
+        assert lot.total_cost == Decimal("1.23456789"), \
+            f"Lot cost esperado 1.23456789, obtenido {lot.total_cost} (bug de precisión detectado)"
+        assert lot.total_qty == Decimal("1.0")
+
+        # position_lots segundo: total_cost debe ser EXACTAMENTE 2.34567890
+        lot_row2 = conn.execute("SELECT lot_json FROM position_lots WHERE order_id='order-prec-2'").fetchone()
+        assert lot_row2 is not None
+        lot2 = PositionLot.model_validate_json(lot_row2[0])
+        assert lot2.total_cost == Decimal("2.34567890"), \
+            f"Segundo Lot cost esperado 2.34567890, obtenido {lot2.total_cost}"
+
+        # durable mark
+        app_row = conn.execute("SELECT fill_id FROM paper_fill_applications WHERE fill_id='fill-prec'").fetchone()
+        assert app_row is not None
+        app_row2 = conn.execute("SELECT fill_id FROM paper_fill_applications WHERE fill_id='fill-prec-2'").fetchone()
+        assert app_row2 is not None
+
+        # order status FILLED
+        order_row = conn.execute("SELECT order_json FROM paper_orders WHERE order_id='order-prec'").fetchone()
+        loaded_order = PaperOrder.model_validate_json(order_row[0])
+        assert loaded_order.status == PaperOrderStatus.FILLED
+        order_row2 = conn.execute("SELECT order_json FROM paper_orders WHERE order_id='order-prec-2'").fetchone()
+        loaded_order2 = PaperOrder.model_validate_json(order_row2[0])
+        assert loaded_order2.status == PaperOrderStatus.FILLED
+
+        conn.close()
+        _run(store.close())
+    finally:
+        dec_mod.setcontext(old_ctx)
