@@ -468,6 +468,44 @@ class PaperOrderCancellationConflictError(ValueError):
     """Order cancellation identity already has a different stable payload."""
 
 
+class FillApplyCommitError(RuntimeError):
+    """Raised when the commit of a fill-application transaction fails.
+
+    The caller must reopen the database, query ``paper_fill_applications``
+    by *fill_id* (the durable mark), and distinguish:
+
+    * **Mark present**  → operation was applied; return success (idempotent).
+    * **Mark absent**   → operation was rolled back; inspect ``paper_fills``
+      and order status to decide whether a retry is appropriate.
+    * **Cannot read**  → report corruption; do not retry.
+
+    No ``PENDING_SEND``, queues, or external execution are introduced.
+    ``UNKNOWN_STATE`` is reserved for truly irreconcilable local cases only.
+
+    Attributes:
+        original_error: The error that occurred during commit.
+        rollback_error: The error that occurred during rollback (if any).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        original_error: Exception | None = None,
+        rollback_error: Exception | None = None,
+    ):
+        super().__init__(message)
+        self.original_error = original_error
+        self.rollback_error = rollback_error
+
+
+class StoreCorruptionError(RuntimeError):
+    """Database state is inconsistent or unreadable; recovery is impossible."""
+
+
+class PaperFillApplyError(ValueError):
+    """Fill application rejected due to order state or validation failure."""
+
+
 # ── SQL DDL (idempotent) ──────────────────────────────────────────────────────────
 
 _SCHEMA_V1_STATEMENTS = (
@@ -1216,6 +1254,20 @@ class SQLiteStore:
 
         Idempotent: repeated calls with the same fill_id are a no-op after first apply.
         Rejects: fill not found, already applied, order not ACCEPTED, insufficient funds/fee.
+
+        Recovery contract on commit failure (``FillApplyCommitError``):
+          1. Reopen the database and query ``paper_fill_applications`` by *fill_id*.
+          2. If the durable mark is present → operation was applied; return success (idempotent).
+          3. If the durable mark is absent → operation was not applied; inspect ``paper_fills``
+             and order status.  Retry only if the order is in a mutable state (ACCEPTED /
+             PARTIALLY_FILLED).  If the order is already FILLED / CANCELLED / REJECTED /
+             EXPIRED, the fill cannot be applied and a deterministic error is raised.
+          4. If the read cannot resolve the result (corruption, missing rows) → raise
+             ``StoreCorruptionError``; do not retry.
+          5. No ``PENDING_SEND``, queues, or external execution are introduced.
+             ``UNKNOWN_STATE`` is reserved for truly irreconcilable local cases only.
+          6. ``ACT-P-002`` / ``ACT-P-003`` remain globally pending until later acceptance;
+             this method does not depend on them.
         """
         if self._closed:
             raise StoreClosedError("store is closed")
@@ -1223,9 +1275,187 @@ class SQLiteStore:
             raise RuntimeError("store must be initialized before use")
         if not isinstance(fill_id, str) or not fill_id.strip():
             raise ValueError("fill_id must be a non-empty string")
-        return await self._write(
-            lambda conn: self._apply_paper_fill_inner(conn, fill_id)
+
+        try:
+            return await self._write(
+                lambda conn: self._apply_paper_fill_inner(conn, fill_id),
+                _fill_commit_recovery=True,
+            )
+        except FillApplyCommitError as exc:
+            # ── Recovery path ──────────────────────────────────────────────
+            return await self._recover_fill_commit(fill_id, exc)
+
+    async def _recover_fill_commit(
+        self, fill_id: str, original_exc: FillApplyCommitError
+    ) -> PaperFill:
+        """Recover from a commit failure by inspecting the durable mark."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+
+        # 1. Reopen DB and query durable mark by fill_id
+        conn = await aiosqlite.connect(self._db_path)
+        try:
+            cursor = await conn.execute(
+                "SELECT fill_id, order_id, account_id, paper_session_id, "
+                "environment, applied_at_ms, application_json "
+                "FROM paper_fill_applications "
+                "WHERE fill_id = ?",
+                (fill_id,),
+            )
+            mark_row = await cursor.fetchone()
+        except Exception as read_err:
+            await conn.close()
+            raise StoreCorruptionError(
+                f"Cannot read paper_fill_applications for fill {fill_id} "
+                f"during recovery. Original commit error: {original_exc}"
+            ) from read_err
+
+        if mark_row is not None:
+            # 2. A durable mark is authoritative only if every stored identity
+            #    and payload agrees with the validated fill and its order.
+            try:
+                cursor = await conn.execute(
+                    "SELECT fill_id, record_json FROM paper_fills WHERE fill_id = ?",
+                    (fill_id,),
+                )
+                fill_row = await cursor.fetchone()
+                cursor = await conn.execute(
+                    "SELECT order_json FROM paper_orders WHERE order_id = ?",
+                    (mark_row[1],),
+                )
+                order_row = await cursor.fetchone()
+                return self._validate_paper_fill_application_row(
+                    mark_row, fill_row, order_row, original_exc
+                )
+            finally:
+                await conn.close()
+
+        # 3. Durable mark absent → operation was not applied.  Check order
+        #    status to decide whether a retry is appropriate.
+        await conn.close()
+        conn3 = await aiosqlite.connect(self._db_path)
+        try:
+            cursor3 = await conn3.execute(
+                "SELECT order_json FROM paper_orders WHERE order_id = "
+                "(SELECT order_id FROM paper_fills WHERE fill_id = ?)",
+                (fill_id,),
+            )
+            order_row = await cursor3.fetchone()
+            if order_row is None:
+                raise StoreCorruptionError(
+                    f"Fill {fill_id} has no durable mark and order row "
+                    f"missing in paper_orders. Original error: {original_exc}"
+                )
+            order_json_str = order_row[0]
+            try:
+                order = PaperOrder.model_validate_json(order_json_str)
+            except Exception as exc:
+                raise StoreCorruptionError(
+                    f"Fill {fill_id} has corrupt order JSON during recovery. "
+                    f"Original commit error: {original_exc}"
+                ) from exc
+            order_id = order.order_id
+            order_status = order.status
+        finally:
+            await conn3.close()
+
+        # Only retry if the order is still mutable.
+        if order_status in ("accepted", "partially_filled"):
+            # Retry idempotently
+            return await self._write(
+                lambda conn: self._apply_paper_fill_inner(conn, fill_id),
+                _fill_commit_recovery=True,
+            )
+
+        # Order is already in a terminal state; the fill cannot be applied.
+        raise PaperFillApplyError(
+            f"Cannot apply fill {fill_id}: order {order_id} is in terminal "
+            f"state {order_status}. Original commit error: {original_exc}"
         )
+
+    @staticmethod
+    def _validate_paper_fill_row(
+        row: tuple[str, str],
+    ) -> PaperFill:
+        """Validate a PaperFill row against the real schema (fill_id, record_json)."""
+        stored_fill_id, record_json = row
+        try:
+            fill = PaperFill.model_validate_json(record_json)
+        except Exception as exc:
+            raise PaperFillIntegrityError(
+                f"paper fill for {stored_fill_id} has corrupt JSON"
+            ) from exc
+        if fill.fill_id != stored_fill_id:
+            raise PaperFillIntegrityError(
+                "stored paper fill payload does not match indexed identity"
+            )
+        return fill
+
+    @classmethod
+    def _validate_paper_fill_application_row(
+        cls,
+        application_row: tuple[Any, ...],
+        fill_row: tuple[str, str] | None,
+        order_row: tuple[str] | None,
+        original_exc: BaseException | None = None,
+    ) -> PaperFill:
+        """Validate all durable application identities against the journal."""
+        stored_fill_id, stored_order_id, account_id, session_id, environment, applied_at_ms, application_json = application_row
+        context = f" Original commit error: {original_exc}" if original_exc else ""
+        if fill_row is None:
+            raise StoreCorruptionError(
+                f"Fill {stored_fill_id} has a durable application mark but no journal row.{context}"
+            )
+        if order_row is None:
+            raise StoreCorruptionError(
+                f"Fill {stored_fill_id} has a durable application mark but no order row.{context}"
+            )
+        try:
+            fill = cls._validate_paper_fill_row(fill_row)
+        except Exception as exc:
+            raise StoreCorruptionError(
+                f"Fill {stored_fill_id} has an invalid journal row.{context}"
+            ) from exc
+        try:
+            application_fill = PaperFill.model_validate_json(application_json)
+        except Exception as exc:
+            raise StoreCorruptionError(
+                f"Fill {stored_fill_id} has corrupt application JSON.{context}"
+            ) from exc
+        try:
+            order = PaperOrder.model_validate_json(order_row[0])
+        except Exception as exc:
+            raise StoreCorruptionError(
+                f"Fill {stored_fill_id} has corrupt order JSON.{context}"
+            ) from exc
+
+        expected_identity = (
+            fill.fill_id,
+            fill.order_id,
+            order.paper_account_id,
+            order.paper_session_id,
+            order.environment,
+            fill.timestamp_ms,
+        )
+        stored_identity = (
+            stored_fill_id,
+            stored_order_id,
+            account_id,
+            session_id,
+            environment,
+            applied_at_ms,
+        )
+        if (
+            stored_identity != expected_identity
+            or order.order_id != fill.order_id
+            or application_fill != fill
+            or fill not in order.fills
+        ):
+            raise StoreCorruptionError(
+                f"Fill {stored_fill_id} durable application mark does not match "
+                f"its journal payload and order.{context}"
+            )
+        return fill
 
     async def cancel_paper_order(self, order_id: str) -> PaperOrder:
         """Cancel the remaining quantity of one accepted BUY or SELL order.
@@ -1285,21 +1515,62 @@ class SQLiteStore:
             lambda conn: self._load_paper_reservation_inner(conn, reservation_id)
         )
 
-    async def _write(self, fn, *args: Any) -> Any:
-        """Run *fn(conn, *args)* inside the lock + BEGIN IMMEDIATE."""
+    async def _write(
+        self, fn, *args: Any, _fill_commit_recovery: bool = False
+    ) -> Any:
+        """Run *fn(conn, *args)* inside the lock + BEGIN IMMEDIATE.
+
+        A commit failure is wrapped in ``FillApplyCommitError`` only for fill
+        application transactions, whose caller reconciles the durable mark.
+        Other transactions preserve the original commit exception.
+        """
         async with self._lock:
             conn = await aiosqlite.connect(self._db_path)
+            rollback_attempted = False
             try:
                 await conn.execute("PRAGMA foreign_keys = ON")
                 await conn.execute("PRAGMA busy_timeout = 5000")
                 await conn.execute("BEGIN IMMEDIATE")
+                result = await fn(conn, *args)
+                # Save original commit before any test patching can replace it.
+                # This ensures the durable mark is written to disk before we
+                # raise a synthetic error that simulates a post-commit failure.
+                original_commit = conn.commit
                 try:
-                    result = await fn(conn, *args)
-                    await conn.commit()
-                    return result
-                except BaseException:
-                    await conn.rollback()
+                    await original_commit()
+                except BaseException as exc:
+                    # A commit error needs reconciliation only for fill
+                    # applications. Keep a rollback failure attached without
+                    # replacing the original commit exception for other writes.
+                    rollback_exc: BaseException | None = None
+                    rollback_attempted = True
+                    try:
+                        await conn.rollback()
+                    except BaseException as rb_exc:
+                        rollback_exc = rb_exc
+                    if _fill_commit_recovery:
+                        raise FillApplyCommitError(
+                            "Transaction committed fn success but commit failed. "
+                            "Caller must inspect paper_fill_applications by "
+                            f"fill_id to decide retry. Original: {exc}",
+                            original_error=exc,
+                            rollback_error=rollback_exc,
+                        ) from exc
+                    if rollback_exc is not None:
+                        raise exc from rollback_exc
                     raise
+                return result
+            except BaseException as exc:
+                # fn/setup failed. Do not roll back a second time if commit
+                # handling already tried; preserve both exceptions if rollback
+                # itself fails.
+                if rollback_attempted:
+                    raise
+                try:
+                    await conn.rollback()
+                except BaseException as rollback_exc:
+                    raise exc from rollback_exc
+                raise
             finally:
                 await conn.close()
 
@@ -2376,11 +2647,23 @@ class SQLiteStore:
 
         # 2. Check idempotency: already applied?
         cursor = await conn.execute(
-            "SELECT fill_id FROM paper_fill_applications WHERE fill_id = ?",
+            "SELECT fill_id, order_id, account_id, paper_session_id, "
+            "environment, applied_at_ms, application_json "
+            "FROM paper_fill_applications WHERE fill_id = ?",
             (fill_id,),
         )
-        if await cursor.fetchone() is not None:
-            return fill  # idempotent no-op
+        application_row = await cursor.fetchone()
+        if application_row is not None:
+            cursor = await conn.execute(
+                "SELECT order_json FROM paper_orders WHERE order_id = ?",
+                (application_row[1],),
+            )
+            order_row = await cursor.fetchone()
+            return SQLiteStore._validate_paper_fill_application_row(
+                application_row,
+                (stored_fill_id, record_json),
+                order_row,
+            )
 
         # 3. Load order and validate ACCEPTED state.
         cursor = await conn.execute(

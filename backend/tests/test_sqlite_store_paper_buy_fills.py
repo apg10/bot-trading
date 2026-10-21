@@ -13,6 +13,7 @@ Gate: desde backend
 
 from __future__ import annotations
 
+import aiosqlite
 import asyncio
 import sqlite3
 from decimal import Decimal
@@ -40,6 +41,7 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _PAPER_ORDER_ADAPTER,
     _asset_balance_json_to_model,
+    PaperFillApplyError,
 )
 
 
@@ -2074,3 +2076,651 @@ def test_buy_fill_precision_under_restricted_global_context(tmp_path: Path) -> N
         _run(store.close())
     finally:
         dec_mod.setcontext(old_ctx)
+
+
+def test_commit_failure_precommit_rollback_retry_success(tmp_path: Path) -> None:
+    """Fallo real de commit → FillApplyCommitError conserva error original; recovery reintenta con éxito.
+
+    El commit falla (sin escribir marca durable). El FillApplyCommitError
+    entregado al recovery conserva original_error. El recovery encuentra la
+    orden mutable (ACCEPTED), reintenta y el segundo commit tiene éxito.
+    """
+    db = tmp_path / "commit-rollback-both.db"
+    store = _make_store(db)
+    _open_account(store)
+
+    order = _make_order(order_id="order-cr", requested_qty="2.0", max_quote_amount="300.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+
+    fill = _make_fill(fill_id="fill-cr", order_id="order-cr", qty="2.0", price="100.0")
+    _run(store.save_paper_fill(fill))
+
+    real_commit = aiosqlite.Connection.commit
+    call_count = 0
+
+    async def failing_commit(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Fallo real de commit: nunca invocamos real_commit
+            raise OSError("simulated commit failure")
+        return await real_commit(self, *args, **kwargs)
+
+    caught_exc = [None]
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=failing_commit):
+        try:
+            _run(store.apply_paper_fill("fill-cr"))
+        except FillApplyCommitError as exc:
+            caught_exc[0] = exc
+
+    # Se espera que el recovery reintente y devuelva éxito (caught_exc es None
+    # porque el retry tuvo éxito), pero verificamos que la orden quedó FILLED.
+    conn = sqlite3.connect(str(db))
+    row = conn.execute("SELECT order_json FROM paper_orders WHERE order_id='order-cr'").fetchone()
+    order = PaperOrder.model_validate_json(row[0])
+    conn.close()
+    assert order.status == "filled"
+    _run(store.close())
+
+
+def test_fill_commit_failure_is_recovered_as_fill_commit_error(tmp_path: Path) -> None:
+    db = tmp_path / "fill-commit-error.db"
+    store = _make_store(db)
+    _open_account(store)
+    order = _make_order(order_id="order-fce", requested_qty="1.0", max_quote_amount="150.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+    _run(store.save_paper_fill(_make_fill(fill_id="fill-fce", order_id="order-fce", qty="1.0")))
+
+    real_commit = aiosqlite.Connection.commit
+    commit_error = OSError("fill commit failed")
+    commit_count = 0
+
+    async def fail_first_commit(self, *args, **kwargs):
+        nonlocal commit_count
+        commit_count += 1
+        if commit_count == 1:
+            raise commit_error
+        return await real_commit(self, *args, **kwargs)
+
+    original_recover = store._recover_fill_commit
+    observed_errors = []
+
+    async def observe_recovery(fill_id, original_exc):
+        observed_errors.append(original_exc)
+        return await original_recover(fill_id, original_exc)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=fail_first_commit):
+        with mock.patch.object(store, "_recover_fill_commit", new=observe_recovery):
+            assert _run(store.apply_paper_fill("fill-fce")).fill_id == "fill-fce"
+
+    assert len(observed_errors) == 1
+    assert isinstance(observed_errors[0], FillApplyCommitError)
+    assert observed_errors[0].original_error is commit_error
+    assert observed_errors[0].rollback_error is None
+    assert commit_count == 2
+    _run(store.close())
+
+
+def test_non_fill_commit_failure_preserves_original_error(tmp_path: Path) -> None:
+    db = tmp_path / "non-fill-commit-error.db"
+    store = _make_store(db)
+    order = _make_order(order_id="order-nfc")
+
+    commit_error = OSError("non-fill commit failed")
+    rollback_error = RuntimeError("rollback failed")
+
+    async def fail_commit(self, *args, **kwargs):
+        raise commit_error
+
+    async def fail_rollback(self, *args, **kwargs):
+        raise rollback_error
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=fail_commit):
+        with mock.patch.object(aiosqlite.Connection, "rollback", new=fail_rollback):
+            with pytest.raises(OSError) as raised:
+                _run(store.register_paper_order(order))
+
+    assert raised.value is commit_error
+    assert not isinstance(raised.value, FillApplyCommitError)
+    assert raised.value.__cause__ is rollback_error
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT order_id FROM paper_orders WHERE order_id='order-nfc'"
+    ).fetchone() is None
+    conn.close()
+    _run(store.close())
+
+
+def test_commit_failure_real_commit_synthetic_error_idempotent(tmp_path: Path) -> None:
+    """Commit real seguido de error sintético → marca presente y éxito idempotente.
+
+    El commit original se ejecuta (marca durable se escribe en disco), luego
+    se lanza un error sintético. La recuperación encuentra la marca y devuelve
+    éxito. Una segunda llamada confirma idempotencia.
+    """
+    db = tmp_path / "real-commit-synthetic.db"
+    store = _make_store(db)
+    _open_account(store)
+
+    order = _make_order(order_id="order-rsc", requested_qty="2.0", max_quote_amount="300.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+
+    fill = _make_fill(fill_id="fill-rsc", order_id="order-rsc", qty="2.0", price="100.0")
+    _run(store.save_paper_fill(fill))
+
+    # Guardar referencia real ANTES de cualquier parche
+    real_commit = aiosqlite.Connection.commit
+    call_count = 0
+
+    async def post_commit_error(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Commit real primero (escribe marca durable)
+            await real_commit(self, *args, **kwargs)
+            # Luego error sintético
+            raise OSError("simulated post-commit failure")
+        return await real_commit(self, *args, **kwargs)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=post_commit_error):
+        applied = _run(store.apply_paper_fill("fill-rsc"))
+        assert applied.fill_id == "fill-rsc"
+
+    # Verificar marca durable en disco
+    conn = sqlite3.connect(str(db))
+    mark_row = conn.execute("SELECT fill_id FROM paper_fill_applications WHERE fill_id='fill-rsc'").fetchone()
+    assert mark_row is not None, "La marca durable debe existir en disco"
+    conn.close()
+
+    # Idempotencia: segunda llamada también debe tener éxito
+    applied2 = _run(store.apply_paper_fill("fill-rsc"))
+    assert applied2.fill_id == "fill-rsc"
+    _run(store.close())
+
+
+def test_commit_failure_terminal_order_between_failure_and_recovery(tmp_path: Path) -> None:
+    """Rollback del commit fallido, cancelación válida y recovery terminal.
+
+    Seguimiento para otro subtask: ``test_commit_failure_rollback_error_preserved``
+    aún no ejercita un error de rollback; el alcance de producción/error de marca
+    durable requiere revisión separada. ACT-P-002/003 siguen PENDIENTES.
+    """
+    db = tmp_path / "terminal-between.db"
+    store = _make_store(db)
+    _open_account(store)
+
+    order = _make_order(order_id="order-term", requested_qty="2.0", max_quote_amount="300.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+
+    fill = _make_fill(fill_id="fill-term", order_id="order-term", qty="2.0", price="100.0")
+    _run(store.save_paper_fill(fill))
+
+    real_commit = aiosqlite.Connection.commit
+    call_count = 0
+    recovery_hook_called = False
+
+    async def failing_commit(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Fallar antes de confirmar: _write debe hacer rollback antes del hook.
+            raise OSError("simulated commit failure")
+        return await real_commit(self, *args, **kwargs)
+
+    # Cancelar solo después del rollback y antes de la lectura de recovery.
+    original_recover = store._recover_fill_commit
+
+    async def patched_recover(fill_id: str, original_exc):
+        nonlocal recovery_hook_called
+        assert fill_id == "fill-term"
+        await store.cancel_paper_order("order-term")
+        recovery_hook_called = True
+        return await original_recover(fill_id, original_exc)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=failing_commit):
+        with mock.patch.object(store, "_recover_fill_commit", new=patched_recover):
+            with pytest.raises(PaperFillApplyError, match="Cannot apply fill fill-term"):
+                _run(store.apply_paper_fill("fill-term"))
+
+    # Verificar que el hook de recovery se ejecutó
+    assert recovery_hook_called is True
+    # El primer commit de aplicación falló; el segundo, real, fue el de cancelación.
+    assert call_count == 2
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT fill_id FROM paper_fill_applications WHERE fill_id='fill-term'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT fill_id FROM paper_fills WHERE fill_id='fill-term'"
+    ).fetchone() is not None
+    row = conn.execute("SELECT order_json FROM paper_orders WHERE order_id='order-term'").fetchone()
+    order = PaperOrder.model_validate_json(row[0])
+    assert order.status == "cancelled"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_lots WHERE order_id='order-term'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_reservations WHERE owner_order_id='order-term'"
+    ).fetchone()[0] == 0
+    quote_bal = AssetBalance.model_validate_json(
+        conn.execute("SELECT balance_json FROM paper_account_balances WHERE asset='QUOTE'").fetchone()[0]
+    )
+    base_bal = AssetBalance.model_validate_json(
+        conn.execute("SELECT balance_json FROM paper_account_balances WHERE asset='BASE'").fetchone()[0]
+    )
+    conn.close()
+    # No accounting from the failed fill; cancellation releases the full reserve.
+    assert (quote_bal.total, quote_bal.available, quote_bal.reserved) == (
+        Decimal("10000"), Decimal("10000"), Decimal("0")
+    )
+    assert (base_bal.total, base_bal.available, base_bal.reserved) == (
+        Decimal("0"), Decimal("0"), Decimal("0")
+    )
+    _run(store.close())
+
+
+def test_idempotency_after_successful_commit(tmp_path: Path) -> None:
+    """Múltiples llamadas a apply_paper_fill con el mismo fill_id deben ser idempotentes tras commit exitoso."""
+    db = tmp_path / "idempotent.db"
+    store = _make_store(db)
+    _open_account(store)
+
+    order = _make_order(requested_qty="2.0", max_quote_amount="300.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+
+    fill = _make_fill(qty="2.0", price="100.0")
+    _run(store.save_paper_fill(fill))
+
+    # Primera aplicación
+    applied1 = _run(store.apply_paper_fill("fill-1"))
+    assert applied1.fill_id == "fill-1"
+
+    # Segunda aplicación (idempotente)
+    applied2 = _run(store.apply_paper_fill("fill-1"))
+    assert applied2.fill_id == "fill-1"
+
+    # Verificar que solo hay una marca durable
+    conn = sqlite3.connect(str(db))
+    mark_rows = conn.execute("SELECT fill_id FROM paper_fill_applications").fetchall()
+    assert len(mark_rows) == 1
+    conn.close()
+
+    # Verificar que la orden está en FILLED
+    conn = sqlite3.connect(str(db))
+    order_row = conn.execute("SELECT order_json FROM paper_orders WHERE order_id='order-1'").fetchone()
+    order = PaperOrder.model_validate_json(order_row[0])
+    assert order.status == "filled"
+    conn.close()
+    _run(store.close())
+
+
+# ── Fase 3: FillApplyCommitError recovery ──────────────────────────────────────
+
+from unittest import mock
+
+from src.persistence.sqlite_store import (
+    FillApplyCommitError,
+    StoreCorruptionError,
+)
+
+
+
+def test_commit_failure_precommit_retry_success(tmp_path: Path) -> None:
+    """Fallo pre-commit → rollback, marca ausente y retry automático exitoso.
+
+    El commit falla ANTES de escribir la marca durable (sin llamar al commit
+    original). La orden queda en ACCEPTED. El recovery encuentra la orden
+    mutable, reintenta y el segundo commit tiene éxito.
+    """
+    db = tmp_path / "precommit-retry.db"
+    store = _make_store(db)
+    _open_account(store)
+
+    order = _make_order(order_id="order-retry", requested_qty="1.0", max_quote_amount="150.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+
+    fill = _make_fill(fill_id="fill-retry", order_id="order-retry", qty="1.0", price="100.0")
+    _run(store.save_paper_fill(fill))
+
+    # Guardar referencia real ANTES de cualquier parche
+    real_commit = aiosqlite.Connection.commit
+    call_count = 0
+
+    async def failing_commit(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Fallo pre-commit: nunca invocamos real_commit
+            raise OSError("simulated pre-commit failure")
+        # Retries posteriores usan el commit original real
+        return await real_commit(self, *args, **kwargs)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=failing_commit):
+        applied = _run(store.apply_paper_fill("fill-retry"))
+        assert applied.fill_id == "fill-retry"
+
+    # Verificar que la orden quedó FILLED tras el retry exitoso
+    conn = sqlite3.connect(str(db))
+    row = conn.execute("SELECT order_json FROM paper_orders WHERE order_id='order-retry'").fetchone()
+    order = PaperOrder.model_validate_json(row[0])
+    conn.close()
+    assert order.status == "filled"
+    _run(store.close())
+
+
+def _recovery_state_snapshot(db: Path, order_id: str, fill_id: str) -> tuple[Any, ...]:
+    conn = sqlite3.connect(str(db))
+    order_row = conn.execute(
+        "SELECT order_json FROM paper_orders WHERE order_id=?", (order_id,)
+    ).fetchone()
+    balances = conn.execute(
+        "SELECT asset, balance_json FROM paper_account_balances "
+        "WHERE account_id='acc-1' ORDER BY asset"
+    ).fetchall()
+    reservation = conn.execute(
+        "SELECT * FROM paper_reservations WHERE owner_order_id=?", (order_id,)
+    ).fetchall()
+    lot_allocations = conn.execute(
+        "SELECT * FROM paper_reservation_lot_allocations WHERE owner_order_id=?",
+        (order_id,),
+    ).fetchall()
+    lots = conn.execute(
+        "SELECT * FROM position_lots WHERE order_id=?", (order_id,)
+    ).fetchall()
+    journal = conn.execute(
+        "SELECT fill_id, record_json FROM paper_fills WHERE fill_id=?", (fill_id,)
+    ).fetchall()
+    applications = conn.execute(
+        "SELECT * FROM paper_fill_applications WHERE fill_id=?", (fill_id,)
+    ).fetchall()
+    accounting = conn.execute(
+        "SELECT * FROM paper_sell_accounting WHERE fill_id=?", (fill_id,)
+    ).fetchall()
+    conn.close()
+    return (
+        order_row,
+        balances,
+        reservation,
+        lot_allocations,
+        lots,
+        journal,
+        applications,
+        accounting,
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "order_id",
+        "account_id",
+        "paper_session_id",
+        "environment",
+        "applied_at_ms",
+        "application_json",
+    ),
+)
+def test_recovery_rejects_durable_application_mark_mismatch_without_mutation(
+    tmp_path: Path, field: str
+) -> None:
+    db = tmp_path / f"durable-mark-mismatch-{field}.db"
+    store = _make_store(db)
+    _open_account(store)
+    order = _make_order(order_id="order-mark-check", requested_qty="2.0")
+    other_order = _make_order(order_id="order-other", requested_qty="1.0")
+    _run(store.register_paper_order(order))
+    _run(store.register_paper_order(other_order))
+    _accept_order(store, order)
+    fill = _make_fill(
+        fill_id="fill-mark-check", order_id=order.order_id, qty="2.0", price="100.0"
+    )
+    _run(store.save_paper_fill(fill))
+    _run(store.apply_paper_fill(fill.fill_id))
+
+    conn = sqlite3.connect(str(db))
+    if field == "environment":
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        value: Any = "paper-other"
+    elif field == "order_id":
+        value = other_order.order_id
+    elif field == "account_id":
+        value = "other-account"
+    elif field == "paper_session_id":
+        value = "other-session"
+    elif field == "applied_at_ms":
+        value = fill.timestamp_ms + 1
+    else:
+        mismatched_fill = _make_fill(
+            fill_id=fill.fill_id,
+            order_id=fill.order_id,
+            qty=fill.qty,
+            price="101.0",
+            timestamp_ms=fill.timestamp_ms,
+            commission=fill.commission,
+        )
+        value = mismatched_fill.model_dump_json()
+    conn.execute(
+        f"UPDATE paper_fill_applications SET {field}=? WHERE fill_id=?",
+        (value, fill.fill_id),
+    )
+    conn.commit()
+    conn.close()
+    corrupted_state = _recovery_state_snapshot(db, order.order_id, fill.fill_id)
+
+    with pytest.raises(StoreCorruptionError):
+        _run(
+            store._recover_fill_commit(
+                fill.fill_id,
+                FillApplyCommitError("controlled durable-mark inconsistency"),
+            )
+        )
+
+    assert _recovery_state_snapshot(db, order.order_id, fill.fill_id) == corrupted_state
+    _run(store.close())
+
+
+def test_recovery_wraps_corrupt_order_json_after_precommit_rollback(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "recovery-corrupt-order-json.db"
+    store = _make_store(db)
+    _open_account(store)
+    order = _make_order(order_id="order-corrupt-recovery", requested_qty="2.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+    fill = _make_fill(
+        fill_id="fill-corrupt-recovery",
+        order_id=order.order_id,
+        qty="2.0",
+        price="100.0",
+    )
+    _run(store.save_paper_fill(fill))
+    state_before = _recovery_state_snapshot(db, order.order_id, fill.fill_id)
+
+    real_commit = aiosqlite.Connection.commit
+    commit_calls = 0
+
+    async def fail_precommit_once(self, *args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            raise OSError("controlled precommit failure")
+        return await real_commit(self, *args, **kwargs)
+
+    original_recover = store._recover_fill_commit
+
+    async def corrupt_order_before_reread(fill_id, original_exc):
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "UPDATE paper_orders SET order_json=? WHERE order_id=?",
+            ("{invalid-json", order.order_id),
+        )
+        conn.commit()
+        conn.close()
+        return await original_recover(fill_id, original_exc)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=fail_precommit_once):
+        with mock.patch.object(store, "_recover_fill_commit", new=corrupt_order_before_reread):
+            with pytest.raises(StoreCorruptionError, match="corrupt order JSON"):
+                _run(store.apply_paper_fill(fill.fill_id))
+
+    assert commit_calls == 1
+    state_after = _recovery_state_snapshot(db, order.order_id, fill.fill_id)
+    # Order JSON is deliberately corrupted by the test hook. The failed fill
+    # transaction must leave every other durable effect unchanged.
+    assert state_after[1:] == state_before[1:]
+    assert state_after[5]  # journal row remains
+    assert not state_after[6]  # no application mark was written
+    _run(store.close())
+
+
+def test_fill_commit_and_rollback_errors_are_preserved_during_recovery(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "fill-commit-rollback-errors.db"
+    store = _make_store(db)
+    _open_account(store)
+    order = _make_order(order_id="order-fill-rollback", requested_qty="2.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+    fill = _make_fill(
+        fill_id="fill-rollback-errors",
+        order_id=order.order_id,
+        qty="2.0",
+        price="100.0",
+    )
+    _run(store.save_paper_fill(fill))
+
+    commit_error = OSError("controlled fill commit failure")
+    rollback_error = RuntimeError("controlled fill rollback failure")
+    real_commit = aiosqlite.Connection.commit
+    real_rollback = aiosqlite.Connection.rollback
+    commit_calls = 0
+    rollback_calls = 0
+    observed_errors: list[FillApplyCommitError] = []
+    original_recover = store._recover_fill_commit
+
+    async def fail_first_commit(self, *args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            raise commit_error
+        return await real_commit(self, *args, **kwargs)
+
+    async def fail_first_rollback(self, *args, **kwargs):
+        nonlocal rollback_calls
+        rollback_calls += 1
+        if rollback_calls == 1:
+            raise rollback_error
+        return await real_rollback(self, *args, **kwargs)
+
+    async def observe_recovery(fill_id, original_error):
+        observed_errors.append(original_error)
+        return await original_recover(fill_id, original_error)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=fail_first_commit):
+        with mock.patch.object(aiosqlite.Connection, "rollback", new=fail_first_rollback):
+            with mock.patch.object(store, "_recover_fill_commit", new=observe_recovery):
+                applied = _run(store.apply_paper_fill(fill.fill_id))
+
+    assert applied.fill_id == fill.fill_id
+    assert commit_calls == 2  # first fails; recovery retry commits once
+    assert rollback_calls == 1  # the failed rollback is retained, not retried silently
+    assert len(observed_errors) == 1
+    assert observed_errors[0].original_error is commit_error
+    assert observed_errors[0].rollback_error is rollback_error
+
+    state = _recovery_state_snapshot(db, order.order_id, fill.fill_id)
+    assert PaperOrder.model_validate_json(state[0][0]).status == "filled"
+    assert len(state[6]) == 1
+    assert len(state[5]) == 1
+    _run(store.close())
+
+
+def test_recovery_read_failure_is_indeterminate_and_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "recovery-read-failure.db"
+    store = _make_store(db)
+    _open_account(store)
+    order = _make_order(order_id="order-read-failure", requested_qty="2.0")
+    _run(store.register_paper_order(order))
+    _accept_order(store, order)
+    fill = _make_fill(
+        fill_id="fill-read-failure",
+        order_id=order.order_id,
+        qty="2.0",
+        price="100.0",
+    )
+    _run(store.save_paper_fill(fill))
+
+    commit_error = OSError("controlled lost commit acknowledgment")
+    read_error = OSError("controlled durable-mark read failure")
+    real_commit = aiosqlite.Connection.commit
+    real_connect = aiosqlite.connect
+    commit_calls = 0
+    connection_calls = 0
+
+    async def commit_then_lose_ack(self, *args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        await real_commit(self, *args, **kwargs)
+        if commit_calls == 1:
+            raise commit_error
+
+    class FailDurableMarkReadConnection:
+        def __init__(self, conn):
+            self._conn = conn
+
+        async def execute(self, sql, *args, **kwargs):
+            if "from paper_fill_applications" in sql.lower():
+                raise read_error
+            return await self._conn.execute(sql, *args, **kwargs)
+
+        async def close(self):
+            return await self._conn.close()
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    async def fail_mark_read_on_recovery_connection(*args, **kwargs):
+        nonlocal connection_calls
+        connection_calls += 1
+        conn = await real_connect(*args, **kwargs)
+        if connection_calls == 2:  # connection 1 writes; connection 2 rereads mark
+            return FailDurableMarkReadConnection(conn)
+        return conn
+
+    with mock.patch.object(
+        aiosqlite.Connection, "commit", new=commit_then_lose_ack
+    ):
+        with mock.patch.object(
+            aiosqlite, "connect", new=fail_mark_read_on_recovery_connection
+        ):
+            with pytest.raises(
+                StoreCorruptionError,
+                match="Cannot read paper_fill_applications",
+            ):
+                _run(store.apply_paper_fill(fill.fill_id))
+
+    assert commit_calls == 1  # durable commit occurred; no retry was attempted
+    assert connection_calls == 2  # write connection plus recovery reread only
+    _run(store.close())
+
+    reopened = _make_store(db)
+    committed_state = _recovery_state_snapshot(db, order.order_id, fill.fill_id)
+    assert PaperOrder.model_validate_json(committed_state[0][0]).status == "filled"
+    assert len(committed_state[6]) == 1
+    assert len(committed_state[5]) == 1
+    applied_again = _run(reopened.apply_paper_fill(fill.fill_id))
+    assert applied_again.fill_id == fill.fill_id
+    assert _recovery_state_snapshot(db, order.order_id, fill.fill_id) == committed_state
+    _run(reopened.close())
