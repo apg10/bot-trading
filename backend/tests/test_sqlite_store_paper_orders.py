@@ -22,6 +22,8 @@ from src.models.paper_contracts import (
     AssetBalance,
     StrategyRef,
 )
+from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot
+from src.models.paper_symbol_filters import LotSizeFilter, MinNotionalFilter, MarketLotSizeFilter, PriceFilter, SymbolFilterSnapshot
 from src.persistence import sqlite_store as sqlite_store_module
 from src.persistence.sqlite_store import (
     PaperOrderContextConflictError,
@@ -87,6 +89,27 @@ def _make_store(db: Path) -> SQLiteStore:
     store = SQLiteStore(db)
     _run(store.initialize())
     return store
+
+
+def _accept(store: SQLiteStore, order_id: str):
+    order = _run(store.load_paper_order(order_id))
+    quote = order.symbol.split("/")[1]
+    policy = PaperRiskPolicy(policy_id="fixture", policy_version="1", account_id=order.paper_account_id, quote_asset=quote,
+        max_order_notional=Decimal("1000000"), max_total_exposure=Decimal("1000000"), max_daily_loss=Decimal("1000000"))
+    snapshot = PaperRiskSnapshot(account_id=order.paper_account_id, quote_asset=quote, market_symbol=order.symbol,
+        market_mark_price=Decimal("10"), market_reference="fixture", market_timestamp_ms=1,
+        equity_reference="fixture", equity_timestamp_ms=1, equity_utc_day_start=Decimal("1000000"),
+        equity_current_marked=Decimal("1000000"), exposure_reference="fixture", exposure_timestamp_ms=1,
+        marked_open_inventory=Decimal("0"), remaining_buy_reservations=Decimal("0"))
+    base, quote = order.symbol.split("/")
+    filters = SymbolFilterSnapshot(snapshot_id="fixture", filter_set_id="fixture", filter_set_version="1",
+        source_id="fixture", source_version="1", capture_timestamp_ms=1, symbol=order.symbol, base_asset=base, quote_asset=quote,
+        price_filter=PriceFilter(min_price=Decimal("0"), max_price=Decimal("0"), tick_size=Decimal("0")),
+        lot_size=LotSizeFilter(min_qty=Decimal("0.0000000001"), max_qty=Decimal("100000000"), step_size=order.requested_qty),
+        market_lot_size=MarketLotSizeFilter(min_qty=Decimal("0.0000000001"), max_qty=Decimal("100000000"), step_size=order.requested_qty),
+        min_notional=MinNotionalFilter(min_notional=Decimal("0.00000001"), applies_to_market=False, avg_price_mins=0),
+        notional=None, unhandled_filter_types=())
+    return _run(store.accept_paper_order(order_id, policy, snapshot, filters))
 
 
 def test_register_and_load_initial_order_context(tmp_path: Path) -> None:
@@ -440,7 +463,7 @@ def test_real_reopen_cancel_repeat_compare_full_state(tmp_path: Path) -> None:
 
     order = _make_buy_order(order_id="ord-reopen", price="50.0")
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order("ord-reopen"))
+    _accept(store, "ord-reopen")
 
     # Snapshot before first cancel
     conn = sqlite3.connect(str(db))
@@ -523,7 +546,7 @@ def test_cancel_partially_filled_preserves_fills_lot_cost_inventory_commissions(
 
     order = _make_buy_order(order_id="ord-partial", price="50.0")
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order("ord-partial"))
+    _accept(store, "ord-partial")
 
     # Apply one partial fill
     fill1 = _make_fill(fill_id="fill-p2", order_id="ord-partial", qty="1.0", price="40.0")
@@ -617,12 +640,12 @@ def test_another_order_of_same_asset_preserves_reservation(tmp_path: Path) -> No
     # Order A to be cancelled
     order_a = _make_buy_order(order_id="ord-a", price="50.0")
     _run(store.register_paper_order(order_a))
-    _run(store.accept_paper_order("ord-a"))
+    _accept(store, "ord-a")
 
     # Order B on the same account to verify isolation
     order_b = _make_buy_order(order_id="ord-b", account_id="acc-1", price="60.0")
     _run(store.register_paper_order(order_b))
-    _run(store.accept_paper_order("ord-b"))
+    _accept(store, "ord-b")
 
     # Cancel order A
     _run(store.cancel_paper_order("ord-a"))
@@ -651,7 +674,7 @@ def test_repeated_cancel_after_reopen_is_idempotent(tmp_path: Path) -> None:
 
     order = _make_buy_order(order_id="ord-idem", price="50.0")
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order("ord-idem"))
+    _accept(store, "ord-idem")
 
     # Capture acceptance snapshot before cancel
     conn = sqlite3.connect(str(db))
@@ -765,7 +788,7 @@ def test_terminal_states_rejected_and_prepared_out_of_scope(tmp_path: Path) -> N
     # ── FILLED ────────────────────────────────────────────────────────
     order_filled = _make_buy_order(order_id="ord-filled2", price="50.0")
     _run(store.register_paper_order(order_filled))
-    _run(store.accept_paper_order("ord-filled2"))
+    _accept(store, "ord-filled2")
     fill_f = _make_fill(fill_id="fill-f2", order_id="ord-filled2", qty="2.0", price="50.0")
     _run(store.save_paper_fill(fill_f))
     _run(store.apply_paper_fill("fill-f2"))
@@ -864,7 +887,7 @@ def test_cancel_vs_fill_race_accepts_serialized_results(tmp_path: Path) -> None:
 
     order = _make_buy_order(order_id="ord-race2", price="50.0")
     _run(store_a.register_paper_order(order))
-    _run(store_a.accept_paper_order("ord-race2"))
+    _accept(store_a, "ord-race2")
 
     fill_partial = _make_fill(fill_id="fill-partial-race2", order_id="ord-race2", qty="1.0", price="40.0")
     _run(store_a.save_paper_fill(fill_partial))
@@ -1007,7 +1030,7 @@ def test_cancel_rollback_on_quote_balance_trigger(tmp_path: Path) -> None:
 
     order = _make_buy_order(order_id="ord-trig", price="50.0")
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order("ord-trig"))
+    _accept(store, "ord-trig")
 
     # Inject trigger after balance update
     conn = sqlite3.connect(str(db))
@@ -1060,7 +1083,7 @@ def test_cancel_rollback_on_reservation_delete_trigger(tmp_path: Path) -> None:
 
     order = _make_buy_order(order_id="ord-trig2", price="50.0")
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order("ord-trig2"))
+    _accept(store, "ord-trig2")
 
     conn = sqlite3.connect(str(db))
     conn.execute(
@@ -1111,7 +1134,7 @@ def test_cancel_rollback_on_order_update_trigger(tmp_path: Path) -> None:
 
     order = _make_buy_order(order_id="ord-trig3", price="50.0")
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order("ord-trig3"))
+    _accept(store, "ord-trig3")
 
     conn = sqlite3.connect(str(db))
     conn.execute(
@@ -1163,7 +1186,7 @@ def test_journal_fill_preserved_after_cancel_rollback(tmp_path: Path) -> None:
 
     order = _make_buy_order(order_id="ord-journal", price="50.0")
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order("ord-journal"))
+    _accept(store, "ord-journal")
 
     # Journalize a fill (separate from cancel)
     journal_fill = _make_fill(fill_id="fill-journal", order_id="ord-journal", qty="1.0", price="40.0")

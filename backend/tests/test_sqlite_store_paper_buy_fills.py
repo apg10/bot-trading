@@ -34,6 +34,8 @@ from src.models.paper_contracts import (
     PaperReservationRef,
     ReservationAmount,
 )
+from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot
+from src.models.paper_symbol_filters import LotSizeFilter, MinNotionalFilter, MarketLotSizeFilter, PriceFilter, SymbolFilterSnapshot
 from src.persistence.sqlite_store import (
     PaperFillIntegrityError,
     PaperOrderAcceptanceFundsError,
@@ -118,8 +120,24 @@ def _make_order(
 
 
 def _accept_order(store: SQLiteStore, order: PaperOrder) -> PaperOrder:
-    """Accept an order (reserves QUOTE)."""
-    return _run(store.accept_paper_order(order.order_id))
+    """Accept with explicit test-only risk and symbol-filter snapshots."""
+    quote = order.symbol.split("/")[1]
+    policy = PaperRiskPolicy(policy_id="fixture", policy_version="1", account_id=order.paper_account_id, quote_asset=quote,
+        max_order_notional=Decimal("1000000"), max_total_exposure=Decimal("1000000"), max_daily_loss=Decimal("1000000"))
+    snapshot = PaperRiskSnapshot(account_id=order.paper_account_id, quote_asset=quote, market_symbol=order.symbol,
+        market_mark_price=Decimal("10"), market_reference="fixture", market_timestamp_ms=1,
+        equity_reference="fixture", equity_timestamp_ms=1, equity_utc_day_start=Decimal("1000000"),
+        equity_current_marked=Decimal("1000000"), exposure_reference="fixture", exposure_timestamp_ms=1,
+        marked_open_inventory=Decimal("0"), remaining_buy_reservations=Decimal("0"))
+    base, quote = order.symbol.split("/")
+    filters = SymbolFilterSnapshot(snapshot_id="fixture", filter_set_id="fixture", filter_set_version="1",
+        source_id="fixture", source_version="1", capture_timestamp_ms=1, symbol=order.symbol, base_asset=base, quote_asset=quote,
+        price_filter=PriceFilter(min_price=Decimal("0"), max_price=Decimal("0"), tick_size=Decimal("0")),
+        lot_size=LotSizeFilter(min_qty=Decimal("0.0000000001"), max_qty=Decimal("100000000"), step_size=order.requested_qty),
+        market_lot_size=MarketLotSizeFilter(min_qty=Decimal("0.0000000001"), max_qty=Decimal("100000000"), step_size=order.requested_qty),
+        min_notional=MinNotionalFilter(min_notional=Decimal("0.00000001"), applies_to_market=False, avg_price_mins=0),
+        notional=None, unhandled_filter_types=())
+    return _run(store.accept_paper_order(order.order_id, policy, snapshot, filters))
 
 
 def _make_fill(

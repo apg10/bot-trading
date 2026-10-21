@@ -19,8 +19,10 @@ fill application marks (paper_fill_applications) and aggregated position lots
 (position_lots) required by ACT-P-002 fill application (v10). It applies BUY and SELL
 fill execution, admits BUY and SELL order cancellation (ACCEPTED / PARTIALLY_FILLED),
 and implements SELL lot reservations with paper_reservation_lot_allocations and
-paper_sell_accounting tables (v11). It does NOT implement OCO order branching, risk
-management, matching, execution, backtesting or replay.
+paper_sell_accounting tables (v11). It also gates new BUY admission atomically
+against explicit risk/filter snapshots. It does NOT implement OCO order branching,
+general risk management beyond those admission gates, external execution,
+backtesting or replay.
 
 Schema versions:
     v0 — original session/config/dataset schema (no tables by default).
@@ -92,6 +94,11 @@ from src.models.paper_contracts import (
     _POSITION_AVERAGE_CONTEXT,
     _exact_product,
     _exact_sum,
+)
+from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot, PaperRiskResult, evaluate_paper_risk
+from src.models.paper_symbol_filters import (
+    MarketNotionalReference, SymbolFilterSnapshot, SymbolFilterResult,
+    validate_symbol_filters,
 )
 from src.models.strategy_config import StrategyConfig
 
@@ -458,6 +465,16 @@ class PaperOrderAcceptanceIntegrityError(ValueError):
 
 class PaperOrderAcceptanceScopeError(ValueError):
     """Order is outside the authorized BUY LIMIT/MARKET acceptance slice."""
+
+
+class PaperOrderAcceptanceGateError(ValueError):
+    """Risk or symbol-filter gate rejected acceptance without changing state."""
+
+    def __init__(self, code: str, risk_result: PaperRiskResult, filter_result: SymbolFilterResult):
+        self.code = code
+        self.risk_result = risk_result
+        self.filter_result = filter_result
+        super().__init__(code)
 
 
 class PaperOrderCancellationStateError(ValueError):
@@ -1211,12 +1228,21 @@ class SQLiteStore:
             lambda conn: self._load_paper_order_inner(conn, order_id)
         )
 
-    async def accept_paper_order(self, order_id: str) -> PaperOrder:
-        """Atomically reserve BUY quote or SELL base and accept one order.
+    async def accept_paper_order(
+        self,
+        order_id: str,
+        risk_policy: PaperRiskPolicy | None = None,
+        risk_snapshot: PaperRiskSnapshot | None = None,
+        symbol_filter_snapshot: SymbolFilterSnapshot | None = None,
+        market_notional_references: MarketNotionalReference | Sequence[MarketNotionalReference] | None = None,
+    ) -> PaperOrder:
+        """Atomically gate/reserve a BUY or reserve a SELL, then accept one order.
 
         The service derives the reservation from the persisted order and current
         account balance; callers cannot supply a reserve amount or stale balance.
-        Retries use the immutable acceptance record and never recompute a reserve.
+        A new BUY requires explicit risk/filter snapshots and evaluates them against
+        transaction-local reservations before any write. Retries use the immutable
+        acceptance record and never recompute a reserve.
         """
         if self._closed:
             raise StoreClosedError("store is closed")
@@ -1225,7 +1251,10 @@ class SQLiteStore:
         if not isinstance(order_id, str) or not order_id:
             raise ValueError("order_id must be a non-empty string")
         return await self._write(
-            lambda conn: self._accept_paper_order_inner(conn, order_id)
+            lambda conn: self._accept_paper_order_inner(
+                conn, order_id, risk_policy, risk_snapshot, symbol_filter_snapshot,
+                market_notional_references,
+            )
         )
 
     async def load_paper_reservation(
@@ -2057,17 +2086,155 @@ class SQLiteStore:
     def _build_acceptance_payload_json(
         initial_order_json: str,
         reservation: PaperReservationRef,
+        gate_receipt: dict[str, Any] | None = None,
     ) -> str:
         """Canonical immutable acceptance payload; deliberately excludes live balance."""
         return json.dumps(
             {
-                "schema_version": "paper_order_acceptance.v1",
+                "schema_version": "paper_order_acceptance.v2" if gate_receipt is not None else "paper_order_acceptance.v1",
                 "initial_order": json.loads(initial_order_json),
                 "reservation": json.loads(reservation.model_dump_json()),
+                **({"gate_receipt": gate_receipt} if gate_receipt is not None else {}),
             },
             sort_keys=True,
             separators=(",", ":"),
         )
+
+    @staticmethod
+    def _validate_acceptance_gate_receipt(
+        order: PaperOrder, receipt: Any
+    ) -> dict[str, Any]:
+        """Validate the versioned, non-numeric gate evidence in a v2 receipt."""
+        required_keys = {
+            "risk_approved",
+            "risk_policy_id",
+            "risk_policy_version",
+            "risk_snapshot",
+            "symbol_filter_approved",
+            "filter_snapshot_id",
+            "filter_set_id",
+            "filter_set_version",
+            "filter_source_id",
+            "filter_source_version",
+            "market_references",
+        }
+        if order.side != PaperOrderSide.BUY or not isinstance(receipt, dict):
+            raise PaperOrderAcceptanceIntegrityError(
+                "v2 gate receipt requires a BUY order and an object payload"
+            )
+        if set(receipt) != required_keys:
+            raise PaperOrderAcceptanceIntegrityError(
+                "v2 gate receipt has missing or unsupported fields"
+            )
+        if (
+            receipt["risk_approved"] != "risk_approved"
+            or receipt["symbol_filter_approved"] != "symbol_filter_approved"
+        ):
+            raise PaperOrderAcceptanceIntegrityError(
+                "v2 gate receipt must record both approvals"
+            )
+        string_keys = (
+            "risk_policy_id",
+            "risk_policy_version",
+            "filter_snapshot_id",
+            "filter_set_id",
+            "filter_set_version",
+            "filter_source_id",
+            "filter_source_version",
+        )
+        if any(
+            not isinstance(receipt[key], str) or not receipt[key].strip()
+            for key in string_keys
+        ):
+            raise PaperOrderAcceptanceIntegrityError(
+                "v2 gate receipt contains a blank identity/reference"
+            )
+
+        risk_snapshot = receipt["risk_snapshot"]
+        risk_snapshot_keys = {
+            "market_reference",
+            "market_timestamp_ms",
+            "equity_reference",
+            "equity_timestamp_ms",
+            "exposure_reference",
+            "exposure_timestamp_ms",
+        }
+        if (
+            not isinstance(risk_snapshot, dict)
+            or set(risk_snapshot) != risk_snapshot_keys
+            or any(
+                not isinstance(risk_snapshot[key], str)
+                or not risk_snapshot[key].strip()
+                for key in (
+                    "market_reference",
+                    "equity_reference",
+                    "exposure_reference",
+                )
+            )
+            or any(
+                isinstance(risk_snapshot[key], bool)
+                or not isinstance(risk_snapshot[key], int)
+                or risk_snapshot[key] < 0
+                for key in (
+                    "market_timestamp_ms",
+                    "equity_timestamp_ms",
+                    "exposure_timestamp_ms",
+                )
+            )
+        ):
+            raise PaperOrderAcceptanceIntegrityError(
+                "v2 gate receipt has invalid risk-snapshot references"
+            )
+
+        market_references = receipt["market_references"]
+        market_reference_keys = {
+            "symbol",
+            "source",
+            "source_version",
+            "timestamp_ms",
+            "avg_price_mins",
+        }
+        if not isinstance(market_references, list):
+            raise PaperOrderAcceptanceIntegrityError(
+                "v2 market-reference receipt must be a list"
+            )
+        seen_references: set[tuple[str, str, str, int, int]] = set()
+        for market_reference in market_references:
+            if (
+                not isinstance(market_reference, dict)
+                or set(market_reference) != market_reference_keys
+                or any(
+                    not isinstance(market_reference[key], str)
+                    or not market_reference[key].strip()
+                    for key in ("symbol", "source", "source_version")
+                )
+                or any(
+                    isinstance(market_reference[key], bool)
+                    or not isinstance(market_reference[key], int)
+                    or market_reference[key] < 0
+                    for key in ("timestamp_ms", "avg_price_mins")
+                )
+            ):
+                raise PaperOrderAcceptanceIntegrityError(
+                    "v2 gate receipt has an invalid market-reference identity"
+                )
+            if market_reference["symbol"] != order.symbol:
+                raise PaperOrderAcceptanceIntegrityError(
+                    "v2 market-reference symbol differs from its order"
+                )
+            identity = (
+                market_reference["symbol"],
+                market_reference["source"],
+                market_reference["source_version"],
+                market_reference["timestamp_ms"],
+                market_reference["avg_price_mins"],
+            )
+            if identity in seen_references:
+                raise PaperOrderAcceptanceIntegrityError(
+                    "v2 gate receipt repeats a market-reference identity"
+                )
+            seen_references.add(identity)
+        return receipt
 
     @staticmethod
     def _validate_paper_order_acceptance_row(row) -> dict[str, Any]:
@@ -2112,12 +2279,23 @@ class SQLiteStore:
                 "acceptance JSON does not match indexed order/reservation identity"
             )
 
-        expected_payload = SQLiteStore._build_acceptance_payload_json(
-            initial_order_json, reservation
-        )
-        if acceptance_payload_json != expected_payload or acceptance_payload.get(
-            "schema_version"
-        ) != "paper_order_acceptance.v1":
+        version = acceptance_payload.get("schema_version")
+        if version == "paper_order_acceptance.v1":
+            if "gate_receipt" in acceptance_payload:
+                raise PaperOrderAcceptanceIntegrityError(
+                    "v1 acceptance payload must not contain a gate receipt"
+                )
+            receipt = None
+        elif version == "paper_order_acceptance.v2":
+            receipt = SQLiteStore._validate_acceptance_gate_receipt(
+                initial_order, acceptance_payload.get("gate_receipt")
+            )
+        else:
+            raise PaperOrderAcceptanceIntegrityError(
+                "acceptance payload uses an unsupported schema version"
+            )
+        expected_payload = SQLiteStore._build_acceptance_payload_json(initial_order_json, reservation, receipt)
+        if acceptance_payload_json != expected_payload:
             raise PaperOrderAcceptanceIntegrityError(
                 "acceptance payload is not canonical or differs from its immutable snapshot"
             )
@@ -2252,6 +2430,57 @@ class SQLiteStore:
                 "reservation payload does not match indexed acceptance identity"
             )
         return reservation
+
+    @staticmethod
+    async def _sum_active_buy_quote_reservations_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        quote_asset: str,
+    ) -> Decimal:
+        """Sum only durable BUY quote reserves for risk admission in this transaction."""
+        cursor = await conn.execute(
+            "SELECT reservation_id, owner_order_id FROM paper_reservations "
+            "WHERE account_id = ? AND asset = ? ORDER BY reservation_id",
+            (account_id, quote_asset),
+        )
+        rows = await cursor.fetchall()
+        amounts: list[Decimal] = []
+        for reservation_id, owner_order_id in rows:
+            reservation = await SQLiteStore._load_paper_reservation_inner(
+                conn, reservation_id
+            )
+            order = await SQLiteStore._load_paper_order_inner(conn, owner_order_id)
+            if reservation is None or order is None:
+                raise PaperOrderAcceptanceIntegrityError(
+                    "active reservation is missing its reservation or order record"
+                )
+            if order.status not in (
+                PaperOrderStatus.ACCEPTED,
+                PaperOrderStatus.PARTIALLY_FILLED,
+            ):
+                raise PaperOrderAcceptanceIntegrityError(
+                    "active reservation owner is not an accepted/partial order"
+                )
+            if order.side != PaperOrderSide.BUY:
+                continue
+            try:
+                expected_quote_asset = SQLiteStore._compute_order_reservation(order).asset
+            except (
+                PaperOrderAcceptanceScopeError,
+                PaperOrderAcceptanceStateError,
+            ) as exc:
+                raise PaperOrderAcceptanceIntegrityError(
+                    "active BUY reservation belongs to an invalid order"
+                ) from exc
+            if (
+                expected_quote_asset != quote_asset
+                or reservation.amount.asset != expected_quote_asset
+            ):
+                raise PaperOrderAcceptanceIntegrityError(
+                    "BUY reservation asset does not match its quote asset"
+                )
+            amounts.append(reservation.amount.amount)
+        return _exact_sum(tuple(amounts))
 
     @staticmethod
     async def _validate_sell_allocations_for_acceptance_inner(
@@ -2435,8 +2664,12 @@ class SQLiteStore:
     async def _accept_paper_order_inner(
         conn: aiosqlite.Connection,
         order_id: str,
+        risk_policy: PaperRiskPolicy | None = None,
+        risk_snapshot: PaperRiskSnapshot | None = None,
+        symbol_filter_snapshot: SymbolFilterSnapshot | None = None,
+        market_notional_references: MarketNotionalReference | Sequence[MarketNotionalReference] | None = None,
     ) -> PaperOrder:
-        """Reserve the order's asset and persist ACCEPTED state atomically."""
+        """Evaluate BUY gates, reserve the order's asset, and accept atomically."""
         existing_acceptance = await SQLiteStore._load_paper_order_acceptance_inner(
             conn, order_id
         )
@@ -2461,6 +2694,51 @@ class SQLiteStore:
             )
 
         reserve_amount = SQLiteStore._compute_order_reservation(order)
+        filter_result = validate_symbol_filters(order, symbol_filter_snapshot, market_notional_references)
+        if order.side == PaperOrderSide.BUY and isinstance(
+            risk_snapshot, PaperRiskSnapshot
+        ):
+            current_reserved = await SQLiteStore._sum_active_buy_quote_reservations_inner(
+                conn, order.paper_account_id, reserve_amount.asset
+            )
+            risk_snapshot = risk_snapshot.model_copy(
+                update={"remaining_buy_reservations": current_reserved}
+            )
+        risk_result = evaluate_paper_risk(order, risk_policy, risk_snapshot)
+        gate_receipt = None
+        if order.side == PaperOrderSide.BUY:
+            if not risk_result.approved or not filter_result.approved:
+                raise PaperOrderAcceptanceGateError(
+                    risk_result.code if not risk_result.approved else filter_result.code,
+                    risk_result, filter_result,
+                )
+            market_refs = market_notional_references
+            if isinstance(market_refs, MarketNotionalReference):
+                market_refs = (market_refs,)
+            gate_receipt = {
+                "risk_approved": risk_result.code,
+                "risk_policy_id": risk_result.policy_id,
+                "risk_policy_version": risk_result.policy_version,
+                "risk_snapshot": None if risk_snapshot is None else {
+                    "market_reference": risk_snapshot.market_reference,
+                    "market_timestamp_ms": risk_snapshot.market_timestamp_ms,
+                    "equity_reference": risk_snapshot.equity_reference,
+                    "equity_timestamp_ms": risk_snapshot.equity_timestamp_ms,
+                    "exposure_reference": risk_snapshot.exposure_reference,
+                    "exposure_timestamp_ms": risk_snapshot.exposure_timestamp_ms,
+                },
+                "symbol_filter_approved": filter_result.code,
+                "filter_snapshot_id": filter_result.snapshot_id,
+                "filter_set_id": filter_result.filter_set_id,
+                "filter_set_version": filter_result.filter_set_version,
+                "filter_source_id": filter_result.source_id,
+                "filter_source_version": filter_result.source_version,
+                "market_references": [] if market_refs is None else [
+                    {"symbol": ref.symbol, "source": ref.source, "source_version": ref.source_version,
+                     "timestamp_ms": ref.timestamp_ms, "avg_price_mins": ref.avg_price_mins}
+                    for ref in ((market_refs,) if isinstance(market_refs, MarketNotionalReference) else market_refs)
+                ],
+            }
         sell_lot_reservations: tuple[_PaperLotReservationAllocationV1, ...] = ()
         if order.side == PaperOrderSide.SELL:
             sell_lot_reservations = (
@@ -2516,7 +2794,7 @@ class SQLiteStore:
         initial_order_json = order.model_dump_json()
         reservation_json = reservation.model_dump_json()
         acceptance_payload_json = SQLiteStore._build_acceptance_payload_json(
-            initial_order_json, reservation
+            initial_order_json, reservation, gate_receipt
         )
 
         await conn.execute(

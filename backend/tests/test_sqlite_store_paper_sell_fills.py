@@ -48,6 +48,8 @@ from src.models.paper_contracts import (
     PaperReservationRef,
     StrategyRef,
 )
+from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot
+from src.models.paper_symbol_filters import LotSizeFilter, MinNotionalFilter, MarketLotSizeFilter, PriceFilter, SymbolFilterSnapshot
 from src.persistence.sqlite_store import (
     PaperOrderAcceptanceFundsError,
     PaperOrderAcceptanceIntegrityError,
@@ -93,12 +95,40 @@ def _open_account(db: Path, *, base: str = "0", quote: str = "10000") -> SQLiteS
     return store
 
 
+def _accept_buy(
+    store: SQLiteStore,
+    order: PaperOrder,
+    *,
+    max_exposure: Decimal = Decimal("1000000"),
+    marked_open_inventory: Decimal = Decimal("0"),
+):
+    base, quote = order.symbol.split("/")
+    policy = PaperRiskPolicy(policy_id="fixture", policy_version="1", account_id=order.paper_account_id, quote_asset=quote,
+        max_order_notional=Decimal("1000000"), max_total_exposure=max_exposure, max_daily_loss=Decimal("1000000"))
+    snapshot = PaperRiskSnapshot(account_id=order.paper_account_id, quote_asset=quote, market_symbol=order.symbol,
+        market_mark_price=Decimal("50"), market_reference="fixture", market_timestamp_ms=1,
+        equity_reference="fixture", equity_timestamp_ms=1, equity_utc_day_start=Decimal("1000000"),
+        equity_current_marked=Decimal("1000000"), exposure_reference="fixture", exposure_timestamp_ms=1,
+        marked_open_inventory=marked_open_inventory, remaining_buy_reservations=Decimal("0"))
+    filters = SymbolFilterSnapshot(snapshot_id="fixture", filter_set_id="fixture", filter_set_version="1",
+        source_id="fixture", source_version="1", capture_timestamp_ms=1, symbol=order.symbol, base_asset=base, quote_asset=quote,
+        price_filter=PriceFilter(min_price=Decimal("0"), max_price=Decimal("0"), tick_size=Decimal("0")),
+        lot_size=LotSizeFilter(min_qty=Decimal("0.0000000001"), max_qty=Decimal("100000000"), step_size=order.requested_qty),
+        market_lot_size=MarketLotSizeFilter(min_qty=Decimal("0.0000000001"), max_qty=Decimal("100000000"), step_size=order.requested_qty),
+        min_notional=MinNotionalFilter(min_notional=Decimal("0.00000001"), applies_to_market=False, avg_price_mins=0),
+        notional=None, unhandled_filter_types=())
+    return _run(store.accept_paper_order(order.order_id, policy, snapshot, filters))
+
+
 def _seed_buy_lot(
     store: SQLiteStore,
     order_id: str,
     *,
     qty: str = "2.0",
     strategy_ref: StrategyRef | None = None,
+    symbol: str = "BTC/USDT",
+    price: str = "50",
+    fill_price: str = "40",
 ) -> PaperOrder:
     strategy_ref = strategy_ref or StrategyRef(
         strategy_id="strategy-sell", strategy_version="v1", decision_id="decision-sell"
@@ -109,24 +139,24 @@ def _seed_buy_lot(
         paper_account_id="acct-sell",
         paper_session_id="session-sell",
         environment="paper",
-        symbol="BTC/USDT",
+        symbol=symbol,
         side=PaperOrderSide.BUY,
         order_type=PaperOrderType.LIMIT,
         requested_qty=Decimal(qty),
-        price=Decimal("50"),
+        price=Decimal(price),
         strategy_ref=strategy_ref,
         status=PaperOrderStatus.PREPARED,
         timestamp_ms=1_700_000_000_000,
     )
     _run(store.register_paper_order(order))
-    _run(store.accept_paper_order(order.order_id))
+    _accept_buy(store, order)
     fill = PaperFill(
         fill_id=f"fill-{order_id}",
         order_id=order.order_id,
         qty=Decimal(qty),
-        price=Decimal("40"),
+        price=Decimal(fill_price),
         timestamp_ms=1_700_000_001_000,
-        commission=Commission(amount=Decimal("0.5"), asset="USDT"),
+        commission=Commission(amount=Decimal("0.5"), asset=symbol.split("/")[1]),
     )
     _run(store.save_paper_fill(fill))
     _run(store.apply_paper_fill(fill.fill_id))
@@ -140,6 +170,7 @@ def _sell_order(
     order_type: PaperOrderType = PaperOrderType.LIMIT,
     price: Decimal | None = Decimal("45"),
     strategy_ref: StrategyRef | None = None,
+    symbol: str = "BTC/USDT",
 ) -> PaperOrder:
     strategy_ref = strategy_ref or StrategyRef(
         strategy_id="strategy-sell", strategy_version="v1", decision_id="decision-sell"
@@ -151,7 +182,7 @@ def _sell_order(
         paper_account_id="acct-sell",
         paper_session_id="session-sell",
         environment="paper",
-        symbol="BTC/USDT",
+        symbol=symbol,
         side=PaperOrderSide.SELL,
         order_type=order_type,
         requested_qty=qty,
@@ -239,6 +270,76 @@ def test_sell_limit_acceptance_reserves_base_and_lot_atomically(tmp_path: Path) 
     assert PaperOrder.model_validate_json(snapshot[0]).status == PaperOrderStatus.PREPARED
     assert PaperReservationRef.model_validate_json(snapshot[1]).amount == reservation.amount
     conn.close()
+    _run(store.close())
+
+
+def test_sell_reservation_is_not_double_counted_as_buy_quote_reservation(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "sell-reservation-not-buy-exposure.db"
+    store = _open_account(db, base="100", quote="10000")
+    # Buy USDT as a position, then reserve those USDT in a SELL. The lot remains
+    # marked exposure; its SELL reservation is not an additional BUY commitment.
+    buy_usdt = _seed_buy_lot(
+        store,
+        "buy-usdt-lot",
+        qty="40",
+        symbol="USDT/BTC",
+        price="2",
+        fill_price="1",
+    )
+    allocation = LotAllocation(
+        position_id=buy_usdt.order_id,
+        account_id=buy_usdt.paper_account_id,
+        symbol=buy_usdt.symbol,
+        strategy_ref=buy_usdt.strategy_ref,
+        qty=buy_usdt.requested_qty,
+    )
+    sell_usdt = _sell_order(
+        "sell-usdt-lot",
+        (allocation,),
+        price=Decimal("0.4"),
+        strategy_ref=buy_usdt.strategy_ref,
+        symbol=buy_usdt.symbol,
+    )
+    _run(store.register_paper_order(sell_usdt))
+    _run(store.accept_paper_order(sell_usdt.order_id))
+    sell_reservation = _run(store.load_paper_reservation(sell_usdt.order_id))
+    assert sell_reservation is not None
+    assert sell_reservation.amount.asset == "USDT"
+    assert sell_reservation.amount.amount == Decimal("40")
+
+    buy_btc = PaperOrder(
+        order_id="buy-btc-after-sell-reserve",
+        client_order_id="client-buy-btc-after-sell-reserve",
+        paper_account_id="acct-sell",
+        paper_session_id="session-sell",
+        environment="paper",
+        symbol="BTC/USDT",
+        side=PaperOrderSide.BUY,
+        order_type=PaperOrderType.LIMIT,
+        requested_qty=Decimal("2"),
+        price=Decimal("10"),
+        strategy_ref=StrategyRef(
+            strategy_id="strategy-sell", strategy_version="v1", decision_id="decision-sell"
+        ),
+        status=PaperOrderStatus.PREPARED,
+        timestamp_ms=1_700_000_010_000,
+    )
+    _run(store.register_paper_order(buy_btc))
+    accepted = _accept_buy(
+        store,
+        buy_btc,
+        max_exposure=Decimal("65"),
+        marked_open_inventory=Decimal("40"),
+    )
+    assert accepted.status == PaperOrderStatus.ACCEPTED
+    balance = _run(store.load_paper_balance_view("acct-sell"))
+    assert balance is not None
+    usdt_balance = next(item for item in balance.balances if item.asset == "USDT")
+    assert (usdt_balance.total, usdt_balance.available, usdt_balance.reserved) == (
+        Decimal("10040.0"), Decimal("9980.0"), Decimal("60.0")
+    )
     _run(store.close())
 
 
@@ -838,7 +939,7 @@ def test_cancel_sell_rejects_buy_order(
         commission=Commission(amount=Decimal("0"), asset="USDT"),
     )
     _run(store.register_paper_order(buy2))
-    _run(store.accept_paper_order(buy2.order_id))
+    _accept_buy(store, buy2)
 
     # BUY orders cancel via their own path, not SELL cancellation logic
     cancelled = _run(store.cancel_paper_order(buy2.order_id))
