@@ -7,7 +7,9 @@ import sqlite3
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+import aiosqlite
 import pytest
 from pydantic import ValidationError
 
@@ -81,6 +83,23 @@ def _table_names(db: Path) -> set[str]:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
+    finally:
+        conn.close()
+
+
+def _assert_no_unknown_state(db: Path) -> None:
+    """Cancellation resolves locally; it never stores UNKNOWN_STATE."""
+    conn = sqlite3.connect(str(db))
+    try:
+        for (table_name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ):
+            rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()
+            assert not any(
+                "unknown_state" in str(value).lower()
+                for row in rows
+                for value in row
+            ), f"UNKNOWN_STATE persisted in {table_name}"
     finally:
         conn.close()
 
@@ -759,6 +778,158 @@ def test_repeated_cancel_after_reopen_is_idempotent(tmp_path: Path) -> None:
     assert snap_after == snap_before
     conn.close()
     _run(store2.close())
+
+
+def test_cancel_pre_and_postcommit_uncertainty_releases_once_preserving_fills_and_lots(
+    tmp_path: Path,
+) -> None:
+    """Both cancellation acknowledgement uncertainties resolve from local state."""
+    db = tmp_path / "cancel-commit-uncertainty.db"
+    store = _make_store(db)
+    _open_quote_base(store)
+
+    def snapshot(order_id: str) -> dict[str, Any]:
+        conn = sqlite3.connect(str(db))
+        try:
+            reservation_row = conn.execute(
+                "SELECT reservation_json FROM paper_reservations "
+                "WHERE owner_order_id = ?",
+                (order_id,),
+            ).fetchone()
+            return {
+                "order": conn.execute(
+                    "SELECT order_json FROM paper_orders WHERE order_id = ?",
+                    (order_id,),
+                ).fetchone()[0],
+                "balance": conn.execute(
+                    "SELECT balance_json FROM paper_account_balances "
+                    "WHERE account_id = 'acc-1' AND asset = 'QUOTE'"
+                ).fetchone()[0],
+                "reservation": None if reservation_row is None else reservation_row[0],
+                "acceptance": conn.execute(
+                    "SELECT reservation_json FROM paper_order_acceptances "
+                    "WHERE order_id = ?",
+                    (order_id,),
+                ).fetchone()[0],
+                "fills": tuple(
+                    row[0] for row in conn.execute(
+                        "SELECT record_json FROM paper_fills ORDER BY fill_id"
+                    ).fetchall()
+                    if PaperFill.model_validate_json(row[0]).order_id == order_id
+                ),
+                "lots": tuple(
+                    row[0] for row in conn.execute(
+                        "SELECT lot_json FROM position_lots WHERE order_id = ? "
+                        "ORDER BY rowid",
+                        (order_id,),
+                    ).fetchall()
+                ),
+            }
+        finally:
+            conn.close()
+
+    # First order: a genuine pre-commit failure must leave every write rolled back.
+    pre_order = _make_buy_order(order_id="ord-cancel-pre", price="50.0")
+    _run(store.register_paper_order(pre_order))
+    assert _accept(store, pre_order.order_id).status == PaperOrderStatus.ACCEPTED
+    pre_fill = _make_fill(
+        fill_id="fill-cancel-pre", order_id=pre_order.order_id, qty="1.0", price="40.0"
+    )
+    _run(store.save_paper_fill(pre_fill))
+    _run(store.apply_paper_fill(pre_fill.fill_id))
+    pre_before = snapshot(pre_order.order_id)
+
+    real_commit = aiosqlite.Connection.commit
+    commit_calls = 0
+
+    async def fail_first_commit(self, *args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            raise OSError("synthetic cancellation pre-commit failure")
+        return await real_commit(self, *args, **kwargs)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=fail_first_commit):
+        with pytest.raises(OSError, match="cancellation pre-commit failure"):
+            _run(store.cancel_paper_order(pre_order.order_id))
+    assert commit_calls == 1
+
+    assert snapshot(pre_order.order_id) == pre_before
+    _assert_no_unknown_state(db)
+    pre_cancelled = _run(store.cancel_paper_order(pre_order.order_id))
+    assert pre_cancelled.status == PaperOrderStatus.CANCELLED
+    pre_after = snapshot(pre_order.order_id)
+    pre_balance = AssetBalance.model_validate_json(pre_before["balance"])
+    pre_reservation = PaperReservationRef.model_validate_json(pre_before["reservation"])
+    post_balance = AssetBalance.model_validate_json(pre_after["balance"])
+    assert pre_after["reservation"] is None
+    assert post_balance.total == pre_balance.total
+    assert post_balance.reserved == Decimal("0")
+    assert post_balance.available == pre_balance.available + pre_reservation.amount.amount
+    assert pre_after["fills"] == pre_before["fills"]
+    assert pre_after["lots"] == pre_before["lots"]
+    assert pre_after["acceptance"] == pre_before["acceptance"]
+    assert _run(store.cancel_paper_order(pre_order.order_id)) == pre_cancelled
+    assert snapshot(pre_order.order_id) == pre_after
+
+    # Second order: commit succeeds durably, but its acknowledgement is lost.
+    post_order = _make_buy_order(order_id="ord-cancel-post", price="60.0")
+    _run(store.register_paper_order(post_order))
+    assert _accept(store, post_order.order_id).status == PaperOrderStatus.ACCEPTED
+    post_fill = _make_fill(
+        fill_id="fill-cancel-post", order_id=post_order.order_id, qty="1.0", price="45.0"
+    )
+    _run(store.save_paper_fill(post_fill))
+    _run(store.apply_paper_fill(post_fill.fill_id))
+    post_before = snapshot(post_order.order_id)
+
+    real_commit = aiosqlite.Connection.commit
+    commit_calls = 0
+
+    async def commit_then_fail(self, *args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        await real_commit(self, *args, **kwargs)
+        if commit_calls == 1:
+            raise OSError("synthetic cancellation post-commit failure")
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=commit_then_fail):
+        with pytest.raises(OSError, match="cancellation post-commit failure"):
+            _run(store.cancel_paper_order(post_order.order_id))
+    assert commit_calls == 1
+
+    _assert_no_unknown_state(db)
+    _run(store.close())
+    reopened = _make_store(db)
+    post_after = snapshot(post_order.order_id)
+    assert PaperOrder.model_validate_json(post_after["order"]).status == PaperOrderStatus.CANCELLED
+    assert post_after["reservation"] is None
+    assert post_after["fills"] == post_before["fills"]
+    assert post_after["lots"] == post_before["lots"]
+    assert post_after["acceptance"] == post_before["acceptance"]
+    post_balance_before = AssetBalance.model_validate_json(post_before["balance"])
+    post_reservation = PaperReservationRef.model_validate_json(post_before["reservation"])
+    post_balance_after = AssetBalance.model_validate_json(post_after["balance"])
+    assert post_balance_after.total == post_balance_before.total
+    assert post_balance_after.reserved == Decimal("0")
+    assert post_balance_after.available == (
+        post_balance_before.available + post_reservation.amount.amount
+    )
+    assert _run(reopened.cancel_paper_order(post_order.order_id)).status == PaperOrderStatus.CANCELLED
+    assert snapshot(post_order.order_id) == post_after
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_reservations WHERE owner_order_id IN (?, ?)",
+        (pre_order.order_id, post_order.order_id),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_order_acceptances WHERE order_id IN (?, ?)",
+        (pre_order.order_id, post_order.order_id),
+    ).fetchone()[0] == 2
+    conn.close()
+    _assert_no_unknown_state(db)
+    _run(reopened.close())
 
 
 def test_terminal_states_rejected_and_prepared_out_of_scope(tmp_path: Path) -> None:

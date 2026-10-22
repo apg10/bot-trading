@@ -7,12 +7,12 @@
 | Área | Estado global | Resumen y límite |
 |---|---|---|
 | ACT-P-001 | **PENDIENTE** | Núcleo backend de sesiones/configuraciones, referencias, experimentos, runs, resultados y disposiciones aceptado. Preferencias UI y metadata adicional siguen dependiendo de contratos; replay/datos subyacentes se difieren a ACT-L-001. |
-| ACT-P-002 | **PENDIENTE** | Globalmente sigue pendiente. Slices aceptados incluyen journal, apertura de cuenta, aplicación contable de fills BUY/SELL, reservas y accounting; ver criterios restantes en el plan raíz. No equivale a un ciclo PAPER autónomo. |
-| ACT-P-003 | **PENDIENTE** | Slices de registro/aceptación/cancelación e IDs idempotentes aceptados. El criterio de incertidumbre de persistencia local está satisfecho; no se añadió `UNKNOWN_STATE`. El estado global sigue pendiente por criterios restantes del plan. |
+| ACT-P-002 | **PENDIENTE** | Reconciliación local PASS: `ACT-P-002-LEDGER-RECON-001` probó en un escenario BUY→SELL apertura, aceptación, journal, fills, reservas, lots, comisiones, reopening e invariantes contables. El estado global sigue PENDIENTE; ver criterios restantes en el plan raíz. |
+| ACT-P-003 | **PENDIENTE** | Reconciliación local PASS: `ACT-P-003-RECON-001` probó retry idempotente y reload durable ante incertidumbre de aceptación/cancelación, sin `UNKNOWN_STATE` persistido. El estado global sigue PENDIENTE; ver criterios restantes en el plan raíz. |
 | ACT-P-004 | **ACEPTADO** | Riesgo puro, filtros versionados, aceptación atómica/concurrente y regresión backend aceptados. Commit publicado: `2cbd689` (`feat(paper): gate atomic acceptance with risk filters`). Backend: 1,784 passed, 0 failed, 0 skipped; 1 warning deprecado de Starlette/httpx2. PAPER sigue sin matching ni envío externo. |
 | ACT-P-005 | **TECHNICALLY_ACCEPTED — globalmente PENDIENTE** | Evaluador puro aceptado técnicamente; gate 92 passed. Integración SQLite pendiente de autorización explícita. No iniciar trabajo de integración sin autorización. |
 | ACT-S-007 / ACT-E-001 | **PAUSADO / BLOQUEADO** | No afirmar equivalencia con FYL original sin especificación verificable. |
-| Selección de trabajo | **NINGUNA — en espera de autorización** | ACT-P-005 puramente aceptado; globalmente PENDING. ACT-P-002/P-003 pendientes. Proxima tarea autorizada: ACT-P-005 SQLite integration con allowlist explícita. |
+| Selección de trabajo | **NINGUNA — en espera de autorización** | No implementación seleccionada. Gate humano requerido antes de cambiar estado global. |
 
 ## Snapshot Git
 

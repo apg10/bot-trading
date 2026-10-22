@@ -275,6 +275,10 @@ implementaciones. Cada fila requiere contrato y subdivisión por resultado.
 | ACT-P-009 | P1 | PENDIENTE | Aceptación E2E del MVP PAPER | ACT-P-006/007/008 | Ciclo completo, costes, pausa, cierre y reinicio con datos deterministas; no implica rentabilidad |
 | ACT-P-010 | P1 | PENDIENTE | Aceptación PAPER integrada con precios reales y ejecución exclusivamente simulada | ACT-P-009; H1; autorización de servicio externo | Procedencia real explícita, frescura y huecos/desconexión comprobados; entradas bloqueadas con datos no aptos; cero envío de órdenes al exchange |
 
+**EVIDENCIA DE RECONILIACIÓN (2026-10-22):** `ACT-P-002-LEDGER-RECON-001` reviewer PASS. Test: `backend/tests/test_sqlite_store_paper_ledger_reconciliation.py` (567 líneas, 1 test). Escenario determinista BUY→SELL cubriendo apertura, aceptación, journal, fills, reservas, lots, comisiones y reopening. Invariantes verificadas: opening inmutable; balances no negativos y total=available+reserved; reservas corresponden exactamente a órdenes activas; journal/application identidad; qty/coste lot exactos y avg por §14.22; proration/accounting SELL; limpieza de completados. Focal: 1 passed; regresión: 186 passed; final: 1,887 passed, 1 warning.
+
+**EVIDENCIA DE RECONILIACIÓN (2026-10-22):** `ACT-P-003-RECON-001` reviewer PASS. Tests: `test_sqlite_store_paper_acceptance.py` (+2 tests), `test_sqlite_store_paper_orders.py` (+1 test). Incertidumbre de compromiso aceptación/cancelación resuelta por retry idempotente y reload durable. Sin UNKNOWN_STATE persistido. Focal: 251 passed; incluido en final 1,887 passed.
+
 Separar datos y entorno: PAPER objetivo usa datos reales con ejecuciones propias
 simuladas; TEST_ONLY identifica fixtures para pruebas. No vender una prueba con
 fixtures como integración de mercado real ni como EXCHANGE_DEMO.

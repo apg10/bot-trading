@@ -8,7 +8,9 @@ import sqlite3
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+import aiosqlite
 import pytest
 from src.models.paper_contracts import (
     AssetBalance,
@@ -144,6 +146,23 @@ def _table_names(db: Path) -> set[str]:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
+    finally:
+        conn.close()
+
+
+def _assert_no_unknown_state(db: Path) -> None:
+    """The local acceptance slice never persists an indeterminate state."""
+    conn = sqlite3.connect(str(db))
+    try:
+        for (table_name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ):
+            rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()
+            assert not any(
+                "unknown_state" in str(value).lower()
+                for row in rows
+                for value in row
+            ), f"UNKNOWN_STATE persisted in {table_name}"
     finally:
         conn.close()
 
@@ -624,11 +643,120 @@ def test_acceptance_rolls_back_reservation_balance_and_order_together(
     assert (balance.balances[0].available, balance.balances[0].reserved) == (
         Decimal("100.00"), Decimal("0")
     )
+    _assert_no_unknown_state(db)
     conn = sqlite3.connect(str(db))
     assert conn.execute("SELECT COUNT(*) FROM paper_order_acceptances").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_reservations").fetchone()[0] == 0
     conn.close()
     _run(store.close())
+
+
+def test_acceptance_precommit_failure_rolls_back_and_retry_reserves_once(
+    tmp_path: Path,
+) -> None:
+    """A lost-before-commit acceptance is rolled back and safely retried."""
+    db = tmp_path / "acceptance-precommit-uncertainty.db"
+    store = _run_with_open_account(db)
+    order = _order(order_id="accept-precommit", client_order_id="accept-precommit-client")
+    _run(store.register_paper_order(order))
+
+    real_commit = aiosqlite.Connection.commit
+    commit_calls = 0
+
+    async def fail_first_commit(self, *args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            raise OSError("synthetic acceptance pre-commit failure")
+        return await real_commit(self, *args, **kwargs)
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=fail_first_commit):
+        with pytest.raises(OSError, match="acceptance pre-commit failure"):
+            _accept(store, order.order_id)
+    assert commit_calls == 1
+
+    # The failed transaction left no partial acceptance side effects.
+    assert _run(store.load_paper_order(order.order_id)) == order
+    assert _run(store.load_paper_reservation(order.order_id)) is None
+    balance = _run(store.load_paper_balance_view("account-1"))
+    assert balance is not None
+    assert (balance.balances[0].available, balance.balances[0].reserved) == (
+        Decimal("100.00"), Decimal("0")
+    )
+
+    accepted = _accept(store, order.order_id)
+    assert accepted.status == PaperOrderStatus.ACCEPTED
+    assert _accept(store, order.order_id) == accepted
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_order_acceptances WHERE order_id = ?",
+        (order.order_id,),
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_reservations WHERE owner_order_id = ?",
+        (order.order_id,),
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_account_balances "
+        "WHERE account_id = 'account-1' AND asset = 'USD'"
+    ).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 0
+    conn.close()
+    _assert_no_unknown_state(db)
+    _run(store.close())
+
+
+def test_acceptance_postcommit_failure_reloads_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """A post-commit acknowledgement failure is resolved from durable state."""
+    db = tmp_path / "acceptance-postcommit-uncertainty.db"
+    store = _run_with_open_account(db)
+    order = _order(order_id="accept-postcommit", client_order_id="accept-postcommit-client")
+    _run(store.register_paper_order(order))
+
+    real_commit = aiosqlite.Connection.commit
+    commit_calls = 0
+
+    async def commit_then_fail(self, *args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        await real_commit(self, *args, **kwargs)
+        if commit_calls == 1:
+            raise OSError("synthetic acceptance post-commit failure")
+
+    with mock.patch.object(aiosqlite.Connection, "commit", new=commit_then_fail):
+        with pytest.raises(OSError, match="acceptance post-commit failure"):
+            _accept(store, order.order_id)
+    assert commit_calls == 1
+
+    _assert_no_unknown_state(db)
+    # Reopen before retrying: the durable acceptance, reservation and balance
+    # mutation are the source of truth after the lost acknowledgement.
+    _run(store.close())
+    reopened = SQLiteStore(db)
+    _run(reopened.initialize())
+    accepted = _accept(reopened, order.order_id)
+    assert accepted.status == PaperOrderStatus.ACCEPTED
+    assert _accept(reopened, order.order_id) == accepted
+    reservation = _run(reopened.load_paper_reservation(order.order_id))
+    assert reservation is not None
+    assert reservation.amount.amount == Decimal("20.0000")
+    balance = _run(reopened.load_paper_balance_view("account-1"))
+    assert balance is not None
+    assert (balance.balances[0].available, balance.balances[0].reserved) == (
+        Decimal("80.0000"), Decimal("20.0000")
+    )
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM paper_order_acceptances").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM paper_reservations").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_account_balances "
+        "WHERE account_id = 'account-1' AND asset = 'USD'"
+    ).fetchone()[0] == 1
+    conn.close()
+    _assert_no_unknown_state(db)
+    _run(reopened.close())
 
 
 def _make_v8_database(db: Path) -> tuple[PaperOrder, PaperAccountOpening]:
