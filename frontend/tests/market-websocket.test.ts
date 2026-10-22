@@ -997,6 +997,48 @@ describe("C09 — useMarketData real con hooks React controlados", () => {
     expect(renderHook().candles).toEqual([bBar.candle])
   })
 
+  it("conserva una barra del mismo stream mientras la recuperación está pendiente", async () => {
+    await mountHook()
+    const first = socket()
+    first.emitOpen()
+    type RecoveryResponse = CandleHistoryResponse & { stream_id: string; sequence: number }
+    let resolveRecovery!: (value: RecoveryResponse) => void
+    const recovery = new Promise<RecoveryResponse>(resolve => { resolveRecovery = resolve })
+    vi.mocked(fetch).mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => recovery,
+    }) as Response)
+
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 1, interval: "1m", candles: [], complete: true,
+    }))
+    first.emitMessage(JSON.stringify({
+      type: "resync_required", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 2, reason: "gap", last_sequence: 1,
+      recovery_required: true,
+    }))
+    const delayedBar = {
+      ...bar(), schema_version: "market_transport.v1", stream_id: "stream-a", sequence: 3,
+      candle: { ...bar().candle, open_time: 2000, close_time: 2060 },
+    }
+    first.emitMessage(JSON.stringify(delayedBar))
+
+    expect(renderHook().candles).toEqual([delayedBar.candle])
+    expect(renderHook().degraded).toBe(true)
+
+    resolveRecovery({
+      ...fixture, stream_id: "stream-a", sequence: 2,
+      candles: [{ ...fixture.candles[0], open_time: 1000, close_time: 1060 }],
+    })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(renderHook().candles).toEqual([
+      { ...fixture.candles[0], open_time: 1000, close_time: 1060 },
+      delayedBar.candle,
+    ])
+  })
+
   it("cierre inesperado pone conexión false y resetea status; reconexión resuscribe sin duplicados", async () => {
     await mountHook()
     const first = socket()

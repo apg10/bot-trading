@@ -181,9 +181,6 @@ export function useMarketData(
       if (transportRef.current?.streamId !== metadata.streamId) resetForStream(metadata.streamId)
       const previous = transportRef.current
       if (previous && previous.sequence >= 0) {
-        if (awaitingResyncRef.current && kind === "bar") {
-          return { metadata, duplicate: false, rejected: true }
-        }
         if (metadata.sequence < previous.sequence) {
           awaitingResyncRef.current = true
           markDegraded("Secuencia de mercado regresiva; recuperación de datos pendiente")
