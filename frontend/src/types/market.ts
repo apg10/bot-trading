@@ -14,14 +14,41 @@ export interface CandleData {
 }
 
 export interface CandleHistoryResponse {
+  // Optional while old development responses are still accepted by the UI.
+  schema_version?: string
+  stream_id?: string
+  sequence?: number
   symbol: string
   interval: string
   data_source: "TEST_ONLY" | "market_engine"
   candles: CandleData[]
+  complete?: boolean
+}
+
+export interface MarketTransportEnvelope {
+  schema_version: string
+  stream_id: string
+  sequence: number
+}
+
+export interface MarketSnapshot extends MarketTransportEnvelope {
+  type: "snapshot"
+  candles: CandleData[]
+  complete: boolean
+}
+
+export interface MarketResyncRequired extends MarketTransportEnvelope {
+  type: "resync_required"
+  reason: "gap" | "overflow"
+  last_sequence: number
+  recovery_required: true
 }
 
 export interface MarketCandleEvent {
   type: "bar_updated" | "bar_closed"
+  schema_version?: string
+  stream_id?: string
+  sequence?: number
   symbol: string
   interval: string
   data_source: "market_engine"
@@ -29,6 +56,9 @@ export interface MarketCandleEvent {
 }
 
 export interface MarketStatus {
+  schema_version?: string
+  stream_id?: string
+  sequence?: number
   symbol: string
   connected: boolean
   reconnecting: boolean

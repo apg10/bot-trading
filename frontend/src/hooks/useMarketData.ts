@@ -4,8 +4,30 @@
 import { useEffect, useRef, useState } from "react"
 import type { CandleData, MarketCandleEvent, MarketDataSource, MarketStatus } from "../types/market"
 import type { MarketWSMessage } from "../api/market"
-import { getCandles, MarketWebSocket } from "../api/market"
+import { getApiUrl, getCandles, MarketWebSocket } from "../api/market"
 import { MAX_CANDLES, mergeHistoricalCandles, upsertCandle } from "../market/candle_store"
+
+const MARKET_TRANSPORT_VERSION = "market_transport.v1"
+
+type SequencedMessage = { stream_id?: unknown; sequence?: unknown; schema_version?: unknown }
+
+function transportMetadata(msg: MarketWSMessage): { streamId: string; sequence: number } | null {
+  const value = msg as SequencedMessage
+  const hasMetadata = value.schema_version !== undefined
+    || value.stream_id !== undefined || value.sequence !== undefined
+  if (!hasMetadata) return null // Legacy messages predate the envelope.
+  if (
+    (value.schema_version !== undefined && value.schema_version !== MARKET_TRANSPORT_VERSION)
+    || typeof value.stream_id !== "string" || !value.stream_id
+    || typeof value.sequence !== "number" || !Number.isSafeInteger(value.sequence)
+    || value.sequence < 0
+  ) return null
+  return { streamId: value.stream_id, sequence: value.sequence }
+}
+
+function hasKnownSchema(msg: MarketWSMessage): boolean {
+  return msg.schema_version === undefined || msg.schema_version === MARKET_TRANSPORT_VERSION
+}
 
 interface UseMarketDataResult {
   candles: CandleData[]
@@ -33,6 +55,9 @@ export function useMarketData(
 
   const wsRef = useRef<MarketWebSocket | null>(null)
   const candleHistoryRef = useRef<CandleData[]>([])
+  const transportRef = useRef<{ streamId: string; sequence: number } | null>(null)
+  const awaitingResyncRef = useRef(false)
+  const resyncRef = useRef<Set<string>>(new Set())
   const originRef = useRef<{ dataSource: MarketDataSource; interval: string | null }>({
     dataSource: "unknown", interval: null,
   })
@@ -60,6 +85,9 @@ export function useMarketData(
         setLoading(true)
         setError(null)
         publishCandles([])
+        transportRef.current = null
+        awaitingResyncRef.current = false
+        resyncRef.current.clear()
         originRef.current = { dataSource: "unknown", interval: null }
         setDataSource("unknown")
         setCandleInterval(null)
@@ -110,6 +138,114 @@ export function useMarketData(
     const ws = new MarketWebSocket()
     wsRef.current = ws
 
+    function resetForStream(streamId: string): void {
+      if (transportRef.current?.streamId === streamId) return
+      transportRef.current = { streamId, sequence: -1 }
+      awaitingResyncRef.current = true
+      // A stream id is the ownership boundary of the candle buffer.  Never
+      // retain historical or live candles from the previous owner.
+      publishCandles([])
+      originRef.current = { dataSource: "unknown", interval: null }
+      setDataSource("unknown")
+      setCandleInterval(null)
+      setDegraded(true)
+    }
+
+    function acceptSequence(
+      msg: MarketWSMessage,
+      kind: "snapshot" | "resync_required" | "bar" | "status",
+    ): { metadata: { streamId: string; sequence: number } | null; duplicate: boolean; rejected: boolean } {
+      const metadata = transportMetadata(msg)
+      if (!metadata) {
+        // An explicitly present but malformed envelope is not a legacy event.
+        const hasEnvelope = msg.schema_version !== undefined
+          || msg.stream_id !== undefined || msg.sequence !== undefined
+        if (hasEnvelope) return { metadata: null, duplicate: false, rejected: true }
+        return { metadata: null, duplicate: false, rejected: false }
+      }
+      if (transportRef.current?.streamId !== metadata.streamId) resetForStream(metadata.streamId)
+      const previous = transportRef.current
+      if (previous && previous.sequence >= 0) {
+        if (awaitingResyncRef.current && kind === "bar") {
+          return { metadata, duplicate: false, rejected: true }
+        }
+        if (metadata.sequence < previous.sequence) {
+          awaitingResyncRef.current = true
+          markDegraded("Secuencia de mercado regresiva; recuperación de datos pendiente")
+          return { metadata, duplicate: false, rejected: true }
+        }
+        if (metadata.sequence > previous.sequence + 1 && kind !== "snapshot") {
+          awaitingResyncRef.current = true
+          markDegraded("Hueco de secuencia en el mercado; recuperación de datos pendiente")
+          return { metadata, duplicate: false, rejected: true }
+        }
+        if (metadata.sequence === previous.sequence && kind === "bar") {
+          return { metadata, duplicate: true, rejected: false }
+        }
+      }
+      // A snapshot is authoritative, and a resync signal is meaningful even
+      // when its sequence repeats the last published value.
+      transportRef.current = metadata
+      if (kind !== "resync_required") awaitingResyncRef.current = false
+      return { metadata, duplicate: false, rejected: false }
+    }
+
+    async function recoverRange(
+      signal: MarketWSMessage,
+      streamId: string,
+    ): Promise<void> {
+      const reason = signal.reason === "gap" || signal.reason === "overflow" ? signal.reason : "overflow"
+      const lastSequence = typeof signal.last_sequence === "number" && Number.isSafeInteger(signal.last_sequence)
+        ? signal.last_sequence : 0
+      const key = `${streamId}:${reason}:${lastSequence}`
+      if (resyncRef.current.has(key)) return
+      resyncRef.current.add(key)
+
+      const current = candleHistoryRef.current
+      const start = current.length > 0 ? current[0].open_time : 0
+      const end = current.length > 0
+        ? current[current.length - 1].close_time + 1 : Math.max(Date.now(), start + 1)
+      const params = new URLSearchParams({
+        symbol, limit: String(MAX_CANDLES), start_time: String(start), end_time: String(end),
+      })
+      try {
+        const response = await fetch(getApiUrl(`/api/market/candles?${params.toString()}`))
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const data = await response.json() as Record<string, unknown>
+        if (
+          !data || Array.isArray(data)
+          || (data.schema_version !== undefined && data.schema_version !== MARKET_TRANSPORT_VERSION)
+          || data.symbol !== symbol || typeof data.interval !== "string" || !data.interval
+          || (data.data_source !== "TEST_ONLY" && data.data_source !== "market_engine")
+          || !Array.isArray(data.candles)
+        ) throw new Error("Respuesta de recuperación incompatible")
+        if (cancelled) return
+
+        const responseStream = typeof data.stream_id === "string" && data.stream_id ? data.stream_id : streamId
+        if (responseStream !== transportRef.current?.streamId) {
+          resetForStream(responseStream)
+        }
+        const next = mergeHistoricalCandles(candleHistoryRef.current, data.candles as CandleData[])
+        publishCandles(next)
+        originRef.current = { dataSource: data.data_source as MarketDataSource, interval: data.interval }
+        setDataSource(originRef.current.dataSource)
+        setCandleInterval(data.interval)
+        if (typeof data.sequence === "number" && Number.isSafeInteger(data.sequence) && data.sequence >= 0) {
+          transportRef.current = { streamId: responseStream, sequence: data.sequence }
+        }
+        if (data.complete === false) {
+          awaitingResyncRef.current = true
+          markDegraded("Recuperación de mercado incompleta")
+        } else {
+          awaitingResyncRef.current = false
+          setDegraded(false)
+          setError(null)
+        }
+      } catch (e: unknown) {
+        if (!cancelled) markDegraded(e instanceof Error ? e.message : "Recuperación de mercado no disponible")
+      }
+    }
+
     // Informar al hook cuando el socket se abre realmente (no solo conecta).
     ws.onOpen(() => {
       if (cancelled) return
@@ -129,8 +265,62 @@ export function useMarketData(
 
     ws.onMessage((msg: MarketWSMessage) => {
       if (cancelled) return
+      if (!hasKnownSchema(msg)) {
+        markDegraded("Versión de transporte de mercado desconocida")
+        return
+      }
       if (msg.type === "subscribed") return
       if (msg.type === "pong") return
+
+      if (msg.type === "snapshot") {
+        if (!Array.isArray(msg.candles) || typeof msg.complete !== "boolean") {
+          markDegraded("Snapshot de mercado inválido")
+          return
+        }
+        let next: CandleData[]
+        try {
+          next = mergeHistoricalCandles([], msg.candles as CandleData[])
+        } catch (e: unknown) {
+          markDegraded(e instanceof Error ? e.message : "Snapshot de mercado inválido")
+          return
+        }
+        const result = acceptSequence(msg, "snapshot")
+        if (result.rejected || (msg.schema_version !== undefined && !result.metadata)) {
+          markDegraded("Snapshot de mercado con envelope inválido")
+          return
+        }
+        publishCandles(next)
+        awaitingResyncRef.current = !msg.complete
+        originRef.current = { dataSource: "market_engine", interval: originRef.current.interval }
+        setDataSource("market_engine")
+        setLoading(false)
+        if (msg.complete) {
+          setDegraded(false)
+          setError(null)
+        } else {
+          markDegraded("Snapshot de mercado incompleto; recuperación pendiente")
+        }
+        return
+      }
+
+      if (msg.type === "resync_required") {
+        const result = acceptSequence(msg, "resync_required")
+        if (result.rejected || !result.metadata || msg.recovery_required !== true
+          || (msg.reason !== "gap" && msg.reason !== "overflow")) {
+          markDegraded("Señal de recuperación de mercado inválida")
+          return
+        }
+        markDegraded("Recuperación de mercado requerida")
+        void recoverRange(msg, result.metadata.streamId)
+        return
+      }
+
+      const sequencing = acceptSequence(msg, msg.type === "status" ? "status" : "bar")
+      if (sequencing.rejected || (msg.schema_version !== undefined && !sequencing.metadata)) {
+        markDegraded("Mensaje de mercado con envelope inválido")
+        return
+      }
+      if (sequencing.duplicate && (msg.type === "bar_updated" || msg.type === "bar_closed")) return
 
       // Actualizar status
       if (msg.type === "status") {

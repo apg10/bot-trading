@@ -32,14 +32,23 @@ export function getWebSocketUrl(path: string): string {
 export async function getMarketStatus(symbol: string = "BTC/USDT"): Promise<MarketStatus> {
   const resp = await fetch(getApiUrl(`/api/market/status?symbol=${encodeURIComponent(symbol)}`))
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-  return resp.json() as Promise<MarketStatus>
+  const data = await resp.json() as MarketStatus & { schema_version?: string }
+  if (data.schema_version !== undefined && data.schema_version !== "market_transport.v1") {
+    throw new Error("Estado de mercado con versión de transporte desconocida")
+  }
+  return data
 }
 
 export async function getCandles(
   symbol: string = "BTC/USDT",
   limit: number = 100,
+  startTime?: number,
+  endTime?: number,
 ): Promise<CandleHistoryResponse> {
-  const resp = await fetch(getApiUrl(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&limit=${limit}`))
+  const params = new URLSearchParams({ symbol, limit: String(limit) })
+  if (startTime !== undefined) params.set("start_time", String(startTime))
+  if (endTime !== undefined) params.set("end_time", String(endTime))
+  const resp = await fetch(getApiUrl(`/api/market/candles?${params.toString()}`))
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   const data = await resp.json() as CandleHistoryResponse
   if (
@@ -47,6 +56,7 @@ export async function getCandles(
     || data.symbol !== symbol || typeof data.interval !== "string" || !data.interval
     || (data.data_source !== "TEST_ONLY" && data.data_source !== "market_engine")
     || !Array.isArray(data.candles)
+    || (data.schema_version !== undefined && data.schema_version !== "market_transport.v1")
   ) {
     throw new Error("Histórico sin procedencia válida o con contrato incompatible")
   }
