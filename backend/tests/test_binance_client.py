@@ -4,6 +4,8 @@ import asyncio
 import json
 import sys
 from collections import deque
+from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import httpx
@@ -150,6 +152,70 @@ def test_http_queries_normalize_symbol_and_remain_public_gets(symbol):
             assert all(request.url.host == "spot.invalid" for request in requests)
         finally:
             await client.close()
+    asyncio.run(scenario())
+
+
+def test_get_book_ticker_returns_decimal_quote_and_local_capture_timestamp():
+    async def scenario():
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={
+                "symbol": "BTCUSDT",
+                "bidPrice": "100.10",
+                "bidQty": "2.5",
+                "askPrice": "100.20",
+                "askQty": "3.5",
+            })
+
+        client = BinanceHTTPClient(BinanceConfig(
+            base_url="https://spot.invalid",
+            api_key="must-not-be-sent",
+            api_secret="must-not-be-sent",
+        ))
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(
+            base_url="https://spot.invalid", transport=httpx.MockTransport(respond),
+        )
+        try:
+            before = datetime.now(timezone.utc)
+            quote = await client.get_book_ticker("BTC/USDT")
+            after = datetime.now(timezone.utc)
+            assert quote["symbol"] == "BTCUSDT"
+            assert quote["bid_price"] == Decimal("100.10")
+            assert quote["ask_qty"] == Decimal("3.5")
+            assert before <= quote["timestamp"] <= after
+            assert requests[0].url.path == "/api/v3/ticker/bookTicker"
+            assert requests[0].url.params["symbol"] == "BTCUSDT"
+            assert "signature" not in requests[0].url.params
+            assert "x-mbx-apikey" not in requests[0].headers
+            assert "authorization" not in requests[0].headers
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"symbol": "BTCUSDT", "bidPrice": "bad", "bidQty": "1",
+     "askPrice": "101", "askQty": "1"},
+])
+def test_get_book_ticker_rejects_invalid_response(payload):
+    async def scenario():
+        client = BinanceHTTPClient(BinanceConfig(base_url="https://spot.invalid"))
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(
+            base_url="https://spot.invalid",
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=payload)),
+        )
+        try:
+            with pytest.raises(ValueError):
+                await client.get_book_ticker("BTCUSDT")
+        finally:
+            await client.close()
+
     asyncio.run(scenario())
 
 

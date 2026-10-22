@@ -14,6 +14,8 @@ import json
 import logging
 import math
 from contextlib import suppress
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -137,6 +139,39 @@ class BinanceHTTPClient:
                     "min_notional": float(filters.get("NOTIONAL", {}).get("minNotional", 5.0)),
                 }
         return {}
+
+    async def get_book_ticker(self, symbol: str) -> dict[str, Any]:
+        """Fetch Binance's public best bid/ask quote; no credentials are used."""
+        native_symbol = _normalize_symbol(symbol)
+        resp = await self._client.get(
+            "/api/v3/ticker/bookTicker", params={"symbol": native_symbol},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("Invalid Binance book ticker response")
+        try:
+            quote_symbol = data["symbol"]
+            bid_price = Decimal(data["bidPrice"])
+            bid_qty = Decimal(data["bidQty"])
+            ask_price = Decimal(data["askPrice"])
+            ask_qty = Decimal(data["askQty"])
+        except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError("Invalid Binance book ticker response") from exc
+        if not isinstance(quote_symbol, str) or not quote_symbol.strip():
+            raise ValueError("Invalid Binance book ticker response")
+        if any(not value.is_finite() for value in (bid_price, bid_qty, ask_price, ask_qty)):
+            raise ValueError("Invalid Binance book ticker response")
+
+        return {
+            "symbol": quote_symbol,
+            "bid_price": bid_price,
+            "bid_qty": bid_qty,
+            "ask_price": ask_price,
+            "ask_qty": ask_qty,
+            # bookTicker has no exchange timestamp; record local capture time.
+            "timestamp": datetime.now(timezone.utc),
+        }
 
     async def close(self):
         await self._client.aclose()

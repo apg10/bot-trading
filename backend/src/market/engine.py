@@ -9,10 +9,12 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from .binance_client import BinanceHTTPClient, BinanceWSClient, BinanceConfig, _normalize_symbol
 from .candle_builder import CandleBuilder, BarEvent, BarEventType
+from .paper_snapshot import PaperMarketExecutionSnapshot, bar_identity
 
 logger = logging.getLogger(__name__)
 Handler = Callable[[Any], Awaitable[None]]
@@ -498,6 +500,94 @@ class MarketEngine:
     def snapshot(self) -> dict[str, Any]:
         """UTC - cierre Binance; consultar recalcula sin depender de nuevos ticks."""
         return self._state_snapshot()
+
+    async def get_paper_snapshot(self) -> PaperMarketExecutionSnapshot | None:
+        """Return a usable public quote only when every engine gate is sound."""
+        state = self.state
+        http_client = self._http_client
+        if http_client is None:
+            return None
+        if not state.entries_allowed or state.pending_gaps or state.stale:
+            return None
+        if state.last_bar_open_time is None or state.last_closed_close_time is None:
+            return None
+
+        # PAPER snapshots use the stricter 30-second freshness contract even
+        # where the engine's interval-specific readiness window is wider.
+        capture_time = self._clock_ms()
+        age_ms = capture_time - state.last_closed_close_time
+        if age_ms < 0 or age_ms > 30_000:
+            return None
+
+        captured_symbol = state.symbol
+        captured_interval = self.config.kline_interval
+        captured_bar_open_time = state.last_bar_open_time
+        captured_close_time = state.last_closed_close_time
+        captured_bar = bar_identity(captured_interval, captured_bar_open_time)
+        captured_stream_id = self.stream_id
+
+        try:
+            quote = await http_client.get_book_ticker(captured_symbol)
+
+            # The quote request yields control to the event loop.  Re-read all
+            # readiness gates and reject data belonging to an old stream.
+            current_state = self._state
+            if (
+                current_state is not state
+                or self._http_client is not http_client
+                or self.stream_id != captured_stream_id
+                or self.config.kline_interval != captured_interval
+                or current_state.symbol != captured_symbol
+                or current_state.last_bar_open_time != captured_bar_open_time
+                or current_state.last_closed_close_time != captured_close_time
+            ):
+                return None
+            if (
+                not current_state.entries_allowed
+                or current_state.pending_gaps
+                or self._pending_gaps
+                or current_state.stale
+                or not self._running
+                or not current_state.connected
+                or current_state.reconnecting
+                or not current_state.complete
+                or current_state.recovering
+                or not current_state.history_loaded
+            ):
+                return None
+            age_ms = self._clock_ms() - captured_close_time
+            if age_ms < 0 or age_ms > 30_000:
+                return None
+
+            if not isinstance(quote, dict):
+                return None
+            quote_symbol = quote["symbol"]
+            if _normalize_symbol(quote_symbol) != _normalize_symbol(captured_symbol):
+                return None
+            timestamp = quote["timestamp"]
+            if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
+                return None
+            timestamp = timestamp.astimezone(timezone.utc)
+            quote_age_ms = self._clock_ms() - int(timestamp.timestamp() * 1000)
+            if quote_age_ms < 0 or quote_age_ms > 30_000:
+                return None
+            return PaperMarketExecutionSnapshot(
+                symbol=captured_symbol,
+                bid=quote["bid_price"],
+                ask=quote["ask_price"],
+                bid_qty=quote["bid_qty"],
+                ask_qty=quote["ask_qty"],
+                timestamp=timestamp,
+                provenance="binance_public_book_ticker",
+                version="v3",
+                bar_identity=captured_bar,
+                freshness_ok=True,
+                gap_ok=current_state.pending_gaps == 0,
+                entries_allowed=current_state.entries_allowed,
+            )
+        except Exception:
+            logger.warning("Binance book ticker inválido; snapshot PAPER bloqueado")
+            return None
 
     def _refresh_state(self) -> None:
         s = self._state

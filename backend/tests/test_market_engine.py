@@ -1,12 +1,15 @@
 """Motor de mercado con clientes falsos; sin red ni plugin pytest-asyncio."""
 
 import asyncio
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
 import src.market.engine as engine_module
 from src.market.binance_client import BinanceConfig
-from src.market.engine import MarketEngine
+from src.market.engine import MarketEngine, MarketState
+from src.market.paper_snapshot import bar_identity
 
 
 @pytest.fixture
@@ -520,4 +523,154 @@ def test_reconfigure_invalid_interval_preserves_original_config(fake_clients):
         with pytest.raises(ValueError):
             await engine.reconfigure("BTC/USDT", "7m")
         assert engine.config.kline_interval == "1m"
+    asyncio.run(scenario())
+
+
+def test_paper_snapshot_combines_ready_engine_with_public_quote():
+    async def scenario():
+        now_datetime = datetime.now(timezone.utc)
+        now = int(now_datetime.timestamp() * 1000)
+        bar_open_time = now - 70_000
+        engine = MarketEngine(
+            BinanceConfig(),
+            clock_ms=lambda: int(datetime.now(timezone.utc).timestamp() * 1000),
+        )
+        engine._running = True
+        engine._recovery_verified = True
+        engine._closed = {
+            bar_open_time: {
+                "open_time": bar_open_time, "close_time": bar_open_time + 59_999,
+                "open": 100.0, "high": 101.0, "low": 99.0,
+                "close": 100.5, "volume": 1.0, "is_closed": True,
+            },
+        }
+        engine._state = MarketState(
+            symbol="BTC/USDT", connected=True, history_loaded=True,
+            complete=True, recovering=False, stale=False, entries_allowed=True,
+            pending_gaps=0,
+        )
+        class FakeHTTP:
+            async def get_book_ticker(self, symbol):
+                assert symbol == "BTC/USDT"
+                return {
+                    "symbol": "BTCUSDT", "bid_price": Decimal("100"),
+                    "bid_qty": Decimal("1"), "ask_price": Decimal("101"),
+                    "ask_qty": Decimal("2"),
+                    "timestamp": datetime.now(timezone.utc),
+                }
+        engine._http_client = FakeHTTP()
+        snapshot = await engine.get_paper_snapshot()
+        assert snapshot is not None
+        assert snapshot.symbol == "BTC/USDT"
+        assert snapshot.bar_identity == bar_identity("1m", bar_open_time)
+        assert snapshot.entries_allowed is True
+
+    asyncio.run(scenario())
+
+
+def test_paper_snapshot_fails_closed_for_invalid_engine_state():
+    async def scenario():
+        engine = MarketEngine(BinanceConfig())
+        engine._http_client = object()
+        engine._state.entries_allowed = False
+        assert await engine.get_paper_snapshot() is None
+
+    asyncio.run(scenario())
+
+
+def test_paper_snapshot_rejected_after_state_change_during_http():
+    """Verify that mutating engine state during the HTTP await rejects the snapshot."""
+    async def scenario():
+        now = _BASE_MS + 70_000
+        engine = MarketEngine(BinanceConfig(), clock_ms=lambda: now)
+        engine._running = True
+        engine._recovery_verified = True
+        engine._closed = {
+            _BASE_MS: {
+                "open_time": _BASE_MS, "close_time": _BASE_MS + 59_999,
+                "open": 100.0, "high": 101.0, "low": 99.0,
+                "close": 100.5, "volume": 1.0, "is_closed": True,
+            },
+        }
+        engine._state = MarketState(
+            symbol="BTC/USDT", connected=True, history_loaded=True,
+            complete=True, recovering=False, stale=False, entries_allowed=True,
+            pending_gaps=0, last_bar_open_time=_BASE_MS,
+            last_closed_close_time=_BASE_MS + 59_999,
+        )
+
+        entered = asyncio.Event()
+        released = asyncio.Event()
+
+        class BlockingHTTP:
+            async def get_book_ticker(self, symbol):
+                entered.set()
+                await released.wait()
+                return {
+                    "symbol": "BTCUSDT",
+                    "bid_price": Decimal("100"), "bid_qty": Decimal("1"),
+                    "ask_price": Decimal("101"), "ask_qty": Decimal("2"),
+                    "timestamp": datetime.fromtimestamp(now / 1000, timezone.utc),
+                }
+        engine._http_client = BlockingHTTP()
+
+        task = asyncio.create_task(engine.get_paper_snapshot())
+        await entered.wait()
+
+        # Revoke access while the HTTP request is suspended.
+        engine._state.entries_allowed = False
+        released.set()
+
+        snapshot = await task
+        assert snapshot is None, "snapshot should be rejected after entries_allowed revoked"
+
+    asyncio.run(scenario())
+
+
+def test_paper_snapshot_rejected_after_client_removed():
+    """Verify that removing the HTTP client during HTTP await rejects the snapshot."""
+    async def scenario():
+        now = _BASE_MS + 70_000
+        engine = MarketEngine(BinanceConfig(), clock_ms=lambda: now)
+        engine._running = True
+        engine._recovery_verified = True
+        engine._closed = {
+            _BASE_MS: {
+                "open_time": _BASE_MS, "close_time": _BASE_MS + 59_999,
+                "open": 100.0, "high": 101.0, "low": 99.0,
+                "close": 100.5, "volume": 1.0, "is_closed": True,
+            },
+        }
+        engine._state = MarketState(
+            symbol="BTC/USDT", connected=True, history_loaded=True,
+            complete=True, recovering=False, stale=False, entries_allowed=True,
+            pending_gaps=0, last_bar_open_time=_BASE_MS,
+            last_closed_close_time=_BASE_MS + 59_999,
+        )
+
+        entered = asyncio.Event()
+        released = asyncio.Event()
+
+        class BlockingHTTP:
+            async def get_book_ticker(self, symbol):
+                entered.set()
+                await released.wait()
+                return {
+                    "symbol": "BTCUSDT",
+                    "bid_price": Decimal("100"), "bid_qty": Decimal("1"),
+                    "ask_price": Decimal("101"), "ask_qty": Decimal("2"),
+                    "timestamp": datetime.fromtimestamp(now / 1000, timezone.utc),
+                }
+        engine._http_client = BlockingHTTP()
+
+        task = asyncio.create_task(engine.get_paper_snapshot())
+        await entered.wait()
+
+        # Remove the client while the HTTP request is suspended.
+        engine._http_client = None
+        released.set()
+
+        snapshot = await task
+        assert snapshot is None, "snapshot should be rejected after client removed"
+
     asyncio.run(scenario())
