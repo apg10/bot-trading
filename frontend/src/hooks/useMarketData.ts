@@ -29,6 +29,12 @@ function hasKnownSchema(msg: MarketWSMessage): boolean {
   return msg.schema_version === undefined || msg.schema_version === MARKET_TRANSPORT_VERSION
 }
 
+// An origin without an interval has not identified its temporalidad yet. It
+// is compatible with the first interval received from the stream.
+function compatibleInterval(known: string | null, received: string | null): boolean {
+  return known === null || received === null || known === received
+}
+
 interface UseMarketDataResult {
   candles: CandleData[]
   status: MarketStatus | null
@@ -56,6 +62,12 @@ export function useMarketData(
   const wsRef = useRef<MarketWebSocket | null>(null)
   const candleHistoryRef = useRef<CandleData[]>([])
   const transportRef = useRef<{ streamId: string; sequence: number } | null>(null)
+  const streamEpochRef = useRef(0)
+  // Identifica también la petición de recuperación que está en vuelo.  El
+  // epoch invalida recuperaciones de otro stream, mientras que este token
+  // evita que una respuesta antigua de la misma identidad vuelva a publicar
+  // datos después de una nueva recuperación.
+  const recoveryTokenRef = useRef<symbol | null>(null)
   const awaitingResyncRef = useRef(false)
   const resyncRef = useRef<Set<string>>(new Set())
   const originRef = useRef<{ dataSource: MarketDataSource; interval: string | null }>({
@@ -103,11 +115,12 @@ export function useMarketData(
             const origin = originRef.current
             if (
               origin.dataSource === "market_engine" && data.data_source === "market_engine"
-              && origin.interval !== data.interval
+              && !compatibleInterval(origin.interval, data.interval)
             ) {
               markDegraded("Histórico de otro intervalo; recuperación de datos pendiente")
             } else {
-              const sameOrigin = origin.dataSource === data.data_source && origin.interval === data.interval
+              const sameOrigin = origin.dataSource === data.data_source
+                && compatibleInterval(origin.interval, data.interval)
               const next = mergeHistoricalCandles(sameOrigin ? candleHistoryRef.current : [], data.candles)
               originRef.current = { dataSource: data.data_source, interval: data.interval }
               publishCandles(next)
@@ -140,6 +153,8 @@ export function useMarketData(
 
     function resetForStream(streamId: string): void {
       if (transportRef.current?.streamId === streamId) return
+      streamEpochRef.current += 1
+      recoveryTokenRef.current = null
       transportRef.current = { streamId, sequence: -1 }
       awaitingResyncRef.current = true
       // A stream id is the ownership boundary of the candle buffer.  Never
@@ -193,6 +208,7 @@ export function useMarketData(
     async function recoverRange(
       signal: MarketWSMessage,
       streamId: string,
+      streamEpoch: number,
     ): Promise<void> {
       const reason = signal.reason === "gap" || signal.reason === "overflow" ? signal.reason : "overflow"
       const lastSequence = typeof signal.last_sequence === "number" && Number.isSafeInteger(signal.last_sequence)
@@ -208,10 +224,21 @@ export function useMarketData(
       const params = new URLSearchParams({
         symbol, limit: String(MAX_CANDLES), start_time: String(start), end_time: String(end),
       })
+      const recoveryToken = Symbol("market-recovery")
+      recoveryTokenRef.current = recoveryToken
       try {
         const response = await fetch(getApiUrl(`/api/market/candles?${params.toString()}`))
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const data = await response.json() as Record<string, unknown>
+        // Recovery belongs to the stream that requested it, not merely to the
+        // request's completion. A newer stream may have replaced the buffer
+        // while this HTTP request was in flight.
+        const responseStream = typeof data?.stream_id === "string" && data.stream_id
+          ? data.stream_id : null
+        if (cancelled || recoveryTokenRef.current !== recoveryToken
+          || streamEpochRef.current !== streamEpoch
+          || transportRef.current?.streamId !== streamId
+          || responseStream !== streamId) return
         if (
           !data || Array.isArray(data)
           || (data.schema_version !== undefined && data.schema_version !== MARKET_TRANSPORT_VERSION)
@@ -219,12 +246,6 @@ export function useMarketData(
           || (data.data_source !== "TEST_ONLY" && data.data_source !== "market_engine")
           || !Array.isArray(data.candles)
         ) throw new Error("Respuesta de recuperación incompatible")
-        if (cancelled) return
-
-        const responseStream = typeof data.stream_id === "string" && data.stream_id ? data.stream_id : streamId
-        if (responseStream !== transportRef.current?.streamId) {
-          resetForStream(responseStream)
-        }
         const next = mergeHistoricalCandles(candleHistoryRef.current, data.candles as CandleData[])
         publishCandles(next)
         originRef.current = { dataSource: data.data_source as MarketDataSource, interval: data.interval }
@@ -242,7 +263,11 @@ export function useMarketData(
           setError(null)
         }
       } catch (e: unknown) {
-        if (!cancelled) markDegraded(e instanceof Error ? e.message : "Recuperación de mercado no disponible")
+        if (!cancelled && recoveryTokenRef.current === recoveryToken
+          && streamEpochRef.current === streamEpoch
+          && transportRef.current?.streamId === streamId) {
+          markDegraded(e instanceof Error ? e.message : "Recuperación de mercado no disponible")
+        }
       }
     }
 
@@ -273,7 +298,10 @@ export function useMarketData(
       if (msg.type === "pong") return
 
       if (msg.type === "snapshot") {
-        if (!Array.isArray(msg.candles) || typeof msg.complete !== "boolean") {
+        const snapshotInterval = msg.interval
+        if (!Array.isArray(msg.candles) || typeof msg.complete !== "boolean"
+          || (snapshotInterval !== undefined && snapshotInterval !== null
+            && (typeof snapshotInterval !== "string" || !snapshotInterval))) {
           markDegraded("Snapshot de mercado inválido")
           return
         }
@@ -291,8 +319,12 @@ export function useMarketData(
         }
         publishCandles(next)
         awaitingResyncRef.current = !msg.complete
-        originRef.current = { dataSource: "market_engine", interval: originRef.current.interval }
+        originRef.current = {
+          dataSource: "market_engine",
+          interval: typeof snapshotInterval === "string" ? snapshotInterval : null,
+        }
         setDataSource("market_engine")
+        setCandleInterval(typeof snapshotInterval === "string" ? snapshotInterval : null)
         setLoading(false)
         if (msg.complete) {
           setDegraded(false)
@@ -311,7 +343,7 @@ export function useMarketData(
           return
         }
         markDegraded("Recuperación de mercado requerida")
-        void recoverRange(msg, result.metadata.streamId)
+        void recoverRange(msg, result.metadata.streamId, streamEpochRef.current)
         return
       }
 
@@ -344,13 +376,13 @@ export function useMarketData(
         ) return
         if (
           originRef.current.dataSource === "market_engine"
-          && originRef.current.interval !== update.interval
+          && !compatibleInterval(originRef.current.interval, update.interval)
         ) {
           markDegraded("Evento de otro intervalo; recuperación de datos pendiente")
           return
         }
         const sameOrigin = originRef.current.dataSource === update.data_source
-          && originRef.current.interval === update.interval
+          && compatibleInterval(originRef.current.interval, update.interval)
         let next: CandleData[]
         try {
           if (typeof update.candle?.is_closed !== "boolean"
@@ -362,7 +394,7 @@ export function useMarketData(
           markDegraded(e instanceof Error ? e.message : "Vela inválida recibida")
           return
         }
-        if (!sameOrigin) {
+        if (!sameOrigin || originRef.current.interval === null) {
           // No mezclar la fixture o una temporalidad distinta con el stream.
           originRef.current = { dataSource: update.data_source, interval: update.interval }
           setDataSource(update.data_source)
@@ -379,7 +411,9 @@ export function useMarketData(
           || typeof msg.interval !== "string" || !msg.interval
           || typeof msg.gap_ms !== "number" || !Number.isFinite(msg.gap_ms) || msg.gap_ms <= 0
         ) return
-        if (originRef.current.dataSource === "market_engine" && originRef.current.interval !== msg.interval) return
+        if (originRef.current.dataSource === "market_engine"
+          && originRef.current.interval !== null
+          && originRef.current.interval !== msg.interval) return
         markDegraded("Hueco detectado en el mercado; recuperación de datos pendiente")
       }
     })

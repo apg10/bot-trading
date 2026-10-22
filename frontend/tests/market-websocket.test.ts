@@ -927,6 +927,76 @@ describe("C09 — useMarketData real con hooks React controlados", () => {
     expect(closed.interval).toBe("1m")
   })
 
+  it("acepta una barra cuando el snapshot aún no conoce el intervalo", async () => {
+    await mountHook()
+    const first = socket()
+    first.emitOpen()
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 1, candles: fixture.candles, complete: true,
+    }))
+    first.emitMessage(JSON.stringify({
+      ...bar(), schema_version: "market_transport.v1", stream_id: "stream-a", sequence: 2,
+    }))
+
+    const result = renderHook()
+    expect(result.interval).toBe("1m")
+    expect(result.candles).toEqual([...fixture.candles, bar().candle])
+  })
+
+  it("usa el intervalo incluido en el snapshot como origen del stream", async () => {
+    await mountHook()
+    const first = socket()
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 1, interval: "1m", candles: [], complete: true,
+    }))
+
+    expect(renderHook().interval).toBe("1m")
+  })
+
+  it("descarta una recuperación de A que llega después de eventos de B", async () => {
+    await mountHook()
+    const first = socket()
+    first.emitOpen()
+    type RecoveryResponse = CandleHistoryResponse & { stream_id: string; sequence: number }
+    let resolveRecovery!: (value: RecoveryResponse) => void
+    const recovery = new Promise<RecoveryResponse>(resolve => { resolveRecovery = resolve })
+    vi.mocked(fetch).mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => recovery,
+    }) as Response)
+
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 1, interval: "1m", candles: [], complete: true,
+    }))
+    first.emitMessage(JSON.stringify({
+      type: "resync_required", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 2, reason: "gap", last_sequence: 1,
+      recovery_required: true,
+    }))
+    const bBar = {
+      ...bar(), schema_version: "market_transport.v1", stream_id: "stream-b", sequence: 2,
+      candle: { ...bar().candle, open_time: 2000, close_time: 2060 },
+    }
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-b", sequence: 1, interval: "1m", candles: [bBar.candle], complete: true,
+    }))
+    first.emitMessage(JSON.stringify(bBar))
+
+    const responseA: RecoveryResponse = {
+      ...fixture, stream_id: "stream-a", sequence: 2,
+      candles: [{ ...bar().candle, open_time: 9000, close_time: 9060 }],
+    }
+    // Resolve the response body only after B has become the active stream.
+    resolveRecovery(responseA)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(renderHook().candles).toEqual([bBar.candle])
+  })
+
   it("cierre inesperado pone conexión false y resetea status; reconexión resuscribe sin duplicados", async () => {
     await mountHook()
     const first = socket()
