@@ -129,6 +129,7 @@ def validate_preferences(payload: Any) -> tuple[bool, Optional[str]]:
     return True, None
 
 
+@router.put("/ui")
 @router.post("/ui")
 async def save_preferences(
     request: Request, store: SQLiteStore = Depends(get_store)

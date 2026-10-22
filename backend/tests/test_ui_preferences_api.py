@@ -67,6 +67,35 @@ def test_valid_save_and_reload_round_trip(client):
     assert response.json()["revision"] == 1
 
 
+def test_valid_put_uses_same_validated_revision_contract(client):
+    test_client, _ = client
+    payload = _payload()
+
+    response = test_client.put(
+        "/api/preferences/ui", json={"preferences": payload, "revision": 0}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "saved", "revision": 1}
+
+    updated = {**payload, "view": {**payload["view"], "interval": "5m"}}
+    response = test_client.put(
+        "/api/preferences/ui", json={"preferences": updated, "revision": 1}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "saved", "revision": 2}
+
+    invalid = {**updated, "view": {**updated["view"], "interval": "10m"}}
+    response = test_client.put(
+        "/api/preferences/ui", json={"preferences": invalid, "revision": 2}
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "UI_PREFERENCES_INVALID_INTERVAL"
+
+    response = test_client.get("/api/preferences/ui")
+    assert response.status_code == 200
+    assert json.loads(response.json()["preferences"]) == updated
+
+
 def test_stale_write_returns_conflict(client):
     test_client, _ = client
     first = _payload()
