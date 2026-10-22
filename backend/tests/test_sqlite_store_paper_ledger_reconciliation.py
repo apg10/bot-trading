@@ -353,6 +353,11 @@ def test_ledger_reconciliation_across_all_slices(tmp_path: Path) -> None:
     accepted_buy = _accept_buy(store, buy)
     assert accepted_buy.status == PaperOrderStatus.ACCEPTED
     assert_opening_unchanged()
+    # Re-opening with the same immutable snapshot must not reset the live
+    # balances (the opening is distinct from current ledger state).
+    reopened_opening = PaperAccountOpening.model_validate_json(opening_json)
+    assert _run(store.open_paper_account(reopened_opening)) == reopened_opening
+    assert_opening_unchanged()
     assert_balances(
         {
             "BTC": (Decimal("0"), Decimal("0"), Decimal("0")),
@@ -372,7 +377,9 @@ def test_ledger_reconciliation_across_all_slices(tmp_path: Path) -> None:
     fills.append(buy_fill_one)
     _run(store.save_paper_fill(buy_fill_one))
     assert_opening_unchanged()
-    _run(store.apply_paper_fill(buy_fill_one.fill_id))
+    assert _run(store.apply_paper_fill(buy_fill_one.fill_id)) == buy_fill_one
+    # A retry is a no-op: one fill identity has one durable application.
+    assert _run(store.apply_paper_fill(buy_fill_one.fill_id)) == buy_fill_one
     assert_opening_unchanged()
     assert_fill_journal(buy_fill_one)
     assert_balances(
@@ -395,7 +402,8 @@ def test_ledger_reconciliation_across_all_slices(tmp_path: Path) -> None:
     fills.append(buy_fill_two)
     _run(store.save_paper_fill(buy_fill_two))
     assert_opening_unchanged()
-    _run(store.apply_paper_fill(buy_fill_two.fill_id))
+    assert _run(store.apply_paper_fill(buy_fill_two.fill_id)) == buy_fill_two
+    assert _run(store.apply_paper_fill(buy_fill_two.fill_id)) == buy_fill_two
     assert_opening_unchanged()
     assert_fill_journal(buy_fill_one)
     assert_fill_journal(buy_fill_two)
@@ -457,7 +465,8 @@ def test_ledger_reconciliation_across_all_slices(tmp_path: Path) -> None:
     fills.append(sell_fill_one)
     _run(store.save_paper_fill(sell_fill_one))
     assert_opening_unchanged()
-    _run(store.apply_paper_fill(sell_fill_one.fill_id))
+    assert _run(store.apply_paper_fill(sell_fill_one.fill_id)) == sell_fill_one
+    assert _run(store.apply_paper_fill(sell_fill_one.fill_id)) == sell_fill_one
     assert_opening_unchanged()
     assert_fill_journal(sell_fill_one)
     assert_balances(
@@ -505,7 +514,8 @@ def test_ledger_reconciliation_across_all_slices(tmp_path: Path) -> None:
     fills.append(sell_fill_two)
     _run(store.save_paper_fill(sell_fill_two))
     assert_opening_unchanged()
-    _run(store.apply_paper_fill(sell_fill_two.fill_id))
+    assert _run(store.apply_paper_fill(sell_fill_two.fill_id)) == sell_fill_two
+    assert _run(store.apply_paper_fill(sell_fill_two.fill_id)) == sell_fill_two
     assert_opening_unchanged()
     for applied_fill in fills:
         assert_fill_journal(applied_fill)
@@ -556,6 +566,10 @@ def test_ledger_reconciliation_across_all_slices(tmp_path: Path) -> None:
         assert_fill_journal(applied_fill)
     assert _run(reopened.load_paper_order(buy.order_id)).status == PaperOrderStatus.FILLED
     assert _run(reopened.load_paper_order(sell.order_id)).status == PaperOrderStatus.FILLED
+    # Restart recovery must preserve application identity and remain safe to
+    # retry; no balances, lots, reservations, or order fills may be doubled.
+    for applied_fill in fills:
+        assert _run(reopened.apply_paper_fill(applied_fill.fill_id)) == applied_fill
     conn = sqlite3.connect(str(db))
     try:
         assert conn.execute("SELECT COUNT(*) FROM position_lots").fetchone()[0] == 0
