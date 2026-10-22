@@ -5,10 +5,10 @@
 
 ## Estado breve
 
-- Último código publicado: `2cbd689` (`feat(paper): gate atomic acceptance with risk filters`), `master` sincronizada con `origin/master`.
+- Último código publicado: `98c86b9` (`feat: ACT-P-005 fill-simulator-pure review-5 complete + docs and frontend updates`), `master` sincronizada con `origin/master`.
 - ACT-P-001, ACT-P-002 y ACT-P-003 globales: **PENDIENTES**. Sus slices aceptados no cierran los criterios globales restantes.
 - ACT-P-004: **ACEPTADO** tras risk policy pura, filtros versionados, aceptación atómica/concurrente y regresión backend (`1,784 passed`, 0 fallos, 0 skips, 1 warning deprecado).
-- ACT-P-005: semántica aprobada en §14.29. El evaluator puro reporta 79 passed pero sigue `REQUIERE_CAMBIOS`: capacity de otro símbolo y reservation sin cuenta pueden pasar. El rework vigente está anotado en §14.35 y [[Handoffs/ACT-P-005-fill-simulator-pure-review-5]].
+- ACT-P-005: **TECHNICALLY_ACCEPTED** — evaluador puro aceptado, gate 92 passed. **Globalmente PENDIENTE** hasta integración autorizada con allowlist explícita. No iniciar trabajo de integración sin autorización.
 - PAPER sigue en desarrollo, no es ciclo autónomo ni matching de exchange. LIVE y envío externo permanecen fuera de alcance.
 
 ## Navegación de la bóveda

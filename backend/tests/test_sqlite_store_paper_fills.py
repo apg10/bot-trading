@@ -1,4 +1,4 @@
-"""Tests for PaperFill persistence in SQLiteStore (current schema v10).
+"""Tests for PaperFill persistence in SQLiteStore (current schema v12).
 
 Covers:
   - Round-trip Decimal fidelity via _paper_decimal validator.
@@ -43,8 +43,8 @@ from src.persistence.sqlite_store import (
     StoreClosedError,
     StoreCorruptionError,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V10_TABLES,
-    _SCHEMA_V11_TABLES,
+    _SCHEMA_V12_TABLES,
+    _SCHEMA_V12_TABLES,
 )
 
 
@@ -433,9 +433,9 @@ def test_load_returns_none_when_missing(tmp_path: Path) -> None:
 # ── 5. v5 → current migration: DDL creation, version bump, table presence ─────
 
 
-def test_v5_to_v10_migration_creates_current_tables(tmp_path: Path) -> None:
-    """A v5 source migrates to current v10 with fill, balance, reserve, and fill application tables."""
-    db = tmp_path / "v5-to-v10.db"
+def test_v5_to_v12_migration_creates_current_tables(tmp_path: Path) -> None:
+    """A v5 source migrates to current v12 with fill, balance, reserve, and fill application tables."""
+    db = tmp_path / "v5-to-v12.db"
 
     # Build a v5 database directly.
     conn = sqlite3.connect(str(db))
@@ -491,12 +491,12 @@ def test_v5_to_v10_migration_creates_current_tables(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
     # All historical tables and current account-opening tables are present.
-    assert _SCHEMA_V11_TABLES <= tables
+    assert _SCHEMA_V12_TABLES <= tables
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
     conn.close()
     _run(upgraded.close())
@@ -554,7 +554,7 @@ def test_v5_to_v9_migration_preserves_all_v5_data(tmp_path: Path) -> None:
 # ── 6. Reopen without duplicate migration execution ────────────────────────────
 
 
-def test_reopen_v10_is_idempotent(tmp_path: Path) -> None:
+def test_reopen_v12_is_idempotent(tmp_path: Path) -> None:
     """Re-initializing a v10 database is idempotent; no error or schema change."""
     db = tmp_path / "reinit-v10.db"
     store1 = SQLiteStore(db)
@@ -564,11 +564,11 @@ def test_reopen_v10_is_idempotent(tmp_path: Path) -> None:
     _run(store1.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert _SCHEMA_V11_TABLES <= tables
+    assert _SCHEMA_V12_TABLES <= tables
     conn.close()
     _run(store1.close())
 
@@ -647,18 +647,18 @@ def test_v5_to_v6_migration_rolls_back_ddl_and_version(
 # ── 8. Fresh database initializes at v9 ──────────────────────────────────────
 
 
-def test_new_database_initializes_directly_at_v10(tmp_path: Path) -> None:
+def test_new_database_initializes_directly_at_v12(tmp_path: Path) -> None:
     """A fresh database initializes with current order-acceptance tables."""
     db = tmp_path / "fresh-v10.db"
     store = SQLiteStore(db)
     _run(store.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert _SCHEMA_V11_TABLES <= tables
+    assert _SCHEMA_V12_TABLES <= tables
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 0
     conn.close()
     _run(store.close())
@@ -776,22 +776,25 @@ def test_empty_lot_allocations_default(tmp_path: Path) -> None:
     _run(store.close())
 
 
-# ── 13. SchemaVersionMismatchError on missing tables after v10 init ─────────────
+# ── 13. SchemaVersionMismatchError on missing tables after v12 init ─────────────
 
 
-def test_v10_schema_version_mismatch_on_missing_tables(tmp_path: Path) -> None:
-    """If user_version is 10 but current tables are missing, mismatch error."""
-    db = tmp_path / "v10-missing-table.db"
+def test_v12_schema_version_mismatch_on_missing_tables(tmp_path: Path) -> None:
+    """If user_version is 12 but current tables are missing, mismatch error."""
+    db = tmp_path / "v12-missing-table.db"
 
     conn = sqlite3.connect(str(db))
     conn.executescript("""
         CREATE TABLE sessions (session_id TEXT PRIMARY KEY);
-        PRAGMA user_version = 10;
+        PRAGMA user_version = 12;
     """)
     conn.close()
 
     store = SQLiteStore(db)
-    with pytest.raises(SchemaVersionMismatchError, match="schema version is 10 but required v10 tables are missing"):
+    with pytest.raises(
+        SchemaVersionMismatchError,
+        match="schema version is 12 but required tables are missing",
+    ):
         _run(store.initialize())
 
 
@@ -890,9 +893,9 @@ def test_zero_timestamp_allowed(tmp_path: Path) -> None:
 # ── 18. v4 → current migration path ───────────────────────────────────────────
 
 
-def test_v4_to_v10_migration_creates_current_tables(tmp_path: Path) -> None:
+def test_v4_to_v12_migration_creates_current_tables(tmp_path: Path) -> None:
     """v4 → current migration creates fills, balances, orders, reservations, and fill application tables."""
-    db = tmp_path / "v4-to-v10.db"
+    db = tmp_path / "v4-to-v12.db"
 
     # Build a v4 database (with experiment_results).
     store_v4 = SQLiteStore(db)
@@ -928,11 +931,11 @@ def test_v4_to_v10_migration_creates_current_tables(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert _SCHEMA_V11_TABLES <= tables
+    assert _SCHEMA_V12_TABLES <= tables
     assert conn.execute("SELECT COUNT(*) FROM sessions WHERE session_id=?", ("preserved-v4",)).fetchone()[0] == 1
     conn.close()
     _run(upgraded.close())
@@ -941,9 +944,9 @@ def test_v4_to_v10_migration_creates_current_tables(tmp_path: Path) -> None:
 # ── 19. v3 → current migration path ───────────────────────────────────────────
 
 
-def test_v3_to_v10_migration_preserves_all_data(tmp_path: Path) -> None:
+def test_v3_to_v12_migration_preserves_all_data(tmp_path: Path) -> None:
     """v3 → current migration preserves data and creates current tables."""
-    db = tmp_path / "v3-to-v10.db"
+    db = tmp_path / "v3-to-v12.db"
 
     conn = sqlite3.connect(str(db))
     conn.executescript("""
@@ -966,12 +969,12 @@ def test_v3_to_v10_migration_preserves_all_data(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
     assert "paper_fills" in tables
-    assert _SCHEMA_V10_TABLES <= tables
+    assert _SCHEMA_V12_TABLES <= tables
     # v3 data preserved.
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM experiment_definitions").fetchone()[0] == 1

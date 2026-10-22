@@ -1,10 +1,10 @@
-"""Tests for atomic v10→v11 migration with preservation and rollback (Pair 2).
+"""Tests for atomic v10→v12 migration with preservation and rollback (Pair 2).
 
 Covers:
-- v10→v11 migration creates new tables while preserving existing data
+- v10→v12 migration creates new tables while preserving existing data
 - Migration rollback on DDL failure (transaction safety)
-- Multiple re-initialization idempotency (already at v11)
-- Data integrity across migration paths (v8, v9, v7 → v11)
+- Multiple re-initialization idempotency (already at v12)
+- Data integrity across migration paths (v8, v9, v7 → v12)
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceScopeError,
     PaperOrderAcceptanceStateError,
     SQLiteStore,
-    _SCHEMA_V10_TABLES,
-    _SCHEMA_V11_TABLES,
+    _SCHEMA_V12_TABLES,
+    _SCHEMA_V12_TABLES,
     _PAPER_SELL_DDL_STATEMENTS,
 )
 
@@ -57,7 +57,7 @@ def _run(coro: Any) -> Any:
 @pytest.fixture
 def temp_db(tmp_path: Path) -> Path:
     """Create a temporary SQLite database file."""
-    db_path = tmp_path / "test_v11_migration.db"
+    db_path = tmp_path / "test_v12_migration.db"
     db_path.touch()
     return db_path
 
@@ -166,13 +166,13 @@ def _create_v10_tables(conn: sqlite3.Connection) -> None:
         environment TEXT NOT NULL CHECK (environment = 'paper'), lot_json TEXT NOT NULL)""")
 
 
-# ── Test v10→v11 migration preservation ───────────────────────────────────
+# ── Test v10→v12 migration preservation ───────────────────────────────────
 
-class TestV10ToV11MigrationPreservation:
-    """Tests for v10→v11 migration with data preservation."""
+class TestV10ToV12MigrationPreservation:
+    """Tests for v10→v12 migration with data preservation."""
 
-    def test_migration_creates_v11_tables(self, temp_db: Path) -> None:
-        """Test that migration from v10 to v11 creates the new tables."""
+    def test_migration_creates_v12_tables(self, temp_db: Path) -> None:
+        """Test that migration from v10 to v12 creates the new tables."""
         conn = sqlite3.connect(temp_db)
         _create_v10_tables(conn)
         cursor = conn.cursor()
@@ -183,7 +183,7 @@ class TestV10ToV11MigrationPreservation:
         store = SQLiteStore(temp_db)
         _run(store.initialize())
 
-        # Verify v11 tables exist
+        # Verify v12 tables exist
         conn = sqlite3.connect(temp_db)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -192,12 +192,13 @@ class TestV10ToV11MigrationPreservation:
 
         assert "paper_reservation_lot_allocations" in table_names
         assert "paper_sell_accounting" in table_names
+        assert "paper_fill_evaluations" in table_names
 
-        # Verify schema version is 11
+        # Verify schema version is 12
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 11
+        assert version == 12
 
         _run(store.close())
 
@@ -308,7 +309,7 @@ class TestV10ToV11MigrationPreservation:
 
 # ── Test migration rollback on DDL failure ─────────────────────────────────
 
-class TestMigrationRollback:
+class TestMigrationRollbackV12:
     """Tests for migration rollback behavior."""
 
     def test_migration_rollback_on_ddl_failure(self, temp_db: Path) -> None:
@@ -328,7 +329,7 @@ class TestMigrationRollback:
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 11
+        assert version == 12
 
         _run(store.close())
 
@@ -355,10 +356,10 @@ class TestMigrationRollback:
 
 # ── Test multiple re-initialization idempotency ─────────────────────────────
 
-class TestReInitializationIdempotency:
+class TestReInitializationIdempotencyV12:
     """Tests for multiple re-initialization idempotency."""
 
-    def test_re_initialize_already_at_v11(self, temp_db: Path) -> None:
+    def test_re_initialize_already_at_v12(self, temp_db: Path) -> None:
         """Test that re-initializing an already-upgraded database is safe."""
         conn = sqlite3.connect(temp_db)
         _create_v10_tables(conn)
@@ -367,7 +368,7 @@ class TestReInitializationIdempotency:
         conn.commit()
         conn.close()
 
-        # Migrate to v11
+        # Migrate to v12
         store1 = SQLiteStore(temp_db)
         _run(store1.initialize())
 
@@ -375,19 +376,19 @@ class TestReInitializationIdempotency:
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 11
+        assert version == 12
 
         _run(store1.close())
 
-        # Re-initialize (should be no-op since already at v11)
+        # Re-initialize (should be no-op since already at v12)
         store2 = SQLiteStore(temp_db)
         _run(store2.initialize())
 
-        # Verify schema version is still 11
+        # Verify schema version is still 12
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 11
+        assert version == 12
 
         _run(store2.close())
 
@@ -402,12 +403,12 @@ class TestReInitializationIdempotency:
         conn.commit()
         conn.close()
 
-        # Migrate to v11
+        # Migrate to v12
         store1 = SQLiteStore(temp_db)
         _run(store1.initialize())
         _run(store1.close())
 
-        # Re-initialize (should be no-op since already at v11)
+        # Re-initialize (should be no-op since already at v12)
         store2 = SQLiteStore(temp_db)
         _run(store2.initialize())
 
@@ -454,7 +455,7 @@ class TestDataIntegrityAcrossMigrationPaths:
         assert row is not None
         assert row[0] == "order-001"
 
-        # Verify v11 tables exist
+        # Verify v12 tables exist
         conn = sqlite3.connect(temp_db)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -463,6 +464,7 @@ class TestDataIntegrityAcrossMigrationPaths:
 
         assert "paper_reservation_lot_allocations" in table_names
         assert "paper_sell_accounting" in table_names
+        assert "paper_fill_evaluations" in table_names
 
         _run(store.close())
 
@@ -491,7 +493,7 @@ class TestDataIntegrityAcrossMigrationPaths:
         assert row is not None
         assert row[0] == "order-001"
 
-        # Verify v11 tables exist
+        # Verify v12 tables exist
         conn = sqlite3.connect(temp_db)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -500,6 +502,7 @@ class TestDataIntegrityAcrossMigrationPaths:
 
         assert "paper_reservation_lot_allocations" in table_names
         assert "paper_sell_accounting" in table_names
+        assert "paper_fill_evaluations" in table_names
 
         _run(store.close())
 
@@ -527,7 +530,7 @@ class TestDataIntegrityAcrossMigrationPaths:
         assert row is not None
         assert row[0] == "fill-001"
 
-        # Verify v11 tables exist
+        # Verify v12 tables exist
         conn = sqlite3.connect(temp_db)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -536,6 +539,7 @@ class TestDataIntegrityAcrossMigrationPaths:
 
         assert "paper_reservation_lot_allocations" in table_names
         assert "paper_sell_accounting" in table_names
+        assert "paper_fill_evaluations" in table_names
 
         _run(store.close())
 

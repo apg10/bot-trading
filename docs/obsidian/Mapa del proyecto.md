@@ -24,6 +24,7 @@ La ruta anterior **no es una ruta de ejecución financiera**. Propuestas, escena
 
 - ACT-P-002 y ACT-P-003 globales permanecen `PENDIENTE`, aunque sus slices de libro, fills y órdenes aceptados sustentan los criterios requeridos por P-004.
 - ACT-P-004 global está `ACEPTADO`: policy/snapshot de riesgo independiente de `StrategyConfig`, filtros de símbolo versionados y aceptación BUY atómica dentro de SQLite; el total de reservas BUY se recompone desde registros durables y se cubre concurrencia.
+- ACT-P-005 evaluador puro: **TECHNICALLY_ACCEPTED** (92 tests). **Globalmente PENDIENTE** — integración SQLite requiere autorización explícita con allowlist y regression checks. No iniciar integración sin autorización.
 - El gate no crea un motor de fill ni decisión intrabar. Parciales simulados, comisiones/spread/slippage/gaps y matching siguen sujetos a ACT-P-005; ciclo autónomo a ACT-P-006.
 - No inferir una cartera automatizada o reconciliación completa de la existencia de tablas; ver límites y estados globales en el plan raíz.
 - Ver [Seguimiento](Seguimiento.md) para un resumen fechado y [plan raíz](../../trading-bot-action-plan.md) para el estado canónico.

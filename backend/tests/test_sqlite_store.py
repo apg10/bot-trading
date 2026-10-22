@@ -40,8 +40,8 @@ from src.persistence.sqlite_store import (
     VariantDiscardConflictError,
     _SCHEMA_V4_TABLES,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V10_TABLES,
-    _SCHEMA_V11_TABLES,
+    _SCHEMA_V12_TABLES,
+    _SCHEMA_V12_TABLES,
 )
 
 
@@ -119,7 +119,7 @@ def test_double_initialize_applies_single_migration(tmp_path: Path) -> None:
     _run(store.initialize())  # second init must not duplicate tables
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     # FKs are set per-connection during writes; verify by checking the schema
     fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
     assert fk == 0  # default off when not explicitly enabled
@@ -129,7 +129,7 @@ def test_double_initialize_applies_single_migration(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
     conn.close()
     _run(store.close())
 
@@ -397,7 +397,7 @@ def test_v10_order_acceptance_tables_without_lifecycle_or_preference_tables(
     }
     conn.close()
     # v11 adds paper_reservation_lot_allocations and paper_sell_accounting tables.
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
     _run(store.close())
 
 
@@ -581,13 +581,13 @@ def test_load_unknown_session_returns_none(tmp_path: Path) -> None:
 # ── 16. ExperimentDefinition store: new DB v2 and v1→v2 upgrade ────────────────
 
 
-def test_new_database_initializes_directly_at_v11(tmp_path: Path) -> None:
+def test_new_database_initializes_directly_at_v12(tmp_path: Path) -> None:
     db = tmp_path / "new-v11.db"
     store = SQLiteStore(db)
     _run(store.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {
         row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -614,7 +614,7 @@ def test_new_database_initializes_directly_at_v11(tmp_path: Path) -> None:
     _run(store.close())
 
 
-def test_v1_to_v11_migration_preserves_existing_sessions_and_configs(
+def test_v1_to_v12_migration_preserves_existing_sessions_and_configs(
     tmp_path: Path,
 ) -> None:
     db = tmp_path / "upgrade-v1.db"
@@ -650,7 +650,7 @@ def test_v1_to_v11_migration_preserves_existing_sessions_and_configs(
     assert _run(upgraded.load_session("existing-session"))["dataset_refs"] == ["existing-dataset"]
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     assert conn.execute("SELECT COUNT(*) FROM experiment_definitions").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM run_attempts").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM experiment_results").fetchone()[0] == 0
@@ -1546,7 +1546,7 @@ def test_load_run_attempt_rejects_missing_required_seed(tmp_path: Path) -> None:
     _run(store.close())
 
 
-def test_migration_v2_to_v11_preserves_sessions_and_configs(tmp_path: Path) -> None:
+def test_migration_v2_to_v12_preserves_sessions_and_configs(tmp_path: Path) -> None:
     """v2 → v10 migration preserves sessions, configs, and experiment definitions."""
     db = tmp_path / "v2-to-v10.db"
 
@@ -1580,13 +1580,13 @@ def test_migration_v2_to_v11_preserves_sessions_and_configs(tmp_path: Path) -> N
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {
         row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
     conn.close()
     _run(upgraded.close())
 
@@ -1669,7 +1669,7 @@ def test_migration_failure_reverts_ddl_and_version(tmp_path: Path, monkeypatch: 
 # ── 19. v3 → current-schema migration tests ────────────────────────────────────
 
 
-def test_v3_to_v11_migration_preserves_all_v3_data(tmp_path: Path) -> None:
+def test_v3_to_v12_migration_preserves_all_v3_data(tmp_path: Path) -> None:
     """v3 → v10 migration preserves sessions, configs, definitions, and runs."""
     db = tmp_path / "v3-to-v10.db"
 
@@ -1732,11 +1732,11 @@ def test_v3_to_v11_migration_preserves_all_v3_data(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
 
     # All v3 data preserved.
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
@@ -1820,13 +1820,14 @@ def test_v3_to_v4_migration_rolls_back_ddl_and_version(tmp_path: Path, monkeypat
     conn.close()
 
 
-def _make_v4_database_for_v11_migration(db: Path) -> None:
+def _make_v4_database_for_v12_migration(db: Path) -> None:
     """Create an actual v4 table set from a fresh current database."""
     store = SQLiteStore(db)
     _run(store.initialize())
     _run(store.close())
 
     conn = sqlite3.connect(str(db))
+    conn.execute("DROP TABLE paper_fill_evaluations")
     conn.execute("DROP TABLE variant_dispositions")
     conn.execute("DROP TABLE result_exclusions")
     conn.execute("DROP TABLE paper_fills")
@@ -1845,24 +1846,24 @@ def _make_v4_database_for_v11_migration(db: Path) -> None:
     conn.close()
 
 
-def test_v4_to_v11_migration_creates_current_tables_and_preserves_data(
+def test_v4_to_v12_migration_creates_current_tables_and_preserves_data(
     tmp_path: Path,
 ) -> None:
-    """The v4 → v11 chain adds current tables and preserves v4 data."""
-    db = tmp_path / "v4-to-v11.db"
-    _make_v4_database_for_v11_migration(db)
+    """The v4 → v12 chain adds current tables and preserves v4 data."""
+    db = tmp_path / "v4-to-v12.db"
+    _make_v4_database_for_v12_migration(db)
 
     upgraded = SQLiteStore(db)
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {
         row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
     assert conn.execute(
         "SELECT session_id FROM sessions WHERE session_id='preserved-v4-session'"
     ).fetchone() == ("preserved-v4-session",)
@@ -1883,15 +1884,17 @@ def test_v4_to_v11_migration_creates_current_tables_and_preserves_data(
 def test_v4_migration_failure_rolls_back_ddl_and_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Failure in v5 DDL rolls the v4 → v11 migration back completely."""
-    db = tmp_path / "v4-to-v11-rollback.db"
-    _make_v4_database_for_v11_migration(db)
+    """A late v12 DDL failure rolls the v4 → v12 migration back completely."""
+    db = tmp_path / "v4-to-v12-rollback.db"
+    _make_v4_database_for_v12_migration(db)
 
-    original_v5_statements = sqlite_store_module._SCHEMA_V5_STATEMENTS
+    original_fill_application_ddl = (
+        sqlite_store_module._PAPER_FILL_APPLICATION_DDL_STATEMENTS
+    )
     monkeypatch.setattr(
         sqlite_store_module,
-        "_SCHEMA_V5_STATEMENTS",
-        (*original_v5_statements[:1], "THIS IS INVALID SQL"),
+        "_PAPER_FILL_APPLICATION_DDL_STATEMENTS",
+        (*original_fill_application_ddl[:1], "THIS IS INVALID SQL"),
     )
     migration = SQLiteStore(db)
     with pytest.raises(sqlite3.OperationalError):
@@ -1911,18 +1914,18 @@ def test_v4_migration_failure_rolls_back_ddl_and_version(
     conn.close()
 
 
-def test_new_database_initializes_directly_at_v11_with_paper_acceptance(tmp_path: Path) -> None:
-    """A fresh database initializes v11 with atomic order-acceptance tables."""
-    db = tmp_path / "fresh-v11.db"
+def test_new_database_initializes_directly_at_v12_with_paper_acceptance(tmp_path: Path) -> None:
+    """A fresh database initializes v12 with atomic order-acceptance tables."""
+    db = tmp_path / "fresh-v12.db"
     store = SQLiteStore(db)
     _run(store.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
     # experiment_results table exists and is empty.
     assert conn.execute("SELECT COUNT(*) FROM experiment_results").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 0
@@ -2695,7 +2698,7 @@ def test_reopen_recovers_completed_run_and_result(tmp_path: Path) -> None:
     _run(store2.close())
 
 
-def test_v9_to_v11_migration_preserves_v9_data(tmp_path: Path) -> None:
+def test_v9_to_v12_migration_preserves_v9_data(tmp_path: Path) -> None:
     """v9 → v10 migration preserves all v9 data and adds the two new tables."""
     db = tmp_path / "v9-to-v10.db"
 
@@ -2797,11 +2800,11 @@ def test_v9_to_v11_migration_preserves_v9_data(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
 
     # All v9 data preserved.
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
@@ -2933,8 +2936,8 @@ def test_v9_to_v10_migration_rolls_back_ddl_and_version(tmp_path: Path, monkeypa
     conn.close()
 
 
-def test_reinitialize_v11_is_idempotent(tmp_path: Path) -> None:
-    """Re-initializing a v11 database is idempotent; no error or schema change."""
+def test_reinitialize_v12_is_idempotent(tmp_path: Path) -> None:
+    """Re-initializing a v12 database is idempotent; no error or schema change."""
     db = tmp_path / "reinit-v11.db"
     store1 = SQLiteStore(db)
     _run(store1.initialize())
@@ -2943,11 +2946,11 @@ def test_reinitialize_v11_is_idempotent(tmp_path: Path) -> None:
     _run(store1.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V11_TABLES
+    assert tables == _SCHEMA_V12_TABLES
     conn.close()
     _run(store1.close())
 

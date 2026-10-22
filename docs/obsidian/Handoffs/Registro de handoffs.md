@@ -1,13 +1,12 @@
 # Registro de handoffs
 
-> Índice, no sustituto de la evidencia. El [plan de acción raíz](../../../trading-bot-action-plan.md) conserva el estado canónico de cada task, sus dependencias y las aceptaciones. Snapshot de navegación: 2026-10-21.
+> Índice, no sustituto de la evidencia. El [plan de acción raíz](../../../trading-bot-action-plan.md) conserva el estado canónico de cada task, sus dependencias y las aceptaciones. Snapshot de navegación: 2026-10-22.
 
 ## Estado actual
 
 - ACT-P-004 está `ACEPTADO` tras sus cuatro fases; commit publicado `2cbd689` y regresión backend 1,784 passed, 0 failed, 0 skipped, 1 warning.
 - ACT-P-001/002/003 globales siguen `PENDIENTE`; la aceptación de P-004 no los cierra.
-- ACT-P-005-DECISION-MAP-001 fue revisado y su semántica corregida quedó aprobada en §14.29. Siguiente task preparado, no ejecutado: [[ACT-P-005-fill-simulator-pure-task]] (solo DTO/evaluación pura, sin SQLite).
-- No encontré un directorio de handoffs independientes con nombres/IDs de handoff en la raíz. El plan de acción y sus secciones de recepción son el registro operativo actual.
+- ACT-P-005: **TECHNICALLY_ACCEPTED** — evaluador puro 92 passed, commit `98c86b9`. **Globalmente PENDIENTE** hasta integración autorizada.
 
 ## Cómo interpretar los artefactos de raíz
 
@@ -28,7 +27,7 @@
 | ACT-P-003 — lifecycle PAPER | Registro, aceptación/cancelación e idempotencia local aceptados por slices; task global `PENDIENTE`. | Criterio de reconciliación local aceptado sin introducir `UNKNOWN_STATE`; ver §14.23. |
 | ACT-P-004 — riesgo/filtros/admisión | `ACEPTADO`, publicado en `2cbd689`; regresión backend 1,784 passed. | No matching, ejecución externa ni simulación de fills; esas políticas pasan a ACT-P-005/006. |
 | ACT-P-005-DECISION-MAP-001 | Decisiones agrupadas aprobadas en §14.29. | El primer borrador Qwen con comisión/latencia cero, full fill sin volumen y salida intrabar ambigua fue corregido; ver matriz aprobada. |
-| ACT-P-005-FILL-SIMULATOR-PURE-001 | Rework-003 revisado; gate 79 passed; `REQUIERE_CAMBIOS`. | Capacity con símbolo no correspondiente y reservation sin account_id aún pueden aprobarse; falta identidad bar/protection y test real de quote ausente. El plan raíz §14.35 registra el handoff; correcciones en [[ACT-P-005-fill-simulator-pure-review-5]], integración detenida. |
+| ACT-P-005-FILL-SIMULATOR-PURE-001 | **TECHNICALLY_ACCEPTED** — 92 passed, commit `98c86b9`. Globalmente `PENDIENTE` hasta integración autorizada. | Capacity capture/bar identity, reservation account_id y malformed quote tests completados. Guard ordering corregido. Próximo paso: ACT-P-005 SQLite integration con allowlist explícita. |
 | ACT-C-001 — contratos | `COMPLETADO` según fila raíz. | Contratos no equivalen a integración API/UI/runtime ni ejecución. |
 | ACT-S-007 / ACT-E-001 | `PAUSADO` / `BLOQUEADO`. | No afirmar equivalencia FYL original. |
 

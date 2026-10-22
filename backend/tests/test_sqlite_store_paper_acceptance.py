@@ -38,8 +38,8 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceScopeError,
     PaperOrderAcceptanceStateError,
     SQLiteStore,
-    _SCHEMA_V10_TABLES,
-    _SCHEMA_V11_TABLES,
+    _SCHEMA_V12_TABLES,
+    _SCHEMA_V12_TABLES,
     _SCHEMA_V8_TABLES,
 )
 
@@ -641,6 +641,7 @@ def _make_v8_database(db: Path) -> tuple[PaperOrder, PaperAccountOpening]:
     _run(store.close())
 
     conn = sqlite3.connect(str(db))
+    conn.execute("DROP TABLE IF EXISTS paper_fill_evaluations")
     conn.execute("DROP TABLE IF EXISTS paper_fill_applications")
     conn.execute("DROP TABLE IF EXISTS position_lots")
     conn.execute("DROP TABLE IF EXISTS paper_reservations")
@@ -650,35 +651,35 @@ def _make_v8_database(db: Path) -> tuple[PaperOrder, PaperAccountOpening]:
     conn.execute("PRAGMA user_version = 8")
     conn.commit()
     conn.close()
-    # v8->v11 migration adds SELL tables on top of v8, so use subset check.
+    # v8->v12 migration adds SELL tables on top of v8, so use subset check.
     assert _SCHEMA_V8_TABLES.issubset(_table_names(db))
     return order, opening
 
 
-def test_direct_v8_to_v11_migration_preserves_previous_paper_slices(
+def test_direct_v8_to_v12_migration_preserves_previous_paper_slices(
     tmp_path: Path,
 ) -> None:
-    db = tmp_path / "v8-to-v11.db"
+    db = tmp_path / "v8-to-v12.db"
     order, opening = _make_v8_database(db)
     store = SQLiteStore(db)
 
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V11_TABLES
+    assert _table_names(db) == _SCHEMA_V12_TABLES
     assert _run(store.load_paper_order(order.order_id)) == order
     assert _run(store.load_paper_account_opening(opening.account_id)) == opening
     assert _run(store.load_paper_reservation(order.order_id)) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     assert conn.execute("SELECT COUNT(*) FROM paper_order_acceptances").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_reservations").fetchone()[0] == 0
     conn.close()
     _run(store.close())
 
 
-def test_v8_to_v11_migration_rolls_back_on_v9_ddl_failure_and_version(
+def test_v8_to_v12_migration_rolls_back_on_v9_ddl_failure_and_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = tmp_path / "v8-to-v11-rollback.db"
+    db = tmp_path / "v8-to-v12-rollback.db"
     order, opening = _make_v8_database(db)
     original_ddl = sqlite_store_module._PAPER_ORDER_RESERVATION_DDL_STATEMENTS
     monkeypatch.setattr(

@@ -1,4 +1,4 @@
-"""Tests for explicit, account-scoped PAPER balance openings (current schema v10)."""
+"""Tests for explicit, account-scoped PAPER balance openings (current schema v12)."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _SCHEMA_V6_TABLES,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V10_TABLES,
-    _SCHEMA_V11_TABLES,
+    _SCHEMA_V12_TABLES,
+    _SCHEMA_V12_TABLES,
 )
 
 
@@ -316,7 +316,7 @@ def test_multi_asset_opening_rolls_back_all_rows_on_mid_write_failure(
 
 
 def _make_v6_database(db: Path) -> None:
-    """Downgrade a fresh v9 database to the exact historical v6 table set."""
+    """Downgrade a fresh v12 database to the exact historical v6 table set."""
     store = SQLiteStore(db)
     _run(store.initialize())
     fill = PaperFill(
@@ -331,6 +331,7 @@ def _make_v6_database(db: Path) -> None:
     _run(store.close())
 
     conn = sqlite3.connect(str(db))
+    conn.execute("DROP TABLE paper_fill_evaluations")
     conn.execute("DROP TABLE paper_reservations")
     conn.execute("DROP TABLE paper_order_acceptances")
     conn.execute("DROP TABLE paper_orders")
@@ -346,24 +347,24 @@ def _make_v6_database(db: Path) -> None:
     conn.close()
 
 
-def test_v6_to_v10_migration_preserves_paper_fill(tmp_path: Path) -> None:
-    db = tmp_path / "v6-to-v10.db"
+def test_v6_to_v12_migration_preserves_paper_fill(tmp_path: Path) -> None:
+    db = tmp_path / "v6-to-v12.db"
     _make_v6_database(db)
 
     store = SQLiteStore(db)
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V11_TABLES
+    assert _table_names(db) == _SCHEMA_V12_TABLES
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     conn.close()
     assert _run(store.load_paper_fill("historical-fill")) is not None
     _run(store.close())
 
 
-def test_v6_to_v10_migration_rolls_back_all_ddl_and_version(
+def test_v6_to_v12_migration_rolls_back_all_ddl_and_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = tmp_path / "v6-to-v10-rollback.db"
+    db = tmp_path / "v6-to-v12-rollback.db"
     _make_v6_database(db)
     original_ddl = sqlite_store_module._PAPER_ACCOUNT_BALANCE_DDL_STATEMENTS
     monkeypatch.setattr(

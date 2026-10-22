@@ -82,4 +82,4 @@ No se aprobaron valores operativos, tasas, costes o límites numéricos. Los fix
 
 ## Próximo paso
 
-Semántica aprobada el 2026-10-21. El siguiente microtask preparado es [[Handoffs/ACT-P-005-fill-simulator-pure-task]]: DTOs y evaluación pura, sin persistencia ni integración de fills. ACT-P-005 global permanece `PENDIENTE` hasta sus gates e integración posterior.
+Semántica aprobada el 2026-10-21. El evaluador puro es **TECHNICAMENTE_ACEPTADO** (92 tests, commit `98c86b9`). **Globalmente PENDIENTE** hasta integración autorizada con allowlist y regression checks. El siguiente microtask preparado es `ACT-P-005-FILL-SIMULATOR-INTEGRATION-001` — conectar el evaluador puro con PAPER accounting/persistence. Requiere autorización explícita del maestro.

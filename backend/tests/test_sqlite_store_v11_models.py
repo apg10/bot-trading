@@ -1,4 +1,4 @@
-"""Tests for internal Pydantic models and schema v11 tables (Pair 1).
+"""Tests for internal Pydantic models and schema v12 tables (Pair 1).
 
 Covers:
 - _PaperLotReservationAllocationV1 model validation & immutability
@@ -722,7 +722,7 @@ class TestPaperSellAccountingRecordV1:
             first_slot.qty_sold = Decimal("999.00")
 
 
-# ── Test schema v11 tables ────────────────────────────────────────────────
+# ── Test schema v12 tables ────────────────────────────────────────────────
 
 class TestSchemaV11Tables:
     """Tests for schema v11 table existence and structure."""
@@ -733,7 +733,7 @@ class TestSchemaV11Tables:
         assert "paper_sell_accounting" in _SCHEMA_V11_TABLES
 
     def test_schema_v11_tables_superset_of_v10(self) -> None:
-        """Test that v11 tables are a superset of v10 tables."""
+        """Test that v12 tables are a superset of v10 tables."""
         assert _SCHEMA_V10_TABLES <= _SCHEMA_V11_TABLES
 
     def test_ddl_statements_count(self) -> None:
@@ -833,7 +833,7 @@ class TestV10ToV11Migration:
         conn.commit()
         conn.close()
 
-        # Verify v11 tables exist
+        # Verify v12 tables exist
         conn = sqlite3.connect(temp_db)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")

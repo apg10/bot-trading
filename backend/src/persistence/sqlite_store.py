@@ -38,6 +38,7 @@ Schema versions:
     v10 — adds durable fill application marks (paper_fill_applications) and
         aggregated position lots by order_id (position_lots).
     v11 — adds paper_reservation_lot_allocations and paper_sell_accounting tables.
+    v12 — adds paper_fill_evaluations table for ACT-P-005 fill-candidate evaluation results.
 """
 
 from __future__ import annotations
@@ -154,7 +155,7 @@ def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, res
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -626,6 +627,7 @@ _SCHEMA_V11_TABLES = _SCHEMA_V10_TABLES | {
     "paper_reservation_lot_allocations",
     "paper_sell_accounting",
 }
+_SCHEMA_V12_TABLES = _SCHEMA_V11_TABLES | {"paper_fill_evaluations"}
 
 _PAPER_FILL_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS paper_fills (
@@ -739,6 +741,29 @@ _PAPER_SELL_DDL_STATEMENTS = (
         allocation_slots_json TEXT NOT NULL,
         accounting_json TEXT NOT NULL,
         CHECK (fee_asset = quote_asset)
+    )""",
+)
+
+# ── ACT-P-005 fill-evaluation table (v12) ──────────────────────────────────────
+
+_PAPER_FILL_EVALUATION_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS paper_fill_evaluations (
+        evaluation_id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL REFERENCES paper_orders(order_id),
+        account_id TEXT NOT NULL,
+        paper_session_id TEXT NOT NULL,
+        environment TEXT NOT NULL CHECK (environment = 'paper'),
+        status_code TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        evaluated_at_ms INTEGER NOT NULL,
+        fill_candidate_fill_id TEXT,
+        fill_candidate_fill_qty TEXT,
+        fill_candidate_fill_price TEXT,
+        fill_candidate_commission_json TEXT,
+        CHECK (fill_candidate_fill_id IS NULL OR status_code = 'fill_candidate'),
+        CHECK (fill_candidate_fill_qty IS NULL OR status_code = 'fill_candidate'),
+        CHECK (fill_candidate_fill_price IS NULL OR status_code = 'fill_candidate'),
+        CHECK (fill_candidate_commission_json IS NULL OR status_code = 'fill_candidate')
     )""",
 )
 
@@ -1542,6 +1567,87 @@ class SQLiteStore:
             raise ValueError("reservation_id must be a non-empty string")
         return await self._read(
             lambda conn: self._load_paper_reservation_inner(conn, reservation_id)
+        )
+
+    async def persist_fill_evaluation(
+        self,
+        evaluation_id: str,
+        order_id: str,
+        account_id: str,
+        paper_session_id: str,
+        status_code: str,
+        result_json: str,
+        evaluated_at_ms: int,
+        fill_candidate_fill_id: Optional[str] = None,
+        fill_candidate_fill_qty: Optional[str] = None,
+        fill_candidate_fill_price: Optional[str] = None,
+        fill_candidate_commission_json: Optional[str] = None,
+    ) -> None:
+        """Persist one ACT-P-005 fill-candidate evaluation result.
+
+        Parameters
+        ----------
+        evaluation_id :
+            Opaque evaluation identifier (primary key).
+        order_id :
+            The order this evaluation pertains to.
+        account_id :
+            Account identifier.
+        paper_session_id :
+            Session identifier.
+        status_code :
+            Result status code (e.g. 'fill_candidate', 'fill_limit_not_crossed').
+        result_json :
+            Full result payload as JSON string.
+        evaluated_at_ms :
+            Evaluation timestamp in milliseconds.
+        fill_candidate_fill_id / fill_qty / fill_price / commission_json :
+            Optional candidate fill details; only meaningful when status_code == 'fill_candidate'.
+
+        Raises
+        ------
+        ValueError
+            If status_code is 'fill_candidate' but required fill details are missing,
+            or if required identity fields are empty.
+        """
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(evaluation_id, str) or not evaluation_id.strip():
+            raise ValueError("evaluation_id must be a non-empty string")
+        if not isinstance(order_id, str) or not order_id.strip():
+            raise ValueError("order_id must be a non-empty string")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        if not isinstance(paper_session_id, str) or not paper_session_id.strip():
+            raise ValueError("paper_session_id must be a non-empty string")
+        if not isinstance(status_code, str) or not status_code.strip():
+            raise ValueError("status_code must be a non-empty string")
+
+        # Validate candidate fill details consistency
+        is_candidate = (status_code == "fill_candidate")
+        if is_candidate:
+            if (
+                not fill_candidate_fill_id
+                or not fill_candidate_fill_qty
+                or not fill_candidate_fill_price
+                or not fill_candidate_commission_json
+            ):
+                raise ValueError(
+                    "fill_candidate status requires fill_id, fill_qty, fill_price, "
+                    "and commission"
+                )
+
+        await self._write(
+            lambda conn: self._persist_fill_evaluation_inner(
+                conn,
+                evaluation_id, order_id, account_id, paper_session_id,
+                "paper",  # environment is always 'paper' for paper trades
+                status_code, result_json, evaluated_at_ms,
+                fill_candidate_fill_id, fill_candidate_fill_qty,
+                fill_candidate_fill_price, fill_candidate_commission_json,
+            )
         )
 
     async def _write(
@@ -3853,6 +3959,57 @@ class SQLiteStore:
 
         return cancelled_order
 
+    @staticmethod
+    async def _persist_fill_evaluation_inner(
+        conn: aiosqlite.Connection,
+        evaluation_id: str,
+        order_id: str,
+        account_id: str,
+        paper_session_id: str,
+        environment: str,
+        status_code: str,
+        result_json: str,
+        evaluated_at_ms: int,
+        fill_candidate_fill_id: Optional[str],
+        fill_candidate_fill_qty: Optional[str],
+        fill_candidate_fill_price: Optional[str],
+        fill_candidate_commission_json: Optional[str],
+    ) -> None:
+        """Insert one paper_fill_evaluation row (idempotent upsert)."""
+        await conn.execute(
+            """
+            INSERT INTO paper_fill_evaluations (
+                evaluation_id,
+                order_id,
+                account_id,
+                paper_session_id,
+                environment,
+                status_code,
+                result_json,
+                evaluated_at_ms,
+                fill_candidate_fill_id,
+                fill_candidate_fill_qty,
+                fill_candidate_fill_price,
+                fill_candidate_commission_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(evaluation_id) DO NOTHING
+            """,
+            (
+                evaluation_id,
+                order_id,
+                account_id,
+                paper_session_id,
+                environment,
+                status_code,
+                result_json,
+                evaluated_at_ms,
+                fill_candidate_fill_id,
+                fill_candidate_fill_qty,
+                fill_candidate_fill_price,
+                fill_candidate_commission_json,
+            ),
+        )
+
     async def _cancel_paper_sell_order_inner(
         conn: aiosqlite.Connection,
         order_id: str,
@@ -4103,23 +4260,23 @@ class SQLiteStore:
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0, 1, 2, 3, 4, 5, 6, 7, 8, 10 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         table_names = {row[0] for row in await cursor.fetchall()}
 
-        # Already at v11 — just verify completeness.
+        # Already at v12 — just verify completeness.
         if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V11_TABLES <= table_names:
+            if not _SCHEMA_V12_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
-                    "schema version is 11 but required tables are missing"
+                    "schema version is 12 but required tables are missing"
                 )
             return
 
-        # v8 → v11: add order reservations, fill application, and SELL tables (for direct v8→v11 migration).
+        # v8 → v12: add order reservations, fill application, SELL, and fill-evaluation tables.
         if version == 8:
             if not _SCHEMA_V8_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4131,10 +4288,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v9 → v10: add durable fill application marks, position lots, and SELL tables.
+        # v9 → v12: add durable fill application marks, position lots, SELL, and fill-evaluation tables.
         if version == 9:
             if not _SCHEMA_V9_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4144,10 +4303,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v10 → v11: add paper_reservation_lot_allocations and paper_sell_accounting tables.
+        # v10 → v12: add paper_reservation_lot_allocations, paper_sell_accounting, and paper_fill_evaluations tables.
         if version == 10:
             if not _SCHEMA_V10_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4155,10 +4316,23 @@ class SQLiteStore:
                 )
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v7 → v11: add order context, reservations, fill application, and SELL tables.
+        # v11 → v12: add paper_fill_evaluations table (ACT-P-005).
+        if version == 11:
+            if not _SCHEMA_V11_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 11 but required v11 tables are missing"
+                )
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            return
+
+        # v7 → v12: add order context, reservations, fill application, SELL, and fill-evaluation tables.
         if version == 7:
             if not _SCHEMA_V7_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4172,10 +4346,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v6 → v11: add account openings/balances, order context/reservations, fill application, and SELL tables.
+        # v6 → v12: add account openings/balances, order context/reservations, fill application, SELL, and fill-evaluation tables.
         if version == 6:
             if not _SCHEMA_V6_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4191,10 +4367,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v5 → v11: add paper_fills, account openings/balances, order context/reservations, fill application, and SELL tables.
+        # v5 → v12: add paper_fills, account openings/balances, order context/reservations, fill application, SELL, and fill-evaluation tables.
         if version == 5:
             if not _SCHEMA_V5_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4212,10 +4390,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v4 → v11: add dispositions, paper_fills, account openings/balances, order context/reservations, fill application, and SELL tables.
+        # v4 → v12: add dispositions, paper_fills, account openings/balances, order context/reservations, fill application, SELL, and fill-evaluation tables.
         if version == 4:
             if not _SCHEMA_V4_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4235,10 +4415,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v3 → v11: rebuild run_attempts and add all later schema tables.
+        # v3 → v12: rebuild run_attempts and add all later schema tables including fill-evaluation.
         if version == 3:
             if not _SCHEMA_V3_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4279,10 +4461,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v2 → v11: apply all later schema versions atomically.
+        # v2 → v12: apply all later schema versions atomically including fill-evaluation.
         if version == 2:
             if not _SCHEMA_V2_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4306,10 +4490,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v1 → v11: apply all later schema versions atomically.
+        # v1 → v12: apply all later schema versions atomically including fill-evaluation.
         if version == 1:
             if not _SCHEMA_V1_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -4335,10 +4521,12 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v0 (new database): initialise directly at v11.
+        # v0 (new database): initialise directly at v12.
         for statement in _SCHEMA_V1_STATEMENTS:
             await conn.execute(statement)
         for statement in _SCHEMA_V2_STATEMENTS:
@@ -4360,6 +4548,8 @@ class SQLiteStore:
         for statement in _PAPER_FILL_APPLICATION_DDL_STATEMENTS:
             await conn.execute(statement)
         for statement in _PAPER_SELL_DDL_STATEMENTS:
+            await conn.execute(statement)
+        for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
             await conn.execute(statement)
         await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 

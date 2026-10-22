@@ -10,14 +10,15 @@
 | ACT-P-002 | **PENDIENTE** | Globalmente sigue pendiente. Slices aceptados incluyen journal, apertura de cuenta, aplicación contable de fills BUY/SELL, reservas y accounting; ver criterios restantes en el plan raíz. No equivale a un ciclo PAPER autónomo. |
 | ACT-P-003 | **PENDIENTE** | Slices de registro/aceptación/cancelación e IDs idempotentes aceptados. El criterio de incertidumbre de persistencia local está satisfecho; no se añadió `UNKNOWN_STATE`. El estado global sigue pendiente por criterios restantes del plan. |
 | ACT-P-004 | **ACEPTADO** | Riesgo puro, filtros versionados, aceptación atómica/concurrente y regresión backend aceptados. Commit publicado: `2cbd689` (`feat(paper): gate atomic acceptance with risk filters`). Backend: 1,784 passed, 0 failed, 0 skipped; 1 warning deprecado de Starlette/httpx2. PAPER sigue sin matching ni envío externo. |
-| ACT-P-005 | **PENDIENTE — handoff pure requiere cambios** | Semántica aprobada en §14.29; gate 79 passed, pero una capacity de otro símbolo y una reservation sin account_id pueden autorizar fill. Rework documentado en §14.35 y [[Handoffs/ACT-P-005-fill-simulator-pure-review-5]]; no integrar SQLite todavía. |
+| ACT-P-005 | **TECHNICALLY_ACCEPTED — globalmente PENDIENTE** | Evaluador puro aceptado técnicamente; gate 92 passed. Integración SQLite pendiente de autorización explícita. No iniciar trabajo de integración sin autorización. |
 | ACT-S-007 / ACT-E-001 | **PAUSADO / BLOQUEADO** | No afirmar equivalencia con FYL original sin especificación verificable. |
-| Selección de trabajo | **ACT-P-005-FILL-SIMULATOR-PURE-001 — REQUIERE_CAMBIOS** | Gate 79 passed; revisión reprodujo capacity con symbol distinto y reservation sin cuenta aceptadas. Además falta identidad exacta de bar/protection y el test de quote ausente sigue usando quotes válidos. Ver [[Handoffs/ACT-P-005-fill-simulator-pure-review-5]] antes de integración. |
+| Selección de trabajo | **NINGUNA — en espera de autorización** | ACT-P-005 puramente aceptado; globalmente PENDING. ACT-P-002/P-003 pendientes. Proxima tarea autorizada: ACT-P-005 SQLite integration con allowlist explícita. |
 
 ## Snapshot Git
 
-- `master` y `origin/master` apuntan a `2cbd689117469d3fa7a1093c066b245336dc8653`.
-- El worktree conserva cambios locales tracked/untracked ajenos al commit (plan raíz, pruebas, frontend y notas/tareas); no está limpio. Preservarlos y revisar `git status` antes de cualquier task.
+- `master` y `origin/master` apuntan a `98c86b9` (`feat: ACT-P-005 fill-simulator-pure review-5 complete + docs and frontend updates`).
+- Commit 98c86b9 integra: evaluador puro (1063 líneas), tests (1466 líneas), vault Obsidian completo, templates y actualizaciones frontend.
+- El worktree conserva cambios locales tracked/untracked ajenos al commit; revisar `git status` antes de cualquier task.
 
 Esta tabla es un resumen con fecha, no una segunda fuente de estados. La tabla completa, las dependencias y la evidencia detallada están en el plan raíz.
 
@@ -32,7 +33,7 @@ Esta tabla es un resumen con fecha, no una segunda fuente de estados. La tabla c
 ## Antes de retomar
 
 1. Leer el plan de acción y localizar el task/estado exacto.
-2. El contrato semántico ACT-P-005 está aprobado en §14.29; consultar y ejecutar manualmente [[Handoffs/ACT-P-005-fill-simulator-pure-task]]. No solicitar valores operativos para DTOs/validadores; las cifras de tests son fixtures.
+2. ACT-P-005 evaluador puro es **TECHNICALLY_ACCEPTED** (92 tests); globalmente **PENDIENTE** hasta integración autorizada.
 3. Confirmar autorización, dependencias por criterio, propiedad de cambios y allowlist sobre el árbol actual.
 4. Si falta una decisión o permiso, parar como `BLOCKED`; no inferir el siguiente paso.
 5. Registrar gates reales, limitaciones y el handoff; detenerse al cerrar.

@@ -1,4 +1,4 @@
-"""Tests for initial PAPER order-context persistence (current schema v10)."""
+"""Tests for initial PAPER order-context persistence (current schema v12)."""
 
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _SCHEMA_V7_TABLES,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V10_TABLES,
-    _SCHEMA_V11_TABLES,
+    _SCHEMA_V12_TABLES,
+    _SCHEMA_V12_TABLES,
 )
 
 
@@ -314,6 +314,7 @@ def _make_v7_database(db: Path) -> None:
     _run(store.close())
 
     conn = sqlite3.connect(str(db))
+    conn.execute("DROP TABLE paper_fill_evaluations")
     conn.execute("DROP TABLE paper_reservations")
     conn.execute("DROP TABLE paper_order_acceptances")
     conn.execute("DROP TABLE paper_orders")
@@ -327,28 +328,28 @@ def _make_v7_database(db: Path) -> None:
     assert _table_names(db) == _SCHEMA_V7_TABLES
 
 
-def test_direct_v7_to_v9_migration_preserves_accepted_paper_data(
+def test_direct_v7_to_v12_migration_preserves_accepted_paper_data(
     tmp_path: Path,
 ) -> None:
-    db = tmp_path / "v7-to-v9.db"
+    db = tmp_path / "v7-to-v12.db"
     _make_v7_database(db)
 
     store = SQLiteStore(db)
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V11_TABLES
+    assert _table_names(db) == _SCHEMA_V12_TABLES
     assert _run(store.load_paper_fill("fill-before-v8")) is not None
     assert _run(store.load_paper_account_opening("account-before-v8")) is not None
     assert _run(store.load_paper_order("order-not-registered")) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
     conn.close()
     _run(store.close())
 
 
-def test_v7_to_v10_migration_rolls_back_order_ddl_and_version(
+def test_v7_to_v12_migration_rolls_back_order_ddl_and_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = tmp_path / "v7-to-v10-rollback.db"
+    db = tmp_path / "v7-to-v12-rollback.db"
     _make_v7_database(db)
     original_ddl = sqlite_store_module._PAPER_ORDER_DDL_STATEMENTS
     monkeypatch.setattr(

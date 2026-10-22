@@ -1464,3 +1464,356 @@ def test_reservation_account_id_none_rejected():
             remaining_qty=Decimal("1.0"),
             remaining_amount=Decimal("40001"),
         )
+
+
+# ── Integration tests for persist_fill_evaluation (ACT-P-005) ─────────────────
+
+import asyncio
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from src.persistence.sqlite_store import (
+    SQLiteStore,
+    SchemaVersionMismatchError,
+)
+from src.models.paper_execution import (
+    evaluate_fill_candidate,
+    RESULT_FILL_CANDIDATE,
+    RESULT_LIMIT_NOT_CROSSED,
+    PaperMarketCapacitySnapshot,
+    PaperReservationSnapshot,
+    PaperFeeSnapshot,
+    PaperProtectionSnapshot,
+)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _make_store(db: Path) -> SQLiteStore:
+    store = SQLiteStore(db)
+    _run(store.initialize())
+    return store
+
+
+class TestPersistFillEvaluation:
+    """Integration tests for persist_fill_evaluation method."""
+
+    def _make_test_order(self, order_id="o-fill-1", account_id="acct-1"):
+        from src.models.paper_contracts import (
+            PaperOrderSide,
+            PaperOrderType,
+            PaperOrderStatus,
+        )
+        return PaperOrder(
+            order_id=order_id,
+            client_order_id=f"c-{order_id}",
+            paper_account_id=account_id,
+            paper_session_id="sess-1",
+            symbol="BTC/USDT",
+            side=PaperOrderSide.BUY,
+            order_type=PaperOrderType.MARKET,
+            requested_qty=Decimal("1.0"),
+            strategy_ref=STRATEGY_REF,
+            status=PaperOrderStatus.ACCEPTED,
+            max_quote_amount=Decimal("50000"),
+            timestamp_ms=1000,
+        )
+
+    def _make_capacity(self):
+        return PaperMarketCapacitySnapshot(
+            source_id="cap-1",
+            source_version="v1",
+            capacity=Decimal("1.0"),
+            symbol="BTC/USDT",
+            capture_bar_open_time_ms=2000,
+            capture_snapshot_timestamp_ms=2000,
+        )
+
+    def _make_fee(self):
+        return PaperFeeSnapshot(
+            fee_id="fee-1",
+            fee_version="v1",
+            quantity=Decimal("1.0"),
+            commission=Commission(amount=Decimal("0.001"), asset="USDT"),
+        )
+
+    def _make_protection(self):
+        return PaperProtectionSnapshot(
+            symbol="BTC/USDT",
+            account_id="acct-1",
+            protection_group_id="pg-1",
+            stop_trigger_price=Decimal("39500"),
+            take_trigger_price=Decimal("41000"),
+            bar_high=Decimal("41500"),
+            bar_low=Decimal("39000"),
+            bar_source_id="bar-1",
+            bar_snapshot_timestamp_ms=2000,
+            bar_open_time_ms=2000,
+            bar_interval_ms=60000,
+        )
+
+    def _make_reservation(self, res_id="res-1", owner_order_id="o-fill-1", account_id="acct-1"):
+        return PaperReservationSnapshot(
+            reservation_id=res_id,
+            owner_order_id=owner_order_id,
+            account_id=account_id,
+            asset="USDT",
+            remaining_qty=Decimal("1.0"),
+            remaining_amount=Decimal("40000"),
+        )
+
+    def _evaluate_and_persist(self, store, order, result, evaluation_id, fill_details=True):
+        """Helper to persist a fill evaluation result."""
+        kwargs = dict(
+            evaluation_id=evaluation_id,
+            order_id=order.order_id,
+            account_id=order.paper_account_id,
+            paper_session_id=order.paper_session_id,
+            status_code=result.status_code,
+            result_json=result.model_dump_json(),
+            evaluated_at_ms=1234567890,
+        )
+        if fill_details and result.status_code == RESULT_FILL_CANDIDATE:
+            # Result has fill_qty, fill_price directly (not wrapped in fill_candidate)
+            # fill_id is not part of the result model - generate a synthetic one
+            kwargs.update(
+                fill_candidate_fill_id=f"fill-{evaluation_id}",
+                fill_candidate_fill_qty=str(result.fill_qty) if result.fill_qty is not None else None,
+                fill_candidate_fill_price=str(result.fill_price) if result.fill_price is not None else None,
+                fill_candidate_commission_json=result.commission.model_dump_json() if result.commission is not None else None,
+            )
+        _run(store.persist_fill_evaluation(**kwargs))
+
+    def _insert_order(self, store, order):
+        """Insert a test order into paper_orders so FK constraints pass."""
+        from src.models.paper_contracts import PaperOrderStatus
+        order_json = order.model_dump_json()
+        _run(
+            store._write(
+                lambda conn: conn.execute(
+                    "INSERT INTO paper_orders (order_id, paper_account_id, paper_session_id, environment, client_order_id, order_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (order.order_id, order.paper_account_id, order.paper_session_id, "paper", order.client_order_id, order_json),
+                )
+            )
+        )
+
+    def test_persist_fill_candidate_evaluate(self):
+        """Evaluate and persist a fill-candidate result end-to-end."""
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        store = _make_store(db_path)
+
+        # Use existing fixtures from the module
+        order = base_order(max_quote="40001")
+        self._insert_order(store, order)
+        result = evaluate_fill_candidate(
+            order,
+            reservation(),
+            exec_policy(),
+            market_snapshot(),
+            market_capacity(),
+            fee_snapshot(),
+        )
+
+        assert result.status_code == RESULT_FILL_CANDIDATE
+
+        evaluation_id = "eval-fill-candidate"
+        self._evaluate_and_persist(store, order, result, evaluation_id)
+
+        # Verify the evaluation was persisted by querying the database directly
+        import aiosqlite
+
+        async def _query():
+            conn = await aiosqlite.connect(str(db_path))
+            try:
+                cursor = await conn.execute(
+                    "SELECT evaluation_id, order_id, account_id, paper_session_id, status_code FROM paper_fill_evaluations WHERE evaluation_id = ?", (evaluation_id,)
+                )
+                return await cursor.fetchone()
+            finally:
+                await conn.close()
+
+        row = _run(_query())
+
+        assert row is not None
+        assert row[0] == evaluation_id
+        assert row[1] == order.order_id
+        assert row[2] == order.paper_account_id
+        assert row[3] == order.paper_session_id
+        assert row[4] == RESULT_FILL_CANDIDATE
+
+    def test_persist_non_candidate_evaluation(self):
+        """Persist a non-fill-candidate evaluation (e.g. LIMIT_NOT_CROSSED)."""
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        store = _make_store(db_path)
+
+        # Use a limit order that won't be filled (limit below the market ask).
+        order = base_order(order_type=PaperOrderType.LIMIT, price="40000")
+        self._insert_order(store, order)
+        result = evaluate_fill_candidate(
+            order,
+            reservation(),
+            exec_policy(),
+            market_snapshot(),
+            market_capacity(),
+            fee_snapshot(),
+        )
+
+        assert result.status_code == RESULT_LIMIT_NOT_CROSSED
+
+        evaluation_id = "eval-non-candidate"
+        self._evaluate_and_persist(store, order, result, evaluation_id, fill_details=False)
+
+        # Verify the evaluation was persisted
+        import aiosqlite
+
+        async def _query():
+            conn = await aiosqlite.connect(str(db_path))
+            try:
+                cursor = await conn.execute(
+                    "SELECT status_code FROM paper_fill_evaluations WHERE evaluation_id = ?",
+                    (evaluation_id,),
+                )
+                return await cursor.fetchone()
+            finally:
+                await conn.close()
+
+        row = _run(_query())
+
+        assert row is not None
+        # Non-candidate evaluations should not have fill_candidate columns populated
+        assert row[0] != RESULT_FILL_CANDIDATE
+
+    def test_persist_fill_candidate_validation_missing_fill_details(self):
+        """Persisting a fill-candidate without required fill details must raise ValueError."""
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        store = _make_store(db_path)
+
+        order = base_order()
+        self._insert_order(store, order)
+        result = evaluate_fill_candidate(
+            order, reservation(), exec_policy(), market_snapshot(bid="40000", ask="40001"), market_capacity(), fee_snapshot()
+        )
+
+        # Try to persist as fill_candidate without fill details — should raise
+        with pytest.raises(ValueError, match="fill_candidate status requires"):
+            _run(
+                store.persist_fill_evaluation(
+                    evaluation_id="eval-fill-candidate-err",
+                    order_id=order.order_id,
+                    account_id=order.paper_account_id,
+                    paper_session_id=order.paper_session_id,
+                    status_code=RESULT_FILL_CANDIDATE,  # Force fill_candidate status
+                    result_json=result.model_dump_json(),
+                    evaluated_at_ms=1234567890,
+                )
+            )
+
+    def test_persist_fill_candidate_idempotent(self):
+        """Persisting the same evaluation_id twice should be idempotent (no error)."""
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        store = _make_store(db_path)
+
+        order = base_order()
+        # Override order_id for this test
+        from copy import deepcopy
+        order_dict = order.model_dump()
+        order_dict["order_id"] = "o-idem-1"
+        order_dict["client_order_id"] = "c-idem-1"
+        order = PaperOrder(**order_dict)
+        self._insert_order(store, order)
+        result = evaluate_fill_candidate(
+            order, reservation(), exec_policy(), market_snapshot(bid="40000", ask="40001"), market_capacity(), fee_snapshot()
+        )
+
+        evaluation_id = "eval-idem"
+        # First persist
+        self._evaluate_and_persist(store, order, result, evaluation_id)
+
+        # Second persist with same evaluation_id — should not raise
+        self._evaluate_and_persist(store, order, result, evaluation_id)
+
+        # Verify only one row exists
+        import aiosqlite
+
+        async def _query():
+            conn = await aiosqlite.connect(str(db_path))
+            try:
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM paper_fill_evaluations WHERE evaluation_id = ?",
+                    (evaluation_id,),
+                )
+                return (await cursor.fetchone())[0]
+            finally:
+                await conn.close()
+
+        count = _run(_query())
+
+        assert count == 1
+
+    def test_persist_validation_empty_evaluation_id(self):
+        """Persisting with empty evaluation_id must raise ValueError."""
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        store = _make_store(db_path)
+
+        with pytest.raises(ValueError, match="evaluation_id must be a non-empty string"):
+            _run(
+                store.persist_fill_evaluation(
+                    evaluation_id="",
+                    order_id="o1",
+                    account_id="acct-1",
+                    paper_session_id="sess-1",
+                    status_code="some_status",
+                    result_json="{}",
+                    evaluated_at_ms=1234567890,
+                )
+            )
+
+    def test_persist_validation_empty_order_id(self):
+        """Persisting with empty order_id must raise ValueError."""
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        store = _make_store(db_path)
+
+        with pytest.raises(ValueError, match="order_id must be a non-empty string"):
+            _run(
+                store.persist_fill_evaluation(
+                    evaluation_id="eval-1",
+                    order_id="",
+                    account_id="acct-1",
+                    paper_session_id="sess-1",
+                    status_code="some_status",
+                    result_json="{}",
+                    evaluated_at_ms=1234567890,
+                )
+            )
+
+    def test_persist_validation_closed_store(self):
+        """Persisting after store is closed must raise StoreClosedError."""
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        store = _make_store(db_path)
+        _run(store.close())
+        from src.persistence.sqlite_store import StoreClosedError
+
+        with pytest.raises(StoreClosedError, match="store is closed"):
+            _run(
+                store.persist_fill_evaluation(
+                    evaluation_id="eval-1",
+                    order_id="o1",
+                    account_id="acct-1",
+                    paper_session_id="sess-1",
+                    status_code="some_status",
+                    result_json="{}",
+                    evaluated_at_ms=1234567890,
+                )
+            )
