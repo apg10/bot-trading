@@ -118,10 +118,10 @@ export function useMarketData(
           // A stream snapshot is authoritative even when the HTTP response
           // does not carry an epoch of its own.  In particular, do not let a
           // late initial response put the fixture back over a newer stream.
-          const responseStream = data.stream_id ?? null
+           const responseStream = data.stream_id ?? null
           if (streamEpochRef.current !== initialStreamEpoch
             || (responseStream !== null
-              && responseStream !== transportRef.current?.streamId)
+              && responseStream !== (transportRef.current as { streamId: string; sequence: number } | null)?.streamId)
             || (snapshotReceivedRef.current && !awaitingResyncRef.current)) {
             // Una respuesta inicial obsoleta no modifica el buffer actual.
             setLoading(false)
