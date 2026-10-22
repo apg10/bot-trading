@@ -1,9 +1,10 @@
-"""Minimal deterministic PAPER orchestration for the TEST_ONLY strategy."""
+"""Minimal deterministic PAPER orchestration for TEST_ONLY and public quotes."""
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Sequence
+from typing import Any, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
@@ -24,15 +25,16 @@ from src.models.paper_execution import (
 from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot, evaluate_paper_risk
 from src.models.paper_symbol_filters import SymbolFilterSnapshot, validate_symbol_filters
 from src.models.state import Candle
+from src.market.engine import MarketEngine
+from src.market.paper_snapshot import (
+    PaperMarketExecutionSnapshot as EnginePaperMarketExecutionSnapshot,
+)
 from src.persistence.sqlite_store import SQLiteStore
 from src.strategies.test_only_keltner import (
     TEST_ONLY_OHLCV_FIXTURE,
     evaluate_test_only_keltner,
 )
-from src.paper_execution_integration import (
-    _deterministic_fill_id,
-    evaluate_and_apply_fill,
-)
+from src.paper_execution_integration import evaluate_and_apply_fill
 
 
 class OrchestratorResult(BaseModel):
@@ -90,6 +92,135 @@ def _reservation_snapshot(order: PaperOrder, reservation) -> PaperReservationSna
     )
 
 
+def _interval_ms(engine: MarketEngine, snapshot: Any) -> int | None:
+    """Return the engine interval without making a market-data assumption."""
+    config = getattr(engine, "config", None)
+    interval = getattr(config, "kline_interval", None)
+    if interval is None:
+        interval = getattr(snapshot, "bar_identity", "").split(":", 1)[0]
+    fixed = {
+        "1s": 1_000,
+        "1m": 60_000,
+        "3m": 180_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+        "2h": 7_200_000,
+        "4h": 14_400_000,
+        "6h": 21_600_000,
+        "8h": 28_800_000,
+        "12h": 43_200_000,
+        "1d": 86_400_000,
+        "3d": 259_200_000,
+        "1w": 604_800_000,
+    }
+    return fixed.get(interval)
+
+
+async def _validate_snapshot(
+    engine: MarketEngine, snapshot: EnginePaperMarketExecutionSnapshot
+) -> bool:
+    """Validate a public quote against the current engine context."""
+    try:
+        state = engine.state
+        if snapshot.symbol != state.symbol:
+            return False
+
+        engine_snapshot = engine.snapshot()
+        engine_bar = engine_snapshot.get("bar_identity")
+        if engine_bar and snapshot.bar_identity != engine_bar:
+            return False
+        state_bar = getattr(state, "bar_identity", None)
+        if state_bar and snapshot.bar_identity != state_bar:
+            return False
+        # Current MarketEngine exposes the bar open time rather than a materialized
+        # identity in snapshot(). Reconstructing it here also detects interval
+        # changes between the engine read and the quote read.
+        interval = getattr(getattr(engine, "config", None), "kline_interval", None)
+        interval = interval or getattr(state, "interval", None)
+        if interval and not snapshot.bar_identity.startswith(f"{interval}:"):
+            return False
+        if state.last_bar_open_time is not None and interval:
+            opened = datetime.fromtimestamp(
+                state.last_bar_open_time / 1000, tz=timezone.utc
+            )
+            expected_bar = (
+                f"{interval}:{opened.isoformat(timespec='seconds').replace('+00:00', 'Z')}"
+            )
+            if snapshot.bar_identity != expected_bar:
+                return False
+
+        if snapshot.provenance != "binance_public_book_ticker":
+            return False
+        if snapshot.version != "v3":
+            return False
+        now = engine._clock_ms()
+        quote_age_ms = now - int(snapshot.timestamp.timestamp() * 1000)
+        if quote_age_ms < 0 or quote_age_ms > 30_000:
+            return False
+        if not state.entries_allowed or state.pending_gaps or state.stale:
+            return False
+        # ``get_paper_snapshot`` already enforces these gates on the concrete
+        # engine; retain them here for deterministic adapters/fake engines too.
+        # Missing required state is incomplete and must fail closed.
+        for gate in ("connected", "complete", "history_loaded"):
+            val = getattr(state, gate, None)
+            if val is None or not val:
+                return False
+        if getattr(state, "reconnecting", None) is True:
+            return False
+        if getattr(state, "recovering", None) is True:
+            return False
+        return True
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _model_market_snapshot(
+    engine: MarketEngine, snapshot: EnginePaperMarketExecutionSnapshot
+) -> PaperMarketExecutionSnapshot | None:
+    """Adapt the engine dataclass to the durable evaluator DTO."""
+    state = engine.state
+    interval_ms = _interval_ms(engine, snapshot)
+    if state.last_bar_open_time is None or interval_ms is None:
+        return None
+    try:
+        return PaperMarketExecutionSnapshot(
+            symbol=snapshot.symbol,
+            bid=snapshot.bid,
+            ask=snapshot.ask,
+            bar_open_time_ms=state.last_bar_open_time,
+            prior_bar_open_time_ms=state.last_bar_open_time - interval_ms,
+            interval_ms=interval_ms,
+            provenance=snapshot.provenance,
+            version=snapshot.version,
+            snapshot_timestamp_ms=int(snapshot.timestamp.timestamp() * 1000),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _test_only_capacity(
+    capacity: PaperMarketCapacitySnapshot | None,
+    market: PaperMarketExecutionSnapshot,
+) -> PaperMarketCapacitySnapshot | None:
+    """Bind explicit TEST_ONLY capacity without using book-ticker quantities."""
+    if capacity is None:
+        return None
+    try:
+        return PaperMarketCapacitySnapshot(
+            source_id="TEST_ONLY",
+            source_version="v1",
+            capacity=capacity.capacity,
+            symbol=market.symbol,
+            capture_bar_open_time_ms=market.bar_open_time_ms,
+            capture_snapshot_timestamp_ms=market.snapshot_timestamp_ms,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 async def run_paper_cycle(
     store: SQLiteStore,
     *,
@@ -101,11 +232,12 @@ async def run_paper_cycle(
     risk_snapshot: PaperRiskSnapshot,
     symbol_filter_snapshot: SymbolFilterSnapshot | None,
     exec_policy_snapshot: PaperExecutionPolicy,
-    market_exec_snapshot: PaperMarketExecutionSnapshot,
-    market_capacity_snapshot: PaperMarketCapacitySnapshot,
-    fee_snapshot: PaperFeeSnapshot,
+    market_exec_snapshot: PaperMarketExecutionSnapshot | None = None,
+    market_capacity_snapshot: PaperMarketCapacitySnapshot | None = None,
+    fee_snapshot: PaperFeeSnapshot | None = None,
     candles: Sequence[Candle] = TEST_ONLY_OHLCV_FIXTURE[:7],
     evaluated_at_ms: int = 0,
+    engine: MarketEngine | None = None,
 ) -> OrchestratorResult:
     """Run one bounded TEST_ONLY BUY cycle through the PAPER infrastructure.
 
@@ -154,25 +286,69 @@ async def run_paper_cycle(
 
     evaluation_id = "eval-cycle-1"
     try:
+        # Check durable idempotency before reading the engine.  A completed
+        # fill must remain retryable even when a later engine snapshot is
+        # unavailable.
         durable_order = await store.load_paper_order(order.order_id)
-        if durable_order is None:
-            durable_order = await store.register_paper_order(order)
-        elif durable_order.order_id != order.order_id:
-            raise ValueError("durable order identity mismatch")
-
-        if durable_order.status == PaperOrderStatus.FILLED:
-            evaluation = await store.load_paper_fill_evaluation(evaluation_id)
-            if evaluation is None:
-                raise RuntimeError("filled durable order has no evaluation record")
+        if (
+            durable_order is not None
+            and durable_order.status == PaperOrderStatus.FILLED
+            and durable_order.fills
+        ):
             return OrchestratorResult(
                 success=True,
                 signal="BUY",
                 order_id=durable_order.order_id,
-                fill_id=evaluation.fill_candidate_fill_id or _deterministic_fill_id(evaluation_id),
+                fill_id=durable_order.fills[0].fill_id,
                 evaluation_id=evaluation_id,
                 risk_result=risk_result.code,
                 filter_result=filter_result.code,
             )
+
+        # TEST_ONLY remains an explicit caller-supplied path.  Once an engine
+        # is supplied, however, stale/disconnected/context-changed market data
+        # must fail closed before registration or any durable mutation.
+        effective_market_snapshot = market_exec_snapshot
+        effective_capacity_snapshot = market_capacity_snapshot
+        if engine is not None:
+            try:
+                engine_snapshot = await engine.get_paper_snapshot()
+            except Exception:
+                engine_snapshot = None
+            if engine_snapshot is None or not await _validate_snapshot(engine, engine_snapshot):
+                return OrchestratorResult(
+                    success=False,
+                    signal="BUY",
+                    risk_result=risk_result.code,
+                    filter_result=filter_result.code,
+                    error="PAPER BUY requires a fresh, coherent market snapshot",
+                )
+            effective_market_snapshot = _model_market_snapshot(engine, engine_snapshot)
+            if effective_market_snapshot is None:
+                return OrchestratorResult(
+                    success=False,
+                    signal="BUY",
+                    risk_result=risk_result.code,
+                    filter_result=filter_result.code,
+                    error="PAPER BUY market snapshot could not be bound to engine state",
+                )
+            effective_capacity_snapshot = _test_only_capacity(
+                market_capacity_snapshot, effective_market_snapshot
+            )
+
+        if effective_market_snapshot is None or effective_capacity_snapshot is None or fee_snapshot is None:
+            return OrchestratorResult(
+                success=False,
+                signal="BUY",
+                risk_result=risk_result.code,
+                filter_result=filter_result.code,
+                error="PAPER BUY requires explicit market, capacity, and fee snapshots",
+            )
+
+        if durable_order is None:
+            durable_order = await store.register_paper_order(order)
+        elif durable_order.order_id != order.order_id:
+            raise ValueError("durable order identity mismatch")
 
         accepted_order = await store.accept_paper_order(
             durable_order.order_id,
@@ -190,8 +366,8 @@ async def run_paper_cycle(
             accepted_order,
             reservation_snapshot,
             exec_policy_snapshot,
-            market_exec_snapshot,
-            market_capacity_snapshot,
+            effective_market_snapshot,
+            effective_capacity_snapshot,
             fee_snapshot,
             evaluated_at_ms=evaluated_at_ms,
         )
@@ -229,6 +405,7 @@ async def run_paper_cycle_sell(
     exec_policy_snapshot: PaperExecutionPolicy,
     fee_snapshot: PaperFeeSnapshot,
     evaluated_at_ms: int | None = None,
+    engine: MarketEngine | None = None,
 ) -> OrchestratorResult:
     """Close the durable BUY lot through the bounded SELL PAPER path."""
     buy_order = await store.load_paper_order("order-id-1")
@@ -260,6 +437,63 @@ async def run_paper_cycle_sell(
     sell_order_id = "sell-order-1"
     evaluation_id = "eval-cycle-sell-1"
     exit_price = Decimal(str(exit_bar.close))
+    market_snapshot: PaperMarketExecutionSnapshot | None = None
+
+    # Check durable idempotency before reading the engine.  A completed SELL
+    # fill must remain retryable even when a later engine snapshot is
+    # unavailable.
+    try:
+        durable_sell = await store.load_paper_order(sell_order_id)
+    except Exception as exc:
+        return OrchestratorResult(
+            success=False,
+            signal="SELL",
+            buy_status=buy_order.status.value,
+            error=str(exc),
+        )
+    if (
+        durable_sell is not None
+        and durable_sell.status == PaperOrderStatus.FILLED
+        and durable_sell.fills
+    ):
+        risk_result = evaluate_paper_risk(durable_sell, risk_policy, risk_snapshot)
+        filter_result = validate_symbol_filters(durable_sell, symbol_filter_snapshot)
+        return OrchestratorResult(
+            success=True,
+            signal="SELL",
+            order_id=durable_sell.order_id,
+            fill_id=durable_sell.fills[0].fill_id,
+            evaluation_id=evaluation_id,
+            risk_result=risk_result.code,
+            filter_result=filter_result.code,
+            buy_status=buy_order.status.value,
+            sell_status=durable_sell.status.value,
+        )
+
+    if engine is not None:
+        try:
+            engine_snapshot = await engine.get_paper_snapshot()
+        except Exception:
+            engine_snapshot = None
+        if engine_snapshot is None or not await _validate_snapshot(engine, engine_snapshot):
+            return OrchestratorResult(
+                success=False,
+                signal="SELL",
+                buy_status=buy_order.status.value,
+                error="PAPER SELL requires a fresh, coherent market snapshot",
+            )
+        market_snapshot = _model_market_snapshot(engine, engine_snapshot)
+        if market_snapshot is None:
+            return OrchestratorResult(
+                success=False,
+                signal="SELL",
+                buy_status=buy_order.status.value,
+                error="PAPER SELL market snapshot could not be bound to engine state",
+            )
+        # The execution policy selects bid for SELL.  Keep the order limit at
+        # that same accepted reference so a public quote is not accidentally
+        # converted into a different TEST_ONLY close price.
+        exit_price = market_snapshot.bid
     sell_order = PaperOrder(
         order_id=sell_order_id,
         client_order_id="client-sell-order-1",
@@ -323,24 +557,25 @@ async def run_paper_cycle_sell(
         if active_reservation is None:
             raise RuntimeError("accepted SELL order has no active reservation")
         reservation_snapshot = _reservation_snapshot(accepted_sell, active_reservation)
-        market_snapshot = PaperMarketExecutionSnapshot(
-            symbol=symbol,
-            bid=exit_price,
-            ask=exit_price,
-            bar_open_time_ms=exit_timestamp_ms,
-            prior_bar_open_time_ms=prior_bar.timestamp_ms,
-            interval_ms=exit_timestamp_ms - prior_bar.timestamp_ms,
-            provenance="TEST_ONLY",
-            version="v1",
-            snapshot_timestamp_ms=exit_timestamp_ms,
-        )
+        if market_snapshot is None:
+            market_snapshot = PaperMarketExecutionSnapshot(
+                symbol=symbol,
+                bid=exit_price,
+                ask=exit_price,
+                bar_open_time_ms=exit_timestamp_ms,
+                prior_bar_open_time_ms=prior_bar.timestamp_ms,
+                interval_ms=exit_timestamp_ms - prior_bar.timestamp_ms,
+                provenance="TEST_ONLY",
+                version="v1",
+                snapshot_timestamp_ms=exit_timestamp_ms,
+            )
         capacity_snapshot = PaperMarketCapacitySnapshot(
             source_id="TEST_ONLY",
             source_version="v1",
             capacity=buy_qty,
-            symbol=symbol,
-            capture_bar_open_time_ms=exit_timestamp_ms,
-            capture_snapshot_timestamp_ms=exit_timestamp_ms,
+            symbol=market_snapshot.symbol,
+            capture_bar_open_time_ms=market_snapshot.bar_open_time_ms,
+            capture_snapshot_timestamp_ms=market_snapshot.snapshot_timestamp_ms,
         )
         integration = await evaluate_and_apply_fill(
             store,

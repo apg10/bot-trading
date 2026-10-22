@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,9 +29,13 @@ from src.models.paper_symbol_filters import (
     SymbolFilterSnapshot,
 )
 from src.models.paper_contracts import PaperAccountOpening, PaperOrderStatus
+from src.market.paper_snapshot import PaperMarketExecutionSnapshot as EngineSnapshot
 from src.persistence.sqlite_store import SQLiteStore
-from src.paper_orchestrator import run_paper_cycle, run_paper_cycle_sell
+from src.paper_orchestrator import _validate_snapshot, run_paper_cycle, run_paper_cycle_sell
 from src.strategies.test_only_keltner import TEST_ONLY_OHLCV_FIXTURE
+
+
+_BASE_MS = (1_700_000_000_000 // 60_000) * 60_000  # 1699999980000 -> 2023-11-14T22:13:00Z
 
 
 def _run(coro):
@@ -150,6 +156,51 @@ def _sell_kwargs():
         ),
         fee_snapshot=_fee(),
     )
+
+
+class _FakeEngine:
+    def __init__(self, snapshot: EngineSnapshot | None, *, engine_bar: str | None = None):
+        self._paper_snapshot = snapshot
+        self.config = SimpleNamespace(kline_interval="1m")
+        self.state = SimpleNamespace(
+            symbol="BTC/USDT",
+            last_bar_open_time=_BASE_MS,
+            entries_allowed=True,
+            pending_gaps=0,
+            stale=False,
+            connected=True,
+            complete=True,
+            history_loaded=True,
+        )
+        self._engine_bar = engine_bar
+
+    async def get_paper_snapshot(self):
+        return self._paper_snapshot
+
+    def snapshot(self):
+        return {"bar_identity": self._engine_bar or self._paper_snapshot.bar_identity}
+
+    def _clock_ms(self):
+        return _BASE_MS + 30_000
+
+
+def _engine_snapshot(**changes) -> EngineSnapshot:
+    values = dict(
+        symbol="BTC/USDT",
+        bid=Decimal("99"),
+        ask=Decimal("100"),
+        bid_qty=Decimal("999"),
+        ask_qty=Decimal("999"),
+        timestamp=datetime.fromtimestamp(_BASE_MS / 1000 + 30, tz=timezone.utc),
+        provenance="binance_public_book_ticker",
+        version="v3",
+        bar_identity=f"1m:{datetime.fromtimestamp(_BASE_MS / 1000, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        freshness_ok=True,
+        gap_ok=True,
+        entries_allowed=True,
+    )
+    values.update(changes)
+    return EngineSnapshot(**values)
 
 
 def test_buy_success_wires_risk_filters_reservation_and_accounting(tmp_path: Path) -> None:
@@ -408,3 +459,126 @@ def test_sell_journal_failure_reopens_and_retries_exactly_once(
     assert conn.execute("SELECT COUNT(*) FROM position_lots").fetchone()[0] == 0
     conn.close()
     _run(reopened.close())
+
+
+def test_buy_rejected_when_snapshot_is_none(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-none.db")
+    result = _run(run_paper_cycle(store, **_kwargs(), engine=_FakeEngine(None)))
+    assert result.success is False
+    assert _run(store.load_paper_order("order-id-1")) is None
+    _run(store.close())
+
+
+def test_buy_rejected_on_context_change(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-context.db")
+    snap = _engine_snapshot()
+    engine = _FakeEngine(
+        snap,
+        engine_bar=f"1m:{datetime.fromtimestamp((_BASE_MS + 60_000) / 1000, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+    )
+    result = _run(run_paper_cycle(store, **_kwargs(), engine=engine))
+    assert result.success is False
+    assert _run(store.load_paper_order("order-id-1")) is None
+    _run(store.close())
+
+
+def test_buy_rejected_on_missing_state_gate(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-missing-gate.db")
+    engine = _FakeEngine(_engine_snapshot())
+    del engine.state.connected
+    result = _run(run_paper_cycle(store, **_kwargs(), engine=engine))
+    assert result.success is False
+    assert _run(store.load_paper_order("order-id-1")) is None
+    _run(store.close())
+
+
+def test_buy_rejected_on_reconnecting(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-reconnecting.db")
+    engine = _FakeEngine(_engine_snapshot())
+    engine.state.reconnecting = True
+    result = _run(run_paper_cycle(store, **_kwargs(), engine=engine))
+    assert result.success is False
+    assert _run(store.load_paper_order("order-id-1")) is None
+    _run(store.close())
+
+
+def test_buy_rejected_on_pause_reconciliation(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-pause.db")
+    _run(store.apply_lifecycle_command(PaperLifecycleCommand(
+        command_id="pause-engine", account_id="acct-1", paper_session_id="session-1",
+        action="pause", issued_at_ms=2000,
+    )))
+    result = _run(run_paper_cycle(
+        store, **_kwargs(), engine=_FakeEngine(_engine_snapshot())
+    ))
+    assert result.success is False
+    assert _run(store.load_paper_order("order-id-1")) is None
+    _run(store.close())
+
+
+def test_buy_accepts_valid_snapshot(tmp_path: Path) -> None:
+    db = tmp_path / "engine-buy.db"
+    store = _store(db)
+    result = _run(run_paper_cycle(
+        store, **_kwargs(), engine=_FakeEngine(_engine_snapshot())
+    ))
+    assert result.success is True
+    record = _run(store.load_paper_fill_evaluation("eval-cycle-1"))
+    assert record is not None
+    assert json.loads(record.result_json)["fill_price"] == "100"
+    _run(store.close())
+
+
+def test_sell_accepts_valid_snapshot(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-sell.db")
+    assert _run(run_paper_cycle(store, **_kwargs())).success is True
+    result = _run(run_paper_cycle_sell(
+        store, **_sell_kwargs(), engine=_FakeEngine(_engine_snapshot())
+    ))
+    assert result.success is True
+    record = _run(store.load_paper_fill_evaluation("eval-cycle-sell-1"))
+    assert record is not None
+    assert json.loads(record.result_json)["fill_price"] == "99"
+    _run(store.close())
+
+
+def test_quote_qty_not_capacity(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-capacity.db")
+    result = _run(run_paper_cycle(
+        store, **_kwargs(), engine=_FakeEngine(_engine_snapshot())
+    ))
+    assert result.success is True
+    record = _run(store.load_paper_fill_evaluation("eval-cycle-1"))
+    assert record is not None
+    payload = json.loads(record.result_json)
+    assert payload["capacity_source_id"] == "TEST_ONLY"
+    assert payload["fill_qty"] == "1"
+    _run(store.close())
+
+
+def test_retry_preserves_fill_id(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-retry.db")
+    first = _run(run_paper_cycle(store, **_kwargs()))
+    second = _run(run_paper_cycle(store, **_kwargs()))
+    assert first.success is True
+    assert second.success is True
+    assert second.fill_id == first.fill_id
+    _run(store.close())
+
+
+def test_provenance_retained_in_evaluation(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-provenance.db")
+    assert _run(run_paper_cycle(
+        store, **_kwargs(), engine=_FakeEngine(_engine_snapshot())
+    )).success is True
+    record = _run(store.load_paper_fill_evaluation("eval-cycle-1"))
+    assert record is not None
+    assert "binance_public_book_ticker" in json.loads(record.result_json)["market_reference"]
+    _run(store.close())
+
+
+def test_existing_test_only_still_works_without_engine(tmp_path: Path) -> None:
+    store = _store(tmp_path / "engine-test-only.db")
+    result = _run(run_paper_cycle(store, **_kwargs()))
+    assert result.success is True
+    _run(store.close())
