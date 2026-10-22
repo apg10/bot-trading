@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Callable, Tuple
 
 
 # --- DTOs (frozen, extra='forbid', no financial defaults) ---
@@ -207,6 +207,60 @@ class ReplaySegment:
             "candle_count": len(self.candles),
             "candles": [candle.to_dict() for candle in self.candles],
         }
+
+
+# --- Strategy adapter ---
+
+
+StrategyCallback = Callable[[list[Candle], int], Tuple[DecisionSide, str]]
+
+
+def replay_with_strategy(
+    segment: ReplaySegment,
+    strategy: StrategyCallback,
+) -> list[Decision]:
+    """
+    Replay causal decisions using an explicit strategy callback.
+
+    The callback receives only the causal prefix candles[:index+1] and
+    returns a decision side and reason for each candle.
+    """
+    if not callable(strategy):
+        raise ReplayError("strategy must be callable")
+
+    decisions: list[Decision] = []
+    candles = list(segment.candles)
+
+    for i, candle in enumerate(candles):
+        # Only the causal prefix is visible to the strategy.
+        prefix = candles[: i + 1]
+
+        try:
+            side, reason = strategy(prefix, i)
+        except Exception as exc:
+            raise ReplayError(f"strategy failed at index {i}: {exc}") from exc
+
+        if not isinstance(side, DecisionSide):
+            raise ReplayError(
+                f"strategy must return DecisionSide, got {type(side).__name__}"
+            )
+
+        decisions.append(
+            Decision(
+                timestamp_ms=candle.timestamp_ms,
+                symbol=segment.symbol,
+                side=side,
+                strategy=segment.strategy,
+                data_source=segment.data_source,
+                candle_index=i,
+                reason=reason,
+            )
+        )
+
+    # Verify order and length match segment.
+    assert len(decisions) == len(candles), "decision count must match candle count"
+
+    return decisions
 
 
 def replay_decisions(

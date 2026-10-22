@@ -15,6 +15,7 @@ from src.replay import (
     replay_decisions,
     replay_deterministic,
     replay_segment,
+    replay_with_strategy,
     validate_candles,
 )
 
@@ -280,3 +281,155 @@ class TestReplaySegment:
         seg = self._make_segment()
         with pytest.raises(Exception):
             seg.symbol = "ETH/USDT"
+
+
+class TestStrategyAdapter:
+    """Tests for the explicit strategy adapter."""
+
+    _VALID_CANDLES = tuple(
+        [
+            _candle(0, 100, 110, 90, 105),
+            _candle(1, 105, 112, 95, 108),
+            _candle(2, 108, 130, 100, 125),
+        ]
+    )
+
+    def _make_segment(self, **overrides) -> ReplaySegment:
+        kwargs = dict(
+            segment_id="seg-strategy-001",
+            symbol="BTC/USDT",
+            strategy="TEST_ONLY",
+            data_source=DataSource.TEST_ONLY,
+            source_ref="ref://test-source",
+            clock_ref="ref://test-clock",
+            cost_policy_ref="ref://test-cost",
+            fill_policy_ref="ref://test-fill",
+            start_ms=_BASE_MS,
+            end_ms=_BASE_MS + 3 * _STEP_S * 1000,
+            candles=self._VALID_CANDLES,
+        )
+        kwargs.update(overrides)
+        return ReplaySegment(**kwargs)
+
+    def test_callback_never_receives_future_candles(self):
+        """Spy callback confirms it never receives future candles."""
+        received_lengths: list[int] = []
+
+        def spy_strategy(prefix: list[Candle], index: int) -> tuple[DecisionSide, str]:
+            received_lengths.append(len(prefix))
+            return DecisionSide.HOLD, "spy"
+
+        seg = self._make_segment()
+        decisions = replay_with_strategy(seg, spy_strategy)
+
+        assert received_lengths == [1, 2, 3]
+        assert len(decisions) == 3
+
+    def test_same_segment_and_callback_produce_identical_decisions(self):
+        """Determinism: same segment + callback = identical decisions."""
+        seg = self._make_segment()
+
+        def always_buy(prefix: list[Candle], index: int) -> tuple[DecisionSide, str]:
+            return DecisionSide.BUY, "always buy"
+
+        d1 = replay_with_strategy(seg, always_buy)
+        d2 = replay_with_strategy(seg, always_buy)
+
+        assert d1 == d2
+
+    def test_modifying_future_does_not_change_past_decisions(self):
+        """Changing a future candle does not modify previous decisions."""
+        candles_full = tuple(
+            [
+                _candle(0, 100, 110, 90, 105),
+                _candle(1, 105, 112, 95, 108),
+                _candle(2, 108, 130, 100, 125),
+            ]
+        )
+        seg_full = self._make_segment(candles=candles_full)
+
+        def breakout_strategy(
+            prefix: list[Candle], index: int
+        ) -> tuple[DecisionSide, str]:
+            if index == 0:
+                return DecisionSide.HOLD, "initial"
+            prev_high = max(c.high for c in prefix[:-1])
+            if prefix[-1].close > prev_high:
+                return DecisionSide.BUY, f"breakout at {index}"
+            return DecisionSide.HOLD, "range"
+
+        decisions_full = replay_with_strategy(seg_full, breakout_strategy)
+
+        candles_short = candles_full[:2]
+        seg_short = self._make_segment(candles=candles_short)
+        decisions_short = replay_with_strategy(seg_short, breakout_strategy)
+
+        assert decisions_short == decisions_full[:2]
+
+    def test_provenance_and_indices_are_correct(self):
+        """Verify provenance and indices match segment metadata."""
+        seg = self._make_segment()
+
+        def identity_strategy(
+            prefix: list[Candle], index: int
+        ) -> tuple[DecisionSide, str]:
+            return DecisionSide.HOLD, f"index={index}"
+
+        decisions = replay_with_strategy(seg, identity_strategy)
+
+        for i, decision in enumerate(decisions):
+            assert decision.candle_index == i
+            assert decision.symbol == seg.symbol
+            assert decision.strategy == seg.strategy
+            assert decision.data_source == seg.data_source
+            assert decision.timestamp_ms == seg.candles[i].timestamp_ms
+
+    def test_invalid_strategy_rejected(self):
+        """Non-callable strategy is rejected."""
+        seg = self._make_segment()
+        with pytest.raises(ReplayError, match="strategy must be callable"):
+            replay_with_strategy(seg, "not_callable")
+
+    def test_strategy_returning_invalid_side_rejected(self):
+        """Strategy returning non-DecisionSide is rejected."""
+        seg = self._make_segment()
+
+        def bad_strategy(prefix: list[Candle], index: int) -> tuple:
+            return ("BUY", "invalid")
+
+        with pytest.raises(ReplayError, match="must return DecisionSide"):
+            replay_with_strategy(seg, bad_strategy)
+
+    def test_strategy_exception_propagates(self):
+        """Strategy exception at index 1 propagates as ReplayError."""
+        seg = self._make_segment()
+
+        def failing_strategy(
+            prefix: list[Candle], index: int
+        ) -> tuple[DecisionSide, str]:
+            if index == 1:
+                raise ValueError("boom")
+            return DecisionSide.HOLD, "ok"
+
+        with pytest.raises(ReplayError, match="strategy failed at index 1"):
+            replay_with_strategy(seg, failing_strategy)
+
+    def test_compatible_with_existing_replay_segment(self):
+        """replay_with_strategy is compatible with existing ReplaySegment."""
+        seg = self._make_segment()
+
+        decisions_old = replay_segment(seg)
+        assert len(decisions_old) == 3
+
+        def same_logic(
+            prefix: list[Candle], index: int
+        ) -> tuple[DecisionSide, str]:
+            if index == 0:
+                return DecisionSide.HOLD, "initial"
+            prev_high = max(c.high for c in prefix[:-1])
+            if prefix[-1].close > prev_high:
+                return DecisionSide.BUY, "breakout"
+            return DecisionSide.HOLD, "range"
+
+        decisions_new = replay_with_strategy(seg, same_logic)
+        assert len(decisions_new) == 3
