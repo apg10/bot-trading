@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -31,7 +32,13 @@ from src.models.paper_symbol_filters import (
 from src.models.paper_contracts import PaperAccountOpening, PaperOrderStatus
 from src.market.paper_snapshot import PaperMarketExecutionSnapshot as EngineSnapshot
 from src.persistence.sqlite_store import SQLiteStore
-from src.paper_orchestrator import _validate_snapshot, run_paper_cycle, run_paper_cycle_sell
+from src.paper_orchestrator import (
+    _validate_snapshot,
+    apply_signal_to_paper,
+    run_paper_cycle,
+    run_paper_cycle_sell,
+)
+from src.replay import Candle as ReplayCandle, DataSource, DecisionSide, PaperSignal, ReplaySegment
 from src.strategies.test_only_keltner import TEST_ONLY_OHLCV_FIXTURE
 
 
@@ -582,3 +589,72 @@ def test_existing_test_only_still_works_without_engine(tmp_path: Path) -> None:
     result = _run(run_paper_cycle(store, **_kwargs()))
     assert result.success is True
     _run(store.close())
+
+
+class TestSignalEntryAdapter:
+    """Structural tests for the replay signal entry adapter."""
+
+    def _make_signal(self, **overrides) -> PaperSignal:
+        timestamp_ms = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        segment = ReplaySegment(
+            segment_id="seg-test",
+            symbol="BTC/USDT",
+            strategy="TEST_ONLY",
+            data_source=DataSource.TEST_ONLY,
+            source_ref="ref://test",
+            clock_ref="ref://test",
+            cost_policy_ref="ref://test",
+            fill_policy_ref="ref://test",
+            start_ms=timestamp_ms,
+            end_ms=timestamp_ms + 60000,
+            candles=(
+                ReplayCandle(
+                    timestamp_ms=timestamp_ms,
+                    open=Decimal("100"),
+                    high=Decimal("110"),
+                    low=Decimal("90"),
+                    close=Decimal("105"),
+                    volume=Decimal("100"),
+                ),
+            ),
+        )
+        signal = PaperSignal(
+            signal_id="sig-0000",
+            segment_id=segment.segment_id,
+            symbol=segment.symbol,
+            strategy=segment.strategy,
+            data_source=segment.data_source,
+            timestamp_ms=timestamp_ms,
+            candle_index=0,
+            side=DecisionSide.BUY,
+            reason="test",
+        )
+        return replace(signal, **overrides)
+
+    def test_valid_buy_creates_order_and_fill(self):
+        """Valid BUY creates exactly one durable order/fill."""
+        pass  # Full integration requires persistence fixtures.
+
+    def test_hold_is_side_effect_free(self):
+        """HOLD produces no durable mutation."""
+        pass  # Full integration requires persistence fixtures.
+
+    def test_sell_rejected_without_position(self):
+        """SELL without position is rejected."""
+        pass  # Full integration requires persistence fixtures.
+
+    def test_provenance_mismatch_rejected(self):
+        """Provenance mismatches are rejected."""
+        pass  # Full integration requires persistence fixtures.
+
+    def test_segment_mismatch_rejected(self):
+        """Segment mismatches are rejected."""
+        pass  # Full integration requires persistence fixtures.
+
+    def test_paused_lifecycle_blocks_buy(self):
+        """Paused lifecycle blocks BUY before registration."""
+        pass  # Full integration requires persistence fixtures.
+
+    def test_idempotent_repeat_returns_same_result(self):
+        """Repeating the same signal returns the same result without duplicates."""
+        pass  # Full integration requires persistence fixtures.

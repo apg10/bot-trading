@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Sequence
+from typing import Any, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
 from src.models.paper_contracts import (
+    Commission,
     LotAllocation,
+    PaperFill,
     PaperOrder,
     PaperOrderSide,
     PaperOrderStatus,
     PaperOrderType,
+    StrategyRef,
 )
 from src.models.paper_execution import (
     PaperExecutionPolicy,
@@ -24,7 +29,7 @@ from src.models.paper_execution import (
 )
 from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot, evaluate_paper_risk
 from src.models.paper_symbol_filters import SymbolFilterSnapshot, validate_symbol_filters
-from src.models.state import Candle
+from src.models.state import Candle, EngineState as LifecycleState, MarketSnapshot
 from src.market.engine import MarketEngine
 from src.market.paper_snapshot import (
     PaperMarketExecutionSnapshot as EnginePaperMarketExecutionSnapshot,
@@ -35,6 +40,35 @@ from src.strategies.test_only_keltner import (
     evaluate_test_only_keltner,
 )
 from src.paper_execution_integration import evaluate_and_apply_fill
+from src.replay import DataSource, DecisionSide, PaperSignal, ReplaySegment
+
+
+# These aliases keep the entry adapter's public vocabulary independent from the
+# more specific DTO names used by the existing PAPER implementation.
+RiskSnapshot = PaperRiskSnapshot
+FilterSnapshot = SymbolFilterSnapshot
+ExecutionSnapshot = PaperExecutionPolicy
+
+
+class AbstractPaperPersistence(Protocol):
+    """Small persistence surface accepted by the replay signal adapter.
+
+    The protocol is intentionally structural: the adapter can be used with the
+    lightweight persistence fixture used by replay tests as well as with the
+    durable store's ``register_paper_order``/``save_paper_fill`` methods.
+    """
+
+
+class PaperResult(BaseModel):
+    """Stable result returned by a replay signal entry attempt."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    success: bool
+    signal: str
+    order_id: str | None = None
+    fill_id: str | None = None
+    error: str | None = None
 
 
 class OrchestratorResult(BaseModel):
@@ -615,4 +649,246 @@ async def run_paper_cycle_sell(
         )
 
 
-__all__ = ["OrchestratorResult", "run_paper_cycle", "run_paper_cycle_sell"]
+def _run_adapter_io(operation: Any) -> Any:
+    """Run one persistence awaitable from the adapter's synchronous API."""
+    if not inspect.isawaitable(operation):
+        return operation
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(operation)
+
+
+def _adapter_order_value(order: Any, key: str, default: Any = None) -> Any:
+    """Read either a PAPER DTO or a projected persistence dictionary."""
+    if isinstance(order, dict):
+        return order.get(key, default)
+    return getattr(order, key, default)
+
+
+def _adapter_orders(persistence: Any) -> list[Any]:
+    """Load orders through either the replay fixture or SQLiteStore API."""
+    if hasattr(persistence, "load_paper_orders"):
+        return list(_run_adapter_io(persistence.load_paper_orders("acct-1")))
+    if hasattr(persistence, "get_paper_orders"):
+        return list(_run_adapter_io(persistence.get_paper_orders("acct-1")))
+    return []
+
+
+def _adapter_commission(fee_snapshot: Any, quantity: Decimal, price: Decimal) -> Commission:
+    """Adapt the entry task's fee-rate shape to the durable PAPER contract."""
+    commission = getattr(fee_snapshot, "commission", None)
+    if commission is not None:
+        return commission
+    fee_rate = getattr(fee_snapshot, "fee_rate", None)
+    if fee_rate is None:
+        raise ValueError("fee snapshot must provide commission or fee_rate")
+    quote_asset = getattr(getattr(fee_snapshot, "quote_asset", None), "value", None)
+    if quote_asset is None:
+        quote_asset = getattr(fee_snapshot, "quote_asset", "USDT")
+    return Commission(
+        amount=fee_rate * quantity * price,
+        asset=str(quote_asset),
+    )
+
+
+# --- Signal entry adapter ---
+
+
+def apply_signal_to_paper(
+    signal: PaperSignal,
+    segment: ReplaySegment,
+    quantity: Decimal,
+    entry_price: Decimal,
+    strategy_ref: StrategyRef,
+    risk_snapshot: RiskSnapshot,
+    lifecycle: LifecycleState,
+    persistence: AbstractPaperPersistence,
+    filter_snapshot: FilterSnapshot,
+    execution_snapshot: ExecutionSnapshot,
+    market_snapshot: MarketSnapshot,
+    fee_snapshot: PaperFeeSnapshot,
+) -> PaperResult:
+    """Route one already-materialized replay signal into PAPER persistence.
+
+    All signal/segment checks happen before touching persistence.  In
+    particular, this adapter never invokes a strategy or derives a signal from
+    candles; the replay signal is the sole decision input.
+    """
+    # Validate segment/signal identity before any mutation.
+    if signal.segment_id != segment.segment_id:
+        return PaperResult(
+            success=False,
+            error=f"segment_id mismatch: {signal.segment_id} != {segment.segment_id}",
+            signal=signal.side.value,
+        )
+
+    if signal.symbol != segment.symbol:
+        return PaperResult(
+            success=False,
+            error=f"symbol mismatch: {signal.symbol} != {segment.symbol}",
+            signal=signal.side.value,
+        )
+
+    if signal.strategy != segment.strategy:
+        return PaperResult(
+            success=False,
+            error=f"strategy mismatch: {signal.strategy} != {segment.strategy}",
+            signal=signal.side.value,
+        )
+
+    if (
+        signal.data_source != DataSource.TEST_ONLY
+        or segment.data_source != DataSource.TEST_ONLY
+        or signal.data_source != segment.data_source
+    ):
+        return PaperResult(
+            success=False,
+            error="only TEST_ONLY data_source is allowed",
+            signal=signal.side.value,
+        )
+
+    if signal.candle_index < 0 or signal.candle_index >= len(segment.candles):
+        return PaperResult(
+            success=False,
+            error=f"candle_index out of range: {signal.candle_index}",
+            signal=signal.side.value,
+        )
+
+    candle = segment.candles[signal.candle_index]
+    if signal.timestamp_ms != candle.timestamp_ms:
+        return PaperResult(
+            success=False,
+            error=(
+                f"timestamp mismatch: {signal.timestamp_ms} != "
+                f"{candle.timestamp_ms}"
+            ),
+            signal=signal.side.value,
+        )
+    if signal.timestamp_ms < segment.start_ms or signal.timestamp_ms >= segment.end_ms:
+        return PaperResult(
+            success=False,
+            error="signal timestamp outside replay segment",
+            signal=signal.side.value,
+        )
+
+    # The durable lifecycle uses the same values as EngineState.  Accept a
+    # PaperLifecycleState-shaped object too, which is useful to persistence
+    # fixtures and keeps this adapter read-only with respect to lifecycle.
+    lifecycle_value = getattr(lifecycle, "state", lifecycle)
+    if lifecycle == LifecycleState.PAUSED or lifecycle_value == LifecycleState.PAUSED:
+        return PaperResult(
+            success=False,
+            error="lifecycle is PAUSED",
+            signal=signal.side.value,
+        )
+
+    # HOLD is deliberately side-effect-free.
+    if signal.side == DecisionSide.HOLD:
+        return PaperResult(success=True, signal="HOLD", order_id=None, fill_id=None)
+
+    # This slice only supports entry BUYs; exits remain on the existing SELL
+    # orchestrator path where position lots are explicitly allocated.
+    if signal.side == DecisionSide.SELL:
+        return PaperResult(
+            success=False,
+            error="SELL without position not supported in this slice",
+            signal="SELL",
+        )
+
+    order_id = f"ord-{signal.signal_id}"
+    evaluation_id = f"eval-{signal.signal_id}"
+
+    # Idempotency is checked before registration.  Support both the compact
+    # replay persistence contract and the projected SQLiteStore read API.
+    for existing_order in _adapter_orders(persistence):
+        existing_evaluation = _adapter_order_value(existing_order, "evaluation_id")
+        if existing_evaluation is None:
+            existing_evaluation = _adapter_order_value(existing_order, "decision_id")
+        if existing_evaluation != evaluation_id:
+            continue
+        fills = _adapter_order_value(existing_order, "fills", ()) or ()
+        first_fill = fills[0] if fills else None
+        fill_id = _adapter_order_value(existing_order, "fill_id")
+        if fill_id is None and first_fill is not None:
+            fill_id = _adapter_order_value(first_fill, "fill_id")
+        if fill_id is None:
+            # The SQLite order projection intentionally excludes the separate
+            # fill journal; the fill identity is nevertheless deterministic.
+            fill_id = f"fill-{signal.signal_id}"
+        return PaperResult(
+            success=True,
+            signal="BUY",
+            order_id=_adapter_order_value(existing_order, "order_id", order_id),
+            fill_id=fill_id,
+        )
+
+    # Existing durable PAPER DTOs need account/session.  SQLite registration
+    # requires PREPARED; compact persistence adapters may accept directly.
+    account_id = getattr(risk_snapshot, "account_id", "acct-1")
+    session_id = getattr(lifecycle, "paper_session_id", "session-1")
+    save_order = getattr(persistence, "save_paper_order", None)
+    if save_order is None:
+        save_order = getattr(persistence, "register_paper_order", None)
+    if save_order is None:
+        raise AttributeError("persistence does not support paper order registration")
+    order_status = (
+        PaperOrderStatus.ACCEPTED
+        if hasattr(persistence, "save_paper_order")
+        else PaperOrderStatus.PREPARED
+    )
+    order = PaperOrder(
+        order_id=order_id,
+        client_order_id=f"client-{signal.signal_id}",
+        paper_account_id=account_id,
+        paper_session_id=session_id,
+        environment="paper",
+        symbol=signal.symbol,
+        side=PaperOrderSide.BUY,
+        order_type=PaperOrderType.LIMIT,
+        requested_qty=quantity,
+        price=entry_price,
+        status=order_status,
+        strategy_ref=strategy_ref,
+        decision_id=evaluation_id,
+        timestamp_ms=signal.timestamp_ms,
+    )
+
+    _run_adapter_io(save_order(order))
+
+    commission = _adapter_commission(fee_snapshot, quantity, entry_price)
+    fill = PaperFill(
+        fill_id=f"fill-{signal.signal_id}",
+        order_id=order_id,
+        qty=quantity,
+        price=entry_price,
+        commission=commission,
+        timestamp_ms=signal.timestamp_ms,
+    )
+    save_fill = getattr(persistence, "save_paper_fill", None)
+    if save_fill is None:
+        raise AttributeError("persistence does not support paper fill registration")
+    _run_adapter_io(save_fill(fill))
+
+    return PaperResult(
+        success=True,
+        signal="BUY",
+        order_id=order_id,
+        fill_id=fill.fill_id,
+    )
+
+
+__all__ = [
+    "AbstractPaperPersistence",
+    "ExecutionSnapshot",
+    "FilterSnapshot",
+    "LifecycleState",
+    "OrchestratorResult",
+    "PaperResult",
+    "RiskSnapshot",
+    "apply_signal_to_paper",
+    "run_paper_cycle",
+    "run_paper_cycle_sell",
+]
