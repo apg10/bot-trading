@@ -27,6 +27,7 @@ from src.models.paper_contracts import (
     Commission,
     LotAllocation,
     PaperFill,
+    PaperOrder,
     PaperOrderSide,
     PaperOrderStatus,
     PaperOrderType,
@@ -36,9 +37,11 @@ from src.persistence import sqlite_store as sqlite_store_module
 from src.persistence.sqlite_store import (
     PaperFillConflictError,
     PaperFillIntegrityError,
+    FillApplyCommitError,
     SchemaVersionMismatchError,
     SQLiteStore,
     StoreClosedError,
+    StoreCorruptionError,
     _SCHEMA_V9_TABLES,
     _SCHEMA_V10_TABLES,
     _SCHEMA_V11_TABLES,
@@ -977,3 +980,152 @@ def test_v3_to_v10_migration_preserves_all_data(tmp_path: Path) -> None:
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 0
     conn.close()
     _run(upgraded.close())
+
+
+def _seed_fill_recovery_case(db: Path, *, with_application: bool) -> tuple[SQLiteStore, PaperFill]:
+    store = SQLiteStore(db)
+    _run(store.initialize())
+    order = PaperOrder(
+        order_id="recovery-order",
+        client_order_id="recovery-client",
+        paper_account_id="recovery-account",
+        paper_session_id="recovery-session",
+        environment="paper",
+        symbol="BASE/QUOTE",
+        side=PaperOrderSide.BUY,
+        order_type=PaperOrderType.MARKET,
+        requested_qty=Decimal("2"),
+        fills=(),
+        lot_allocations=(),
+        price=None,
+        trigger_price=None,
+        max_quote_amount=Decimal("300"),
+        strategy_ref=StrategyRef(strategy_id="recovery-strategy", strategy_version="1"),
+        decision_id=None,
+        status=PaperOrderStatus.PREPARED,
+        timestamp_ms=1_700_000_000_000,
+        position_id=None,
+        protection_group_id=None,
+    )
+    _run(store.register_paper_order(order))
+    fill = _make_paper_fill(
+        fill_id="recovery-fill", order_id=order.order_id, qty="1", price="100"
+    )
+    _run(store.save_paper_fill(fill))
+    conn = sqlite3.connect(str(db))
+    if with_application:
+        applied_order = order.model_copy(
+            update={"status": PaperOrderStatus.PARTIALLY_FILLED, "fills": (fill,)}
+        )
+        conn.execute(
+            "UPDATE paper_orders SET order_json=? WHERE order_id=?",
+            (applied_order.model_dump_json(), order.order_id),
+        )
+        conn.execute(
+            "INSERT INTO paper_fill_applications "
+            "(fill_id, order_id, account_id, paper_session_id, environment, "
+            "applied_at_ms, application_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                fill.fill_id,
+                order.order_id,
+                order.paper_account_id,
+                order.paper_session_id,
+                order.environment,
+                fill.timestamp_ms,
+                fill.model_dump_json(),
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return store, fill
+
+
+@pytest.mark.parametrize(
+    "inconsistency",
+    ["journal_fill_id", "order_id", "account_id", "paper_session_id", "environment", "application_json"],
+)
+def test_fill_application_recovery_rejects_inconsistent_durable_identity(
+    tmp_path: Path, inconsistency: str
+) -> None:
+    db = tmp_path / f"application-{inconsistency}.db"
+    store, fill = _seed_fill_recovery_case(db, with_application=True)
+    conn = sqlite3.connect(str(db))
+    if inconsistency == "journal_fill_id":
+        corrupt_fill = fill.model_copy(update={"fill_id": "other-fill"})
+        conn.execute(
+            "UPDATE paper_fills SET record_json=? WHERE fill_id=?",
+            (corrupt_fill.model_dump_json(), fill.fill_id),
+        )
+    elif inconsistency == "application_json":
+        corrupt_fill = fill.model_copy(update={"qty": Decimal("1.5")})
+        conn.execute(
+            "UPDATE paper_fill_applications SET application_json=? WHERE fill_id=?",
+            (corrupt_fill.model_dump_json(), fill.fill_id),
+        )
+    else:
+        if inconsistency == "environment":
+            conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute(
+            f"UPDATE paper_fill_applications SET {inconsistency}=? WHERE fill_id=?",
+            ("mismatched-value", fill.fill_id),
+        )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(StoreCorruptionError):
+        _run(
+            store._recover_fill_commit(
+                fill.fill_id, FillApplyCommitError("injected commit failure")
+            )
+        )
+    _run(store.close())
+
+
+def test_corrupt_order_json_during_fill_recovery_is_store_corruption(tmp_path: Path) -> None:
+    db = tmp_path / "corrupt-order-recovery.db"
+    store, fill = _seed_fill_recovery_case(db, with_application=False)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "UPDATE paper_orders SET order_json='not-json' WHERE order_id='recovery-order'"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(StoreCorruptionError, match="corrupt order JSON"):
+        _run(
+            store._recover_fill_commit(
+                fill.fill_id, FillApplyCommitError("injected commit failure")
+            )
+        )
+    _run(store.close())
+
+
+def test_inconsistent_application_rolls_back_idempotent_fill_attempt(tmp_path: Path) -> None:
+    db = tmp_path / "inconsistent-application-rollback.db"
+    store, fill = _seed_fill_recovery_case(db, with_application=True)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "UPDATE paper_fill_applications SET application_json='{}' WHERE fill_id=?",
+        (fill.fill_id,),
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT * FROM paper_fill_applications WHERE fill_id=?", (fill.fill_id,)
+    ).fetchone()
+    order_before = conn.execute(
+        "SELECT order_json FROM paper_orders WHERE order_id='recovery-order'"
+    ).fetchone()[0]
+    conn.close()
+
+    with pytest.raises(StoreCorruptionError, match="corrupt application JSON"):
+        _run(store.apply_paper_fill(fill.fill_id))
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT * FROM paper_fill_applications WHERE fill_id=?", (fill.fill_id,)
+    ).fetchone() == before
+    assert conn.execute(
+        "SELECT order_json FROM paper_orders WHERE order_id='recovery-order'"
+    ).fetchone()[0] == order_before
+    conn.close()
+    _run(store.close())

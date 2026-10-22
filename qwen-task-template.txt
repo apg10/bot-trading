@@ -250,7 +250,39 @@ Entregar en la respuesta, sin escribir archivos no autorizados:
 9. Verificación de cada criterio de aceptación y límites no comprobados.
 10. Confirmación de no commit/push/staging y conservación de cambios previos.
 11. Confirmación de que no se inició otro task ni conexiones no autorizadas.
+12. Bloque breve “Handoff para Obsidian” en la respuesta: task/slice, fecha,
+    resultado del task, estado de revisión, baseline SHA, delta por
+    archivo, comandos/resultados reales, límites y ruta de la ficha canónica.
 
 Para checks no ejecutados, indicar NO EJECUTADO y el motivo; no afirmar éxito.
 Si BLOCKED, reportar qué falló, qué cambios quedaron y la decisión requerida.
 Al terminar la validación y entrega, detenerse. No comenzar el siguiente task.
+
+
+HANDOFF PARA OBSIDIAN (RESPUESTA; NO ESCRIBIR ARCHIVOS)
+=======================================================
+Incluir al final de la respuesta un bloque conciso, listo para copiar a
+`docs/obsidian/Handoffs/`, con esta estructura:
+
+```text
+TASK / SLICE:
+FECHA:
+RESULTADO DEL TASK: COMPLETED | BLOCKED
+REVISIÓN: EN_REVISION | BLOCKED
+BASELINE: <ruta + SHA-256>
+DELTA DEL TASK: <archivos y cambio resumido; separar cambios preexistentes>
+GATES: <comandos exactos, exit code, passed/failed, warnings; NO EJECUTADO si aplica>
+LIMITES / DECISIONES ABIERTAS:
+FUENTE CANÓNICA: <ficha/sección del plan de acción>
+PLAN ACTUALIZADO: <sí/no + fila autorizada, o no autorizado>
+SIGUIENTE TASK: <referencia canónica o ninguno seleccionado>; no autoavanzar
+```
+
+La ficha Obsidian es un índice, no una fuente de verdad ni una aceptación:
+- No declarar un slice ACEPTADO por pasar tests. Solo usar ese estado si existe
+  aprobación explícita del maestro/usuario y citar la fuente.
+- El estado global se toma del plan canónico, no se infiere de este handoff.
+- No escribir ni modificar `docs/obsidian/`, el plan de acción u otros reports
+  salvo que cada ruta esté incluida expresamente en la allowlist del task.
+- Prompts, propuestas y resultados de tests son artefactos distintos; etiquetarlos
+  correctamente y no presentarlos como handoffs aceptados.

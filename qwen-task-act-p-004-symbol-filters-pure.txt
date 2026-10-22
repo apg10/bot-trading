@@ -1,0 +1,101 @@
+ACT-P-004 / SYMBOL-FILTER-SNAPSHOT-001 — versioned Spot filters, pure validation
+Status: PREPARED for Qwen. Implement only this slice and stop for handoff.
+ACT-P-004 remains globally PENDING.
+
+AUTHORITY AND BASELINE
+- Workspace: /home/adrian10/bot_trading; branch master; HEAD observed:
+  e1c25448248edde093641066ed35dcbeed6d858d.
+- Existing local changes must be preserved. Do not assume CLEAN; no reset/clean/
+  stash, stage/commit/push, or branch/worktree changes.
+- Before editing, capture branch, HEAD, complete status, and confirm both
+  allowlisted paths are new and uncontended. If HEAD changes or paths collide:
+  STOP/BLOCKED; do not reconstruct a baseline.
+- Read plan sections 7, 14.23-14.25; `paper_contracts.py`, `paper_risk.py`,
+  `backend/src/market/binance_client.py::get_symbol_info`, and relevant tests.
+  Do not edit existing files in this slice.
+
+GOAL
+Add an immutable, versioned, explicit symbol-filter snapshot and pure validator
+for original BUY LIMIT/MARKET orders. No network/API calls, Binance connection,
+filter discovery, parsing adapter, rounding, order mutation, or persistence.
+This phase consumes constructed snapshots; it does not certify full exchange
+acceptance or make the legacy `get_symbol_info` defaults safe.
+
+APPROVED V1 COVERAGE AND RULES
+Snapshot identity/provenance is mandatory: schema version, filter-set id/version,
+snapshot id, source id/version, capture timestamp, symbol, base asset and quote
+asset. Every numeric value is an explicit finite Decimal; no float conversion or
+defaults. Reject identity/context mismatch, absent required data, invalid ranges,
+duplicate/unknown required rule types, or unsupported source filter types with
+`symbol_filter_invalid`. Preserve refs in the result.
+
+Represent and enforce these Spot symbol rules for BUY LIMIT/MARKET:
+- PRICE_FILTER: explicit min_price, max_price and tick_size. Per Binance Spot
+  docs, a zero bound/tick explicitly disables that individual rule; it is not a
+  missing value. For LIMIT only, validate price bounds and exact tick multiple.
+- LOT_SIZE: explicit min_qty, max_qty, step_size; validate quantity bounds and
+  exact step multiple for both LIMIT and MARKET; all three values must be
+  positive (zero-disable semantics are not assumed for LOT_SIZE).
+- MARKET_LOT_SIZE: explicit min_qty, max_qty, step_size; validate MARKET
+  quantity bounds and exact step multiple in addition to LOT_SIZE; all three
+  values must be positive.
+- MIN_NOTIONAL: required positive min_notional, explicit applies_to_market flag,
+  and avg_price_mins window. It has no max_notional bound.
+- NOTIONAL: required positive min_notional/max_notional with min <= max, separate
+  explicit apply_min_to_market/apply_max_to_market flags, and avg_price_mins.
+  Enforce all supplied applicable bounds. LIMIT notional is exact
+  `requested_qty * limit_price`. For MARKET, when a bound applies, use
+  `requested_qty * market_notional_reference_price`; that reference price, its
+  symbol/provenance/timestamp and matching `avgPriceMins` window must be explicit.
+  Do not substitute `max_quote_amount` or invent an average price for this
+  exchange filter. `max_quote_amount` remains the already-approved MARKET
+  risk-sizing measure, separate from venue notional.
+- Missing/inapplicable-to-market flags must not be guessed. Required market
+  reference data absent => fail closed. Do not adjust order values to fit.
+- For an applicable order, PRICE_FILTER and LOT_SIZE are required; MARKET also
+  requires MARKET_LOT_SIZE; at least one of MIN_NOTIONAL/NOTIONAL is required.
+  Snapshot DTO slots for unavailable rules must be explicit `None`, not omitted.
+
+Bounded scope: do not implement PERCENT_PRICE/PERCENT_PRICE_BY_SIDE, exchange or
+asset filters, account order-count/position constraints, OCO or other order
+types in this slice. The snapshot must identify unhandled relevant source filter
+types; if any are present, return invalid/fail-closed, not a pass. This bounded
+v1 does not claim complete Binance Spot admission compliance.
+
+Stable outcomes: approved/rejected, stable code (`symbol_filter_missing`,
+`symbol_filter_invalid`, `symbol_filter_violation`, `symbol_filter_not_applicable`),
+and exact snapshot/source refs. Evaluate only BUY LIMIT/MARKET; other sides/types
+are `not_applicable` before requiring filter data, so filters cannot block exits
+or cancellations. A violation rejects the unchanged candidate; no silent rounding.
+
+Official rule reference (consulted 2026-10-21; tests remain offline):
+https://github.com/binance/binance-spot-api-docs/blob/master/filters.md
+
+EXHAUSTIVE ALLOWLIST — create only these two new files
+- backend/src/models/paper_symbol_filters.py — immutable DTOs and pure validator.
+- backend/tests/test_paper_symbol_filters.py — synthetic fixture unit tests.
+Do not edit `binance_client.py`, `paper_risk.py`, SQLite, plan, shared fixtures,
+other tests, dependencies, or any other path. If another file is needed, STOP and
+explain why.
+
+ACCEPTANCE AND GATE
+- Cover required provenance/version/identity, strict Decimal, missing/invalid/
+  unknown rules, all enabled bounds, exact tick/step boundaries and violations,
+  zero-disabled PRICE_FILTER rules, invalid/zero LOT_SIZE and NOTIONAL values,
+  both notional variants and all independent market flags, required filter
+  absence, market-reference absence/symbol/window mismatch, and order immutability.
+- Confirm deterministic codes/refs, Decimal-context independence, and early
+  `not_applicable` for SELL/non-entry even with missing filters.
+- Tests use synthetic snapshots only; no Binance/network.
+- From backend/ run only:
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_paper_symbol_filters.py`
+- Inspect status/diff; prove only allowlisted new files were added and prior
+  worktree changes remain intact; run `git diff --check`. No stage/commit/push.
+  Report exit codes/counts and limitations, then STOP. Do not integrate with
+  acceptance or start concurrency/regression phases.
+
+REFERENCE TO APPROVED PLAN
+Use ACT-P-004 policy semantics and filter-scope approval in §14.23-14.25. The
+pure risk phase is accepted with 12 passed; ACT-P-002/003 global PENDING do not
+block this filter slice. ACT-P-004 remains globally PENDING until all later
+phases are reviewed and accepted.

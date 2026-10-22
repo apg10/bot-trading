@@ -1,0 +1,108 @@
+ACT-P-004 / PAPER-ACCEPTANCE-RISK-GATES-001 — atomic risk/filter acceptance
+Status: PREPARED for manual Qwen execution. Implement this integration slice only;
+stop at its handoff. No commit or push. ACT-P-004 remains globally PENDING.
+
+AUTHORITY AND BASELINE
+- Workspace: /home/adrian10/bot_trading; branch master; HEAD when prepared:
+  e1c25448248edde093641066ed35dcbeed6d858d.
+- Re-read plan §14.23-14.26 and this task. Accepted inputs:
+  `paper_risk.py` (12 passed) and `paper_symbol_filters.py` (57 passed).
+- This worktree is deliberately dirty. Preserve it; no reset/clean/stash,
+  stage/commit/push, or branch/worktree changes. Re-capture full status and HEAD
+  before editing. STOP if HEAD differs or any listed clean target became changed.
+- Existing relevant baseline:
+  * `backend/src/persistence/sqlite_store.py` — clean at preparation.
+  * `backend/tests/test_sqlite_store_paper_acceptance.py` — clean.
+  * `backend/tests/test_sqlite_store_paper_orders.py` — clean.
+  * `backend/tests/test_sqlite_store_paper_sell_fills.py` — clean.
+  * `backend/tests/test_sqlite_store_paper_buy_fills.py` — pre-existing local
+    diff is exactly deletion of `_run(store.close())` at the end of
+    `test_buy_fill_precision_under_restricted_global_context`; preserve that
+    deletion byte-for-byte. This task owns only the acceptance test helpers and
+    call arguments needed by this integration.
+  * `backend/tests/test_sqlite_store_paper_fills.py` is also locally modified but
+    has no `accept_paper_order` call; do not edit it.
+  * Other frontend/docs/task files are unrelated and must remain untouched.
+- No file outside the exhaustive allowlist below may change. If scope requires
+  another path, STOP and explain rather than widening the task.
+
+GOAL
+Gate every new PAPER BUY LIMIT/MARKET acceptance with the accepted pure risk and
+symbol-filter evaluators inside the same SQLite write transaction that creates
+the reservation and changes PREPARED to ACCEPTED. A stale/precomputed reservation
+total must never let two concurrent BUYs jointly exceed `max_total_exposure`.
+
+CONTRACT
+1. Extend `SQLiteStore.accept_paper_order` with explicit, separately supplied
+   risk policy, `PaperRiskSnapshot`, `SymbolFilterSnapshot`, and optional explicit
+   market notional reference(s). None means absent, not a default. For a NEW BUY,
+   missing required risk/filter context rejects fail-closed. Keep StrategyConfig
+   unchanged. Do not fetch Binance or any other network data.
+2. Within `_accept_paper_order_inner`'s existing `BEGIN IMMEDIATE` transaction,
+   load/validate the persisted PREPARED order and current book. Recompute the sum
+   of active BUY quote reservations from durable rows in that transaction; do NOT
+   trust caller `remaining_buy_reservations`. Build a validated risk snapshot
+   using that current sum and the caller's explicit equity/marked-inventory and
+   market references. Keep current available-balance and reservation calculations
+   authoritative and transaction-local.
+3. Evaluate `evaluate_paper_risk` and `validate_symbol_filters` before the first
+   write. Risk policy/snapshot and filter snapshot must match the persisted order;
+   pass explicit market reference(s) unchanged. No quantity/price rounding or
+   silent reduction. On any gate rejection, raise a typed acceptance-gate error
+   carrying the stable code and exact result references; transaction leaves the
+   order PREPARED and makes no balance/reservation/acceptance writes.
+4. BUY acceptance writes the accepted order, reservation, balance, and an
+   immutable gate receipt atomically. Store only stable result codes and policy,
+   risk-snapshot, filter-snapshot/source, and used market-reference identifiers/
+   versions/timestamps; do not persist configured limit values or market prices.
+   Version the JSON acceptance payload to v2. Continue to validate/read existing
+   v1 acceptance payloads unchanged; no SQL table migration is needed or allowed.
+5. For successful BUYs, persist `risk_approved` plus policy id/version and
+   `symbol_filter_approved` plus snapshot/filter-set/source refs. For rejection,
+   expose the evaluator result through the typed error; create no acceptance row.
+6. Preserve idempotency: an already accepted order returns its current order and
+   stored receipt without re-evaluating, reserving again, or requiring new gate
+   inputs. Preserve legacy v1 stored records on load/reopen.
+7. SELL paths remain as currently scoped: risk/filter validators return
+   not-applicable; they must not block SELL acceptance or cancellations. Preserve
+   explicit SELL lot reservations and all existing order/fill behavior.
+8. In the same transaction, the second of two different concurrent BUY accepts
+   must observe the first BUY's committed quote reservation when recomputing
+   exposure. Test two otherwise-valid orders whose combined exposure breaches
+   the fixture policy: at most one may be accepted; the other remains PREPARED,
+   with balances/reservations consistent. Also test a combined exposure exactly
+   at the limit according to the approved `<=` rule.
+
+EXHAUSTIVE ALLOWLIST
+- `backend/src/persistence/sqlite_store.py`
+- `backend/tests/test_sqlite_store_paper_acceptance.py`
+- `backend/tests/test_sqlite_store_paper_orders.py`
+- `backend/tests/test_sqlite_store_paper_buy_fills.py` (preserve the one existing
+  deletion above; only adjust its acceptance helper/calls)
+- `backend/tests/test_sqlite_store_paper_sell_fills.py`
+No changes to the pure DTO/evaluator/filter files, APIs, strategy config, shared
+fixtures, frontend, plan, unrelated modified tests, or any other path.
+
+REQUIRED TEST COVERAGE
+- BUY LIMIT/MARKET with complete explicit policy/filter/risk/market inputs;
+  missing inputs and each risk/filter rejection; order remains PREPARED and
+  balance, reservations and acceptance table are unchanged.
+- Receipt refs/codes persist on successful acceptance; v2 reopens and validates;
+  historical v1 payload remains loadable and idempotent.
+- Two-connection/two-order concurrency proving current BUY reservations are
+  re-read inside the transaction; one breaches combined exposure, one equality
+  boundary; assert exact statuses and free/reserved balances.
+- Retrying an accepted order does not evaluate/re-reserve again. SELL acceptance,
+  cancellation, fills, and old conflict/funds/rollback behavior remain intact.
+- Test values are fixtures only; never operational recommendations.
+
+GATE (from backend/)
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_sqlite_store_paper_acceptance.py tests/test_sqlite_store_paper_orders.py tests/test_sqlite_store_paper_buy_fills.py tests/test_sqlite_store_paper_sell_fills.py`
+
+HANDOFF
+- Check status/diff and `git diff --check`; prove only the allowlist changed and
+  all pre-existing changes, especially the specified local deletion, remain
+  intact. Report exit status/test counts, gate receipt behavior, concurrency
+  result, v1 compatibility and limitations. No staging/commit/push.
+- Stop after this integration slice. Do not start the broader regression phase,
+  APIs, automated PAPER cycle, or later plan tasks.

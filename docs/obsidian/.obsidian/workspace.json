@@ -1,0 +1,217 @@
+{
+  "main": {
+    "id": "c0de21867e716ad5",
+    "type": "split",
+    "children": [
+      {
+        "id": "f6c42368c15f81cd",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "e4d2515b397b573c",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Decisiones/Registro de decisiones.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Registro de decisiones"
+            }
+          },
+          {
+            "id": "aca6ca38732c93fd",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Graph view"
+            }
+          }
+        ],
+        "currentTab": 1
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "bd6648a7179e8fa7",
+    "type": "split",
+    "children": [
+      {
+        "id": "e8a68697b18b54c2",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "da4bdf4faa2c9a79",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "032e49f5e1daa7be",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "4fb740c46c82186c",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "a909a261eb431e32",
+    "type": "split",
+    "children": [
+      {
+        "id": "36c34d3c7cb5e42e",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "f0f2723659b82a17",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "b54d0bc6a93bb4e6",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "47560562005b3aa5",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "3a64660bc38ef645",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "f1dde66cfdd60fea",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "aca6ca38732c93fd",
+  "lastOpenFiles": [
+    "Handoffs/ACT-P-005-fill-simulator-pure-review-3.md",
+    "Handoffs/ACT-P-005-fill-simulator-pure-review-2.md",
+    "Handoffs/ACT-P-005-fill-simulator-pure-review.md",
+    "Handoffs/ACT-P-005-fill-simulator-pure-task.md",
+    "Handoffs/ACT-P-005-decision-contract-task.md",
+    "Decisiones/ACT-P-005-fill-policy-draft.md",
+    "Mapa del proyecto.md",
+    "Handoffs/Registro de handoffs.md",
+    "Decisiones/Registro de decisiones.md",
+    "Handoffs/Plantilla de handoff.md",
+    "Decisiones/Plantilla de decisión.md",
+    "Inicio.md",
+    "Handoffs",
+    "Decisiones",
+    "Seguimiento.md"
+  ]
+}

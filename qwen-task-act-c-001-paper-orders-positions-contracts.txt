@@ -1,5 +1,5 @@
 MICROTASK ACT-C-001 — CONTRATOS PAPER SPOT
-Estado: IMPLEMENTADO; EN_REVISION para aceptación del maestro. El contrato fue autorizado; no reimplementar.
+Estado: ACEPTADO por el maestro el 2026-10-13, incluida la corrección acotada. No commit/push por instrucción; ACT-C-001 global sigue PENDIENTE.
 DEC-5 se cierra solo como inventario; no se elige `bot.models` ni `models.state` como
 familia canónica. ACT-C-001 global sigue PENDIENTE.
 
@@ -113,12 +113,18 @@ DECISIONES DEL CONTRATO AUTORIZADAS POR EL MAESTRO
 5. DTOs Paper nuevos y aditivos en módulo propio; legacy intacto, sin elegir familia actual.
 
 EVIDENCIA DEL MICRO-TASK IMPLEMENTADO
-`backend/src/models/paper_contracts.py` y `backend/tests/test_paper_contracts.py` están
-incluidos en `e85fdb2`; la implementación es contract-only y aditiva. Gate de revisión,
+`backend/src/models/paper_contracts.py` y `backend/tests/test_paper_contracts.py` base
+están incluidos en `e85fdb2`; la implementación es contract-only y aditiva. Gate inicial
 ejecutado desde `backend/`: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys
 tests/test_paper_contracts.py tests/test_models.py tests/test_bot_api.py` → 129 passed,
-1 warning Starlette/httpx. No se modificaron archivos de código durante esta revisión.
+1 warning Starlette/httpx. Corrección aceptada: rechazo de fill_id duplicado por orden;
+la igualdad exacta inicial `total_cost == qty * avg_entry_price` se conserva como
+historial, pero queda sustituida exclusivamente por la revisión semántica §14.22:
+qty/coste bruto son autoritativos y el promedio es una proyección validada (comisiones
+aparte); 8 schema_version v1 restringidos e inmutables. Gate tras la corrección inicial
+→ 139 passed, 1 warning. El detalle y la baseline de aceptación están en §14.17/§14.22 de
+`trading-bot-action-plan.md`.
 
-STOP: Entrega implementada y presentada EN_REVISION; esperar aceptación del maestro. No
-añadir ledger/runtime, no crear otro task, y mantener ACT-C-001 global PENDIENTE.
+STOP: El microtask de contratos PAPER y su corrección están aceptados. No añadir
+ledger/runtime, no commit/push y no iniciar otra task; ACT-C-001 global permanece PENDIENTE.

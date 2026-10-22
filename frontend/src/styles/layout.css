@@ -1,4 +1,5 @@
 /* ── Layout responsive: 3 columnas desktop / móvil ─────────────────────────── */
+/* Adaptado al brief visual — barra superior 56 px, navegación Terminal/Laboratorio/Bot. */
 
 @import './tokens.css';
 
@@ -8,9 +9,11 @@
   flex-direction: column;
   height: 100vh;
   width: 100vw;
+  background-color: var(--color-bg);
 }
 
-/* Barra superior */
+/* ── Barra superior (56 px según brief) ─────────────────────────────────────── */
+
 .header-bar {
   display: flex;
   align-items: center;
@@ -33,7 +36,7 @@
   letter-spacing: 0.5px;
 }
 
-.env-badge.paper { background: rgba(63, 185, 80, 0.15); color: var(--color-green); }
+.env-badge.paper { background: rgba(99, 214, 164, 0.15); color: var(--color-positive); }
 .env-badge.demo { background: rgba(79, 140, 255, 0.15); color: var(--color-primary); }
 
 .header-bar .status-dot {
@@ -43,20 +46,76 @@
   background-color: var(--color-text-muted);
 }
 
-.status-dot.connected { background-color: var(--color-green); box-shadow: 0 0 4px var(--color-green); }
-.status-dot.disconnected { background-color: var(--color-red); }
-.status-dot.reconnecting { background-color: var(--color-yellow); animation: pulse 1.5s infinite; }
+.status-dot.connected { background-color: var(--color-positive); box-shadow: 0 0 4px var(--color-positive); }
+.status-dot.disconnected { background-color: var(--color-negative); }
+.status-dot.reconnecting { background-color: var(--color-warning); animation: pulse 1.5s infinite; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
 
-/* Cuerpo principal */
+/* ── Navegación principal (Terminal / Laboratorio / Bot) ─────────────────────── */
+
+.nav-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 40px;
+  padding: 0 var(--space-lg);
+  background-color: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--space-md);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-muted);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
+  font-family: inherit;
+}
+
+.nav-tab:hover {
+  color: var(--color-text);
+  background-color: rgba(26, 37, 53, 0.5);
+}
+
+.nav-tab[aria-selected="true"] {
+  color: var(--color-accent);
+  background-color: var(--color-surface);
+}
+
+.nav-tab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* ── Cuerpo principal ───────────────────────────────────────────────────────── */
+
 .main-body {
   display: flex;
   flex: 1;
   overflow: hidden;
+}
+
+.view-panel {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.view-panel[hidden] {
+  display: none;
 }
 
 /* Columna izquierda — watchlist */
@@ -110,7 +169,39 @@
   overflow-y: auto;
 }
 
-/* Franja inferior — posiciones */
+/* ── Vista "no disponible" (Laboratorio / Bot) ──────────────────────────────── */
+
+.unavailable-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: var(--space-md);
+  color: var(--color-text-muted);
+}
+
+.unavailable-view .icon {
+  font-size: 48px;
+  opacity: 0.25;
+}
+
+.unavailable-view h2 {
+  font-size: var(--font-size-lg);
+  font-weight: 500;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.unavailable-view p {
+  font-size: var(--font-size-sm);
+  margin: 0;
+  text-align: center;
+  max-width: 320px;
+}
+
+/* ── Franja inferior — honesta, sin datos ficticios ─────────────────────────── */
+
 .bottom-bar {
   height: var(--bottom-bar-height);
   display: flex;
@@ -152,7 +243,7 @@
   background-color: var(--color-surface);
 }
 
-/* Tarjetas de zona / pivote */
+/* Tarjetas */
 .card {
   background-color: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -172,10 +263,10 @@
   color: var(--color-text-muted);
 }
 
-/* Panel de reglas pendientes */
+/* Reglas pendientes */
 .pending-rules {
-  background-color: rgba(210, 153, 34, 0.08);
-  border: 1px solid rgba(210, 153, 34, 0.3);
+  background-color: rgba(242, 197, 109, 0.08);
+  border: 1px solid rgba(242, 197, 109, 0.3);
   border-radius: var(--radius-md);
   padding: var(--space-md);
 }
@@ -184,7 +275,7 @@
   font-size: var(--font-size-xs);
   text-transform: uppercase;
   letter-spacing: 0.8px;
-  color: var(--color-yellow);
+  color: var(--color-warning);
   margin-bottom: var(--space-sm);
 }
 
@@ -239,6 +330,21 @@
   .bottom-bar {
     overflow-x: auto;
     white-space: nowrap;
+  }
+
+  /* En móvil, la navegación se convierte en barra inferior */
+  .nav-bar {
+    order: 1;
+    height: 48px;
+    padding: 0 var(--space-md);
+    gap: var(--space-xs);
+    border-bottom: none;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .nav-tab {
+    padding: 6px var(--space-sm);
+    font-size: var(--font-size-xs);
   }
 }
 

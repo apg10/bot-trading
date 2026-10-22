@@ -34,6 +34,14 @@ logs/
 *.db
 *.sqlite3
 
+# SQLite sidecar files (WAL, SHM, journal)
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Default trading bot database (specific)
+backend/data/trading_bot.sqlite3*
+
 # Model files (if generated)
 models/*.bin
 models/*.h5

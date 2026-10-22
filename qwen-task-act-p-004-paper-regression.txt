@@ -1,0 +1,37 @@
+ACT-P-004 / PAPER-POST-ACCEPTANCE-REGRESSION-001 — read-only backend regression
+Status: PREPARED for manual Qwen execution. This task runs tests only; do not edit
+code, tests, documentation, configuration, or task files.
+ACT-P-004 remains globally PENDING pending regression review and remaining criteria.
+
+AUTHORITY AND BASELINE
+- Workspace: /home/adrian10/bot_trading; branch master; expected HEAD:
+  2cbd689117469d3fa7a1093c066b245336dc8653.
+- This commit is pushed to origin/master. Verify branch, HEAD, and remote before
+  running. If any differ, STOP/BLOCKED; do not create branches/worktrees or
+  reconstruct a baseline.
+- The worktree intentionally retains unrelated local tracked/untracked changes,
+  including the pre-existing deletion of `_run(store.close())` in
+  `backend/tests/test_sqlite_store_paper_buy_fills.py`. Capture complete status
+  before and after; do not restore, stage, commit, push, or otherwise touch it.
+- Read plan §14.23-14.27 and the accepted task handoffs. Accepted focused gates:
+  pure risk 12 passed; pure filters 57 passed; atomic acceptance 117 passed.
+  Full-backend evidence before these P-004 additions was 1707 passed, 1 warning.
+
+GOAL
+Run the existing backend test suite read-only after the combined P-004
+implementation to find cross-suite regressions. Do not reopen FYL, accepted BUY/
+SELL slices, or other accepted tasks absent a reproducible failure attributable
+to this integration. This task is not a request to fix failures or start P-005.
+
+ONLY GATE (run from backend/)
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests`
+
+HANDOFF
+- Report exact exit code, total passed/failed/skipped, all warnings, and any
+  failing test names with the first relevant traceback. If the gate fails, STOP
+  and report; do not edit or rerun with narrowed selectors to claim success.
+- Verify after testing: HEAD and origin/master still equal the expected SHA;
+  no additional tracked/untracked paths or content changes were introduced;
+  `git diff --check` is clean. The known local worktree baseline remains intact.
+- No staging, commit, push, branch/worktree changes, service/network access, or
+  task after this regression. Return only the evidence and STOP.

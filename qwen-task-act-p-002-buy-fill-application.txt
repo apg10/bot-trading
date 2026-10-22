@@ -1,0 +1,164 @@
+ACT-P-002 — MICROTASK: aplicación atómica de fill BUY con comisión QUOTE
+Microtask final para ejecución local con Qwen en CINCO ejecuciones consecutivas
+del MISMO chat y worktree. Terminar cada ejecución con handoff/STOP; no saltar fases.
+ACT-P-002 global permanece PENDIENTE. Sin SELL, matching ni fees estimadas.
+
+OBJETIVO
+Aplicar una sola vez un PaperFill BUY ya registrado en el journal, para una orden
+PREPARED→ACCEPTED con reserva. Registrar durablemente que el fill fue aplicado,
+actualizar orden, balances, reserva y lote agregado por orden en una sola transacción.
+Schema actual v9; añadir schema v10, con migraciones atómicas y rollback.
+
+RESOLUCIÓN DEL BLOCKER MATEMÁTICO
+El ajuste de PositionLot fue ACEPTADO en §14.22 de trading-bot-action-plan.md. Usar
+qty y total_cost como autoridades contables; avg_entry_price es la proyección validada
+de coste/cantidad a 34 cifras significativas con ROUND_HALF_EVEN y contexto explícito.
+Así, para fills 1@1 y 2@2, el lote agregado conserva qty=3 y total_cost=5, y acepta el
+promedio proyectado 1.666666666666666666666666666666667. No recuperar la igualdad exacta
+histórica ni introducir tolerancias: §14.22 sustituye solo esa igualdad. Este blocker
+queda resuelto; no ampliar ni volver a modificar el contrato PositionLot en este task.
+
+DECISIONES FIJADAS (no volver a preguntar ni alterar)
+1. Solo comisión conocida en QUOTE. Debitar comisión de available, nunca consumir
+   reserva de principal ni reservas ajenas. Si available no cubre comisión: rollback
+   completo. Commission(amount=0, asset=QUOTE) es válida. commission=None y comisión
+   BASE o de tercer activo: rechazar sin efectos contables; no cambiar contratos globales.
+2. MARKET: suma de qty*price de todos los fills aplicados <= max_quote_amount; fees
+   excluidas del límite.
+3. LIMIT BUY: cada fill exige fill.price <= order.price.
+4. Una posición y un lote agregados por orden de entrada; position_id=lot_id=order_id.
+   Los parciales suman qty y coste bruto autoritativos; avg_entry_price es la proyección
+   derivada aceptada en §14.22 y la comisión se mantiene separada. Si la orden declara
+   otro position_id, rechazar sin efectos.
+5. Si falta balance actual BASE, crear fila actual con balance inicial cero y acreditar
+   fill.qty. Nunca modificar PaperAccountOpening.
+6. Journal y aplicación son estados distintos. Una aplicación previa identificada
+   durablemente por fill_id permite reintento sin efectos. Fill ya guardado pero no
+   aplicado debe poder aplicarse. Rechazo preserva cualquier evento previamente guardado.
+7. Tras parcial LIMIT, la reserva activa debe cubrir exactamente remaining_qty*limit_price.
+   Del principal reservado se consume fill.qty*fill.price; la mejora de precio
+   fill.qty*(limit_price-fill.price) se libera a available, dejando cubierto el resto.
+   MARKET conserva la reserva menos notional aplicado mientras siga abierto; al completar
+   cualquier tipo, liberar todo remanente a available y eliminar la reserva activa.
+
+PLAN DE EJECUCIÓN SECUENCIAL (mantener este orden en el mismo chat)
+Fase 1 — Reconciliar la migración v9→v10 ya presente; no reimplementar el schema.
+- La inspección actual muestra `_SCHEMA_VERSION=10`, DDL de `paper_fill_applications` y
+  `position_lots`, y rama v9→v10 en `SQLiteStore._initialize_inner`. Primero confirma esos
+  hechos contra el worktree que conserva las fases previas. No dupliques DDL ni refactorices
+  inicialización. Si el worktree actual no los conserva, STOP y reporta la diferencia.
+- Limitar escrituras de esta fase a `backend/tests/test_sqlite_store.py` y
+  `backend/tests/test_persistence_lifecycle.py`: añadir verificación directa v9→v10 con
+  preservación y rollback si falta; actualizar solo las expectativas que afirman que v9 es
+  el schema ACTUAL (incluido reinitialize/lifecycle) a v10 y `_SCHEMA_V10_TABLES`.
+  Las pruebas de migración HISTÓRICA v8→v9 y otros fixtures v9 son válidos: no hacer
+  reemplazo global de “v9” ni actualizar sus expectativas históricas.
+- No añadir todavía API ni efectos de aplicación de fill; no tocar el resto del store ni
+  arreglar fallos ajenos a esos tests.
+- Gate focal, desde backend:
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_sqlite_store.py::test_v9_to_v10_migration_preserves_v9_data tests/test_sqlite_store.py::test_v9_to_v10_migration_rolls_back_ddl_and_version tests/test_sqlite_store.py::test_reinitialize_v10_is_idempotent tests/test_persistence_lifecycle.py::test_lifespan_store_initialized_with_user_version_10 tests/test_persistence_lifecycle.py::test_reopen_preserves_data_no_duplicate_migration tests/test_persistence_lifecycle.py::test_multiple_lifespan_cycles_safe`.
+- Una sola ejecución del gate y, como máximo, una corrección/re-ejecución solo para un
+  fallo atribuible a las expectativas actuales v9→v10. Si vuelve a fallar, el fallo no es
+  directamente de esta fase o exige cambios adicionales, STOP con diagnóstico; no entrar
+  en ciclos de arreglos ni correr suites completos. Entregar diff/resultados y STOP fase 2.
+
+Fase 2 — Primer camino completo y atómico de fill totalmente ejecutado.
+- Cargar fill ya journalizado; una aplicación exitosa actualiza en una única transacción
+  aplicación durable, balances, lote y orden, consume principal, debita comisión QUOTE de
+  available y libera reserva sobrante al completar.
+- Probar fill MARKET completo dentro del max_quote_amount y fill LIMIT completo válido;
+  añadir rechazo por saldo de fee insuficiente con rollback. Todavía no soportar parciales:
+  rechazarlos sin efectos en esta fase intermedia.
+- Gate, desde backend: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_sqlite_store_paper_buy_fills.py tests/test_sqlite_store_paper_fills.py tests/test_sqlite_store_paper_acceptance.py tests/test_sqlite_store_paper_balances.py tests/test_sqlite_store_paper_orders.py`.
+- Entregar y STOP para fase 3. No aceptar estado intermedio como slice terminado.
+
+Fase 3 — Parciales, cobertura LIMIT y presupuesto MARKET.
+- Completar soporte PARTIALLY_FILLED: LIMIT conserva cobertura restante exacta y libera
+  mejora de precio; MARKET retiene presupuesto restante; completar libera todo remanente.
+- Añadir secuencias de dos parciales, límite de notional MARKET exacto/excedido, completado
+  y overfill, con verificaciones de rollback.
+- Gate, desde backend: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_sqlite_store_paper_buy_fills.py tests/test_sqlite_store_paper_fills.py tests/test_sqlite_store_paper_acceptance.py tests/test_sqlite_store_paper_balances.py tests/test_sqlite_store_paper_orders.py`.
+- Entregar y STOP para fase 4.
+
+Fase 4 — Idempotencia, retry journal/aplicación, carreras y rollback.
+- Reintento de fill ya aplicado no tiene efectos; journal existente sin marca de aplicación
+  aún se aplica; rechazo conserva el journal. Probar mismo fill concurrente desde dos stores,
+  fills distintos concurrentes, conflicto de payload e inyección de fallo tras cada write.
+- Gate, desde backend: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_sqlite_store_paper_buy_fills.py tests/test_sqlite_store_paper_fills.py tests/test_sqlite_store_paper_acceptance.py tests/test_sqlite_store_paper_balances.py tests/test_sqlite_store_paper_orders.py tests/test_sqlite_store.py tests/test_persistence_lifecycle.py`.
+- Entregar resultados y STOP para fase 5.
+
+Fase 5 — Cierre y gates completos.
+- Reconciliar expectativas schema v10 en todos los archivos allowlisted. No tocar archivos
+  fuera de allowlist; revisar diff/status acumulado de las cinco fases.
+- Gate final único, desde backend:
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_sqlite_store_paper_buy_fills.py tests/test_sqlite_store_paper_fills.py tests/test_sqlite_store_paper_acceptance.py tests/test_sqlite_store_paper_balances.py tests/test_sqlite_store_paper_orders.py tests/test_sqlite_store.py tests/test_persistence_lifecycle.py tests/test_paper_contracts.py tests/test_models.py tests/test_bot_api.py`.
+- Report comandos/conteos/warnings exactos, defectos conocidos y handoff final EN_REVISION;
+  STOP. ACT-P-002 global queda PENDIENTE.
+
+REGLAS DE IMPLEMENTACIÓN
+- API pública del store aplica por fill_id ya persistido (no confundir save_paper_fill
+  con contabilizar). Validar nuevamente DTOs y relaciones dentro de la transacción.
+- Usar _write / BEGIN IMMEDIATE; no anidar métodos públicos transaccionales.
+- Schema v10 añade (a) marca durable única paper_fill_applications(fill_id, ...),
+  separada de paper_fills; y (b) persistencia del lote/posición agregado requerido.
+  La marca se inserta al commit de la aplicación, nunca al guardar el evento. Definir
+  PK/FK/índices para que solo exista una aplicación por fill_id y un lote por order_id.
+- Para fill parcial, estado PARTIALLY_FILLED; al ejecutar exactamente requested_qty,
+  estado FILLED. No permitir overfill, doble contabilización, fills de otra orden ni
+  orden sin aceptación/reserva. Conflictos de fill_id conservan la semántica del journal.
+- Balance QUOTE: total baja por principal y comisión; reserved baja por principal y por
+  mejora liberada; available sube solo por mejora y baja por comisión. Balance BASE actual
+  sube por fill.qty. Reusar AssetBalance (total=available+reserved). Base sin fila se crea
+  desde cero; snapshot de apertura inmutable.
+- No modificar PaperFill/PaperOrder/PositionLot DTOs para habilitar la implementación;
+  reutilizar la semántica aceptada en §14.22. Si surge una incompatibilidad distinta no
+  resuelta por ese contrato, detenerse y solicitar aprobación.
+
+ALLOWLIST DE ESCRITURA (exhaustiva; nada más)
+- backend/src/persistence/sqlite_store.py
+- backend/tests/test_sqlite_store_paper_buy_fills.py (nuevo, suite focal)
+- backend/tests/test_sqlite_store_paper_fills.py
+- backend/tests/test_sqlite_store_paper_acceptance.py
+- backend/tests/test_sqlite_store_paper_balances.py
+- backend/tests/test_sqlite_store_paper_orders.py
+- backend/tests/test_sqlite_store.py
+- backend/tests/test_persistence_lifecycle.py
+No editar modelos, API, frontend, plan raíz ni otros archivos. Si la decisión sobre el
+contrato requiere ampliar allowlist, STOP y pedir autorización antes de editar.
+
+PRUEBAS REQUERIDAS (añadir/corregir según corresponda)
+- Lote agregado con fills (1@1)+(2@2): assert qty=3, total_cost=5 y promedio de 34 cifras
+  según §14.22; no codificar tolerancias ni cambiar el contrato aceptado.
+- Fill previamente guardado: aplicación efectiva; fill no registrado rechazado. Fill
+  registrado pero no aplicado tras rechazo por comisión insuficiente debe poder aplicarse
+  después de corregir fondos, conservando intacta la fila journal.
+- Idempotencia por aplicación: repetición idéntica de fill_id no cambia balance/reserva/
+  lote/orden; conflicto journal mismo fill_id con payload distinto; concurrencia entre
+  dos stores no aplica dos veces.
+- Parcial LIMIT con mejora de precio: reserva final = remaining_qty*limit_price y mejora
+  liberada; otro parcial; completado libera todo remanente. Fallar atómicamente si la
+  cobertura requerida no puede mantenerse.
+- MARKET con varios fills: notional acumulado igual al máximo permitido acepta; exceso
+  rechaza íntegramente; comisión no consume límite.
+- Comisión QUOTE positiva/cero, fondos insuficientes, comisión desconocida, BASE y tercer
+  activo: todos los rechazos aplicables dejan intactos aplicación, orden, balances,
+  reserva y lote; el fill previamente journalizado permanece.
+- LIMIT fill por encima del límite, overfill, fill de order_id distinto, orden no aceptada,
+  position_id contradictorio y BASE inexistente/creada correctamente.
+- Inyectar error después de cada paso de escritura y probar rollback conjunto; verificar
+  snapshot de apertura inalterado.
+- Schema v9→v10 preserva v9 íntegro; rollback de DDL/version ante fallo. Actualizar todas
+  las expectativas actuales de schema 9 a 10 en allowlist, incluidos tests de lifecycle.
+- Mantener regresión focal de fills/acceptance/balances/orders/store y lifecycle fake/temp.
+  Correr los gates finales una vez, tras todos los cambios; registrar comandos exactos,
+  conteos y warnings. No afirmar que resultados previos son gates actuales.
+
+HANDOFF / PROCEDIMIENTO
+1. Al inicio, registrar git status --short --untracked-files=all, git diff y
+   git diff --cached; preservar todos los cambios preexistentes.
+2. Las cinco ejecuciones son turnos consecutivos del mismo chat Qwen y worktree. Leer el
+   último handoff antes de cada turno; no reiniciar ni resumir/reconstruir cambios previos.
+3. Ejecutar solo la fase asignada, preservar el delta acumulado, reportar cambios/tests/
+   defectos y STOP con instrucción de la fase siguiente. No avanzar automáticamente.
+4. Reutilizar PositionLot conforme a §14.22, sin reabrir ni ampliar el contrato. No hacer
+   staging, commit o push. ACT-P-002 global queda PENDIENTE.

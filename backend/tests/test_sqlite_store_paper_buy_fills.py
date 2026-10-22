@@ -2091,7 +2091,6 @@ def test_buy_fill_precision_under_restricted_global_context(tmp_path: Path) -> N
         assert loaded_order2.status == PaperOrderStatus.FILLED
 
         conn.close()
-        _run(store.close())
     finally:
         dec_mod.setcontext(old_ctx)
 

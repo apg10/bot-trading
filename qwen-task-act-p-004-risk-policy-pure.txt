@@ -1,0 +1,93 @@
+ACT-P-004 / RISK-POLICY-PURE-001 — contrato y evaluación pura
+Estado: PREPARADO para Qwen. Implementar solo este slice y detenerse para handoff.
+No equivale al cierre global de ACT-P-004.
+
+AUTORIDAD Y BASE
+- Workspace: /home/adrian10/bot_trading; rama master; HEAD observado al preparar:
+  e1c25448248edde093641066ed35dcbeed6d858d.
+- El worktree tiene cambios locales previos. No se presupone CLEAN. Preservar
+  todo lo existente; no usar reset/clean/stash, no stage/commit/push y no cambiar rama.
+- Antes de editar, volver a capturar branch, HEAD, status completo y comprobar que
+  los dos archivos permitidos abajo no existen ni tienen cambios concurrentes.
+  Si HEAD cambió o hay colisión en esos paths: STOP/BLOCKED; no reconstruir baseline.
+- Leer §7 y §14.23 de trading-bot-action-plan.md, `paper_contracts.py`,
+  `sqlite_store.py` (solo para entender las entidades) y tests relevantes.
+  No editar el plan ni archivos existentes en esta fase.
+
+OBJETIVO DEL SLICE
+Crear DTO versionado independiente de `StrategyConfig` y un evaluador puro,
+determinista, explicable y sin efectos, usando una orden candidata y snapshots
+explícitos. No llamar Binance, no leer configuración global y no usar defaults
+financieros de `RiskLimits`, `TradingStrategy` o legacy.
+
+CONTRATO FINANCIERO APROBADO
+1. Política inmutable `paper_risk_policy.v1`, con `policy_id`, `policy_version`,
+   `account_id`, `quote_asset` y límites requeridos explícitos Decimal:
+   `max_order_notional`, `max_total_exposure`, `max_daily_loss`. Ningún límite
+   tiene default; rechazar ausentes, bool, NaN/Infinity o negativos. Cero es un
+   límite explícito que impide una entrada positiva, no significa ilimitado.
+2. Tamaño se expresa en quote. Para BUY LIMIT:
+   `order_notional = requested_qty * limit_price`; para BUY MARKET:
+   `order_notional = max_quote_amount`. Valores iguales al máximo se admiten;
+   superiores se rechazan. No reducir cantidad ni redondear.
+3. Snapshot explícito y validado incluye referencias/tiempos de mercado, equity
+   de inicio del día UTC, equity actual marcado y exposición actual en quote.
+   `daily_loss = max(0, equity_utc_day_start - equity_current_marked)`.
+   Equities y exposición pertenecen a la cuenta y quote asset de la política.
+   Mark/equity/exposure faltante o incoherente rechaza de forma fail-closed.
+4. La exposición actual se define en la política como suma del valor marcado de
+   inventario Spot abierto (atribuido y no atribuido) más reserva remanente de
+   órdenes BUY abiertas. Sin FX implícito. Para comprobar la proyección, sumar
+   el notional de la candidata; `projected_exposure <= max_total_exposure` pasa.
+   El equity del snapshot usa balances totales como autoridad, no lotes sumados
+   otra vez. SELL reservado no se cuenta una segunda vez.
+5. Si `daily_loss >= max_daily_loss`, rechazar nueva entrada. Equity refleja
+   comisiones efectivamente asentadas; resultado no afirma ser neto de spread,
+   slippage u otros costes no registrados. Números de pruebas son fixtures, no
+   recomendaciones operativas.
+6. El resultado identifica `approved`/`rejected`, código estable y `policy_id` /
+   `policy_version`; nunca muta la orden. Códigos de este slice:
+   `risk_policy_missing`, `risk_snapshot_insufficient`, `risk_snapshot_invalid`,
+   `risk_order_size_limit`, `risk_exposure_limit`, `risk_daily_loss_limit`.
+   Prioridad determinista de rechazo: política inválida/ausente, snapshot
+   inválido/insuficiente, tamaño, pérdida diaria, exposición.
+7. Esta fase evalúa solo entradas BUY que incrementan exposición. No rechaza
+   cancelaciones ni salidas protectoras. Filtros de símbolo todavía NO se
+   evalúan en este slice (serán el siguiente task separado); no aceptar que su
+   ausencia se interprete como aprobación de filtros durante integración.
+
+ALLOWLIST EXHAUSTIVA (crear solo estos dos archivos nuevos)
+- backend/src/models/paper_risk.py — DTOs de política/snapshot/resultado y
+  función pura de evaluación.
+- backend/tests/test_paper_risk.py — pruebas unitarias de contrato y evaluación.
+No editar otros archivos, añadir dependencias, actualizar documentación, crear
+fixtures compartidas ni modificar modelos existentes. Si hace falta otro path,
+STOP y explicar el motivo.
+
+ACEPTACIÓN Y PRUEBAS
+- Política exige cada límite y sus identidades/versiones; Decimal estricto,
+  inmutable, sin coerciones ni defaults.
+- Rechazos: política/snapshot incompletos o incoherentes; BUY LIMIT/MARKET que
+  supera tamaño; pérdida al límite; exposición proyectada que excede el límite.
+- Bordes: igualdad de tamaño/exposición admitida; pérdida igual al tope rechaza;
+  cero explícito, cantidad/notional inválido, cuenta/quote mismatch.
+- Confirmar no mutación de orden/snapshot, resultado estable y refs de política,
+  comportamiento idéntico ante contextos Decimal globales distintos.
+- No incluir filtros, SQLite, aceptación, reservas persistidas, APIs, IA,
+  matching, SELL accounting ni red real. Concurrente atomically acceptance se
+  prueba en el slice de integración, no aquí.
+- Gate único desde backend/:
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -p no:cacheprovider --capture=sys tests/test_paper_risk.py`
+
+HANDOFF
+- Inspeccionar diff y status; demostrar que solo los dos archivos allowlisted
+  cambiaron y que todo el baseline previo se conserva. Ejecutar `git diff --check`.
+- Informar comandos, exit codes, conteos, ficheros y limitaciones; STOP tras
+  entregar fase pure. No empezar filtros ni integración en este mismo slice.
+- Las siguientes tandas se emitirán por separado: filtros versionados con
+  snapshots explícitos y tests offline; reevaluación+reserva en la transacción
+  de aceptación con carrera de dos órdenes; después regresión focal. Cada fase
+  deberá incluir concurrencia donde aplique y preservar las reglas §14.23.
+- ACT-P-002/003 permanecen globalmente PENDIENTES y no son gates de este slice;
+  los criterios de libro/órdenes requeridos están satisfechos por slices
+  aceptados. ACT-P-004 también permanece PENDIENTE hasta aceptar sus fases.
