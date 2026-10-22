@@ -39,11 +39,15 @@ Schema versions:
         aggregated position lots by order_id (position_lots).
     v11 — adds paper_reservation_lot_allocations and paper_sell_accounting tables.
     v12 — adds paper_fill_evaluations table for ACT-P-005 fill-candidate evaluation results.
+    v13 — adds explicit PAPER lifecycle tables.
+    v14 — extends lifecycle checks for STOPPED, STOP, and CLOSE.
+    v15 — adds immutable lifecycle reconciliation reports and RECONCILE events.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Sequence
 from decimal import (
@@ -97,6 +101,12 @@ from src.models.paper_contracts import (
     _exact_sum,
 )
 from src.models.paper_execution import PaperFillEvaluationRecord
+from src.models.paper_lifecycle import (
+    PaperLifecycleCommand,
+    PaperLifecycleEvent,
+    PaperLifecycleReconciliationReport,
+    PaperLifecycleState,
+)
 from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot, PaperRiskResult, evaluate_paper_risk
 from src.models.paper_symbol_filters import (
     MarketNotionalReference, SymbolFilterSnapshot, SymbolFilterResult,
@@ -156,7 +166,7 @@ def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, res
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 15
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -174,6 +184,26 @@ class PositionLot(BaseModel):
     environment: Literal["paper"] = Field(default="paper", frozen=True)
     total_qty: Decimal = Field(..., ge=Decimal("0"))
     total_cost: Decimal = Field(..., ge=Decimal("0"))
+
+
+def _paper_read_projection(value: Any) -> Any:
+    """Return a deterministic, JSON-safe read projection.
+
+    PAPER read APIs deliberately do not expose Decimal or integer values as
+    numbers.  Keeping this conversion in the store also makes the projections
+    safe for callers which do not use FastAPI's JSON encoder.
+    """
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _paper_read_projection(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_paper_read_projection(item) for item in value]
+    return value.value if hasattr(value, "value") and not isinstance(value, str) else value
 
 
 # ── Internal versioned Pydantic models (v11) ───────────────────────────────
@@ -479,6 +509,23 @@ class PaperOrderAcceptanceGateError(ValueError):
         super().__init__(code)
 
 
+class PaperLifecycleStateError(ValueError):
+    """Lifecycle has not been initialized or contains an invalid state."""
+
+
+class PaperLifecycleCommandConflictError(ValueError):
+    """A command identity was reused with a different immutable payload."""
+
+
+class PaperLifecycleReconciliationError(PaperLifecycleStateError):
+    """A fresh lifecycle reconciliation found a discrepancy."""
+
+    def __init__(self, report: PaperLifecycleReconciliationReport):
+        self.report = report
+        details = "; ".join(report.discrepancies) or "unknown discrepancy"
+        super().__init__(f"lifecycle reconciliation failed: {details}")
+
+
 class PaperOrderCancellationStateError(ValueError):
     """Order cannot be cancelled in its current state or is not a BUY order."""
 
@@ -628,7 +675,14 @@ _SCHEMA_V11_TABLES = _SCHEMA_V10_TABLES | {
     "paper_reservation_lot_allocations",
     "paper_sell_accounting",
 }
-_SCHEMA_V12_TABLES = _SCHEMA_V11_TABLES | {"paper_fill_evaluations"}
+_SCHEMA_V12_BASE_TABLES = _SCHEMA_V11_TABLES | {"paper_fill_evaluations"}
+_SCHEMA_V12_TABLES = _SCHEMA_V12_BASE_TABLES
+_SCHEMA_V13_TABLES = _SCHEMA_V12_TABLES | {
+    "paper_lifecycle_states",
+    "paper_lifecycle_events",
+}
+_SCHEMA_V14_TABLES = _SCHEMA_V13_TABLES
+_SCHEMA_V15_TABLES = _SCHEMA_V14_TABLES | {"paper_lifecycle_reconciliations"}
 
 _PAPER_FILL_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS paper_fills (
@@ -765,6 +819,34 @@ _PAPER_FILL_EVALUATION_DDL_STATEMENTS = (
         CHECK (fill_candidate_fill_qty IS NULL OR status_code = 'fill_candidate'),
         CHECK (fill_candidate_fill_price IS NULL OR status_code = 'fill_candidate'),
         CHECK (fill_candidate_commission_json IS NULL OR status_code = 'fill_candidate')
+    )""",
+)
+
+_PAPER_LIFECYCLE_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS paper_lifecycle_states (
+        account_id TEXT NOT NULL,
+        paper_session_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('running', 'paused', 'stopped')),
+        last_command_id TEXT,
+        last_updated_ms INTEGER NOT NULL,
+        PRIMARY KEY (account_id, paper_session_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS paper_lifecycle_events (
+        event_id INTEGER PRIMARY KEY,
+        command_id TEXT NOT NULL UNIQUE,
+        account_id TEXT NOT NULL,
+        paper_session_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('pause', 'resume', 'stop', 'close', 'reconcile')),
+        previous_state TEXT NOT NULL CHECK (previous_state IN ('running', 'paused', 'stopped')),
+        resulting_state TEXT NOT NULL CHECK (resulting_state IN ('running', 'paused', 'stopped')),
+        transitioned INTEGER NOT NULL CHECK (transitioned IN (0, 1)),
+        timestamp_ms INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS paper_lifecycle_reconciliations (
+        report_id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        paper_session_id TEXT NOT NULL,
+        report_json TEXT NOT NULL
     )""",
 )
 
@@ -1222,6 +1304,106 @@ class SQLiteStore:
             lambda conn: self._load_paper_balance_view_inner(conn, account_id)
         )
 
+    # ── read-only PAPER projections (ACT-P-008) ─────────────────────────────
+
+    async def get_paper_account_balances(
+        self, account_id: str
+    ) -> list[dict[str, Any]] | None:
+        """Return current account balances as a JSON-safe read projection.
+
+        ``None`` means that the account has no explicit PAPER opening.  No
+        balance is inferred from orders, fills, or a missing account.
+        """
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        return await self._read(
+            lambda conn: self._get_paper_account_balances_inner(conn, account_id)
+        )
+
+    async def get_paper_position_lots(
+        self, account_id: str
+    ) -> list[dict[str, Any]]:
+        """Return persisted position lots for one explicitly opened account."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        return await self._read(
+            lambda conn: self._get_paper_position_lots_inner(conn, account_id)
+        )
+
+    async def get_paper_orders(
+        self, account_id: str, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return persisted orders, never proposal/evaluation records."""
+        self._validate_paper_read_context(account_id, session_id)
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        return await self._read(
+            lambda conn: self._get_paper_orders_inner(conn, account_id, session_id)
+        )
+
+    async def get_paper_fills(
+        self, account_id: str, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return journaled fills and their durable application status only."""
+        self._validate_paper_read_context(account_id, session_id)
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        return await self._read(
+            lambda conn: self._get_paper_fills_inner(conn, account_id, session_id)
+        )
+
+    async def get_paper_lifecycle_snapshot(
+        self, account_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        """Return explicit lifecycle state and the latest persisted report."""
+        self._validate_paper_read_context(account_id, session_id)
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        assert session_id is not None
+        return await self._read(
+            lambda conn: self._get_paper_lifecycle_snapshot_inner(
+                conn, account_id, session_id
+            )
+        )
+
+    async def get_paper_activity(
+        self, account_id: str, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Combine order and journal-fill entries in deterministic time order."""
+        self._validate_paper_read_context(account_id, session_id)
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        return await self._read(
+            lambda conn: self._get_paper_activity_inner(conn, account_id, session_id)
+        )
+
+    @staticmethod
+    def _validate_paper_read_context(
+        account_id: str, session_id: str | None = None
+    ) -> None:
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        if session_id is not None and (
+            not isinstance(session_id, str) or not session_id.strip()
+        ):
+            raise ValueError("session_id must be a non-empty string")
+
     async def register_paper_order(self, order: PaperOrder) -> PaperOrder:
         """Persist one initial PAPER order context; no lifecycle transitions."""
         if self._closed:
@@ -1296,6 +1478,101 @@ class SQLiteStore:
         return await self._read(
             lambda conn: self._load_paper_reservation_inner(conn, reservation_id)
         )
+
+    async def initialize_lifecycle_state(
+        self, account_id: str, paper_session_id: str, initialized_at_ms: int
+    ) -> PaperLifecycleState:
+        """Explicitly initialize one account/session lifecycle as RUNNING."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        if not isinstance(paper_session_id, str) or not paper_session_id.strip():
+            raise ValueError("paper_session_id must be a non-empty string")
+        if not isinstance(initialized_at_ms, int) or initialized_at_ms < 0:
+            raise ValueError("initialized_at_ms must be a nonnegative integer")
+        return await self._write(
+            lambda conn: self._initialize_lifecycle_state_inner(
+                conn, account_id, paper_session_id, initialized_at_ms
+            )
+        )
+
+    async def apply_lifecycle_command(
+        self, command: PaperLifecycleCommand
+    ) -> PaperLifecycleState:
+        """Apply one idempotent PAPER lifecycle command atomically."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(command, PaperLifecycleCommand):
+            raise TypeError("command must be a PaperLifecycleCommand instance")
+        return await self._write(
+            lambda conn: self._apply_lifecycle_command_inner(conn, command)
+        )
+
+    async def check_lifecycle_reconciliation(
+        self, account_id: str, session_id: str
+    ) -> PaperLifecycleReconciliationReport:
+        """Compute a fresh, non-persisting reconciliation snapshot."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be a non-empty string")
+        return await self._write(
+            lambda conn: self._check_lifecycle_reconciliation_inner(
+                conn, account_id, session_id
+            )
+        )
+
+    async def reconcile(
+        self, account_id: str, session_id: str, expected_state: str
+    ) -> PaperLifecycleReconciliationReport:
+        """Compute and append one immutable reconciliation report."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be a non-empty string")
+        if not isinstance(expected_state, str) or not expected_state.strip():
+            raise ValueError("expected_state must be a non-empty string")
+        return await self._write(
+            lambda conn: self._reconcile_inner(
+                conn, account_id, session_id, expected_state
+            )
+        )
+
+    async def get_lifecycle_state(
+        self, account_id: str, paper_session_id: str
+    ) -> PaperLifecycleState | None:
+        """Return explicit lifecycle state, without inferring a default."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty string")
+        if not isinstance(paper_session_id, str) or not paper_session_id.strip():
+            raise ValueError("paper_session_id must be a non-empty string")
+        return await self._read(
+            lambda conn: self._load_lifecycle_state_inner(
+                conn, account_id, paper_session_id
+            )
+        )
+
+    async def is_buy_allowed(self, account_id: str, paper_session_id: str) -> bool:
+        """Allow BUY admission only for an explicit RUNNING state."""
+        state = await self.get_lifecycle_state(account_id, paper_session_id)
+        return state is not None and state.state == "running"
 
     async def apply_paper_fill(self, fill_id: str) -> PaperFill:
         """Apply one already-journalized paper fill atomically.
@@ -2086,6 +2363,232 @@ class SQLiteStore:
 
         return PaperBalanceView(account_id=account_id, balances=tuple(balances))
 
+    @staticmethod
+    async def _get_paper_account_balances_inner(
+        conn: aiosqlite.Connection, account_id: str
+    ) -> list[dict[str, Any]] | None:
+        view = await SQLiteStore._load_paper_balance_view_inner(conn, account_id)
+        if view is None:
+            return None
+        return [
+            _paper_read_projection(balance.model_dump(mode="python"))
+            for balance in view.balances
+        ]
+
+    @staticmethod
+    async def _get_paper_position_lots_inner(
+        conn: aiosqlite.Connection, account_id: str
+    ) -> list[dict[str, Any]]:
+        cursor = await conn.execute(
+            "SELECT order_id, account_id, paper_session_id, environment, lot_json "
+            "FROM position_lots WHERE account_id = ? "
+            "ORDER BY paper_session_id, order_id",
+            (account_id,),
+        )
+        rows = await cursor.fetchall()
+        result: list[dict[str, Any]] = []
+        for indexed_order_id, indexed_account, indexed_session, indexed_environment, lot_json in rows:
+            try:
+                lot = PositionLot.model_validate_json(lot_json)
+            except Exception as exc:
+                raise PaperOrderContextIntegrityError(
+                    f"position lot {indexed_order_id} has invalid JSON"
+                ) from exc
+            if (
+                lot.order_id != indexed_order_id
+                or lot.account_id != indexed_account
+                or lot.paper_session_id != indexed_session
+                or lot.environment != indexed_environment
+                or indexed_account != account_id
+            ):
+                raise PaperOrderContextIntegrityError(
+                    f"position lot {indexed_order_id} does not match indexed identity"
+                )
+            result.append(_paper_read_projection({
+                "kind": "position_lot",
+                "position_id": lot.order_id,
+                "order_id": lot.order_id,
+                "account_id": lot.account_id,
+                "paper_session_id": lot.paper_session_id,
+                "session_id": lot.paper_session_id,
+                "environment": lot.environment,
+                "quantity": lot.total_qty,
+                "cost": lot.total_cost,
+                "total_qty": lot.total_qty,
+                "total_cost": lot.total_cost,
+            }))
+        return result
+
+    @staticmethod
+    async def _get_paper_orders_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        session_id: str | None,
+    ) -> list[dict[str, Any]]:
+        sql = (
+            "SELECT order_id, paper_account_id, paper_session_id, environment, "
+            "client_order_id, order_json FROM paper_orders "
+            "WHERE paper_account_id = ?"
+        )
+        args: list[str] = [account_id]
+        if session_id is not None:
+            sql += " AND paper_session_id = ?"
+            args.append(session_id)
+        sql += " ORDER BY paper_session_id, order_id"
+        cursor = await conn.execute(sql, args)
+        rows = await cursor.fetchall()
+        orders: list[tuple[PaperOrder, dict[str, Any]]] = []
+        for row in rows:
+            order = SQLiteStore._validate_paper_order_row(row)
+            projected = _paper_read_projection(order.model_dump(mode="python"))
+            projected.update({
+                "kind": "order",
+                "order_id": order.order_id,
+                "account_id": order.paper_account_id,
+                "session_id": order.paper_session_id,
+            })
+            orders.append((order, projected))
+        orders.sort(key=lambda item: (item[0].timestamp_ms, item[0].order_id))
+        return [item[1] for item in orders]
+
+    @staticmethod
+    async def _get_paper_fills_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        session_id: str | None,
+    ) -> list[dict[str, Any]]:
+        # Do not depend on SQLite's optional JSON1 extension.  The fill journal
+        # is small and the authoritative account/session identity belongs to
+        # its persisted parent order, not to a proposal/evaluation row.
+        cursor = await conn.execute(
+            "SELECT fill_id, record_json FROM paper_fills ORDER BY fill_id"
+        )
+        rows = await cursor.fetchall()
+        fills: list[tuple[PaperFill, dict[str, Any]]] = []
+        for fill_id, record_json in rows:
+            fill = SQLiteStore._validate_paper_fill_row((fill_id, record_json))
+            order_cursor = await conn.execute(
+                "SELECT order_id, paper_account_id, paper_session_id, environment, "
+                "client_order_id, order_json FROM paper_orders WHERE order_id = ?",
+                (fill.order_id,),
+            )
+            order_row = await order_cursor.fetchone()
+            if order_row is None:
+                # An unscoped journal record cannot be exposed as an account
+                # fill; it is not silently relabeled or fabricated.
+                continue
+            (
+                order_id,
+                indexed_account,
+                indexed_session,
+                environment,
+                _client_order_id,
+                order_json,
+            ) = order_row
+            if indexed_account != account_id or (
+                session_id is not None and indexed_session != session_id
+            ):
+                continue
+            order = SQLiteStore._validate_paper_order_row(order_row)
+            if (
+                fill.order_id != order_id
+                or order.order_id != order_id
+                or order.paper_account_id != indexed_account
+                or order.paper_session_id != indexed_session
+                or order.environment != environment
+            ):
+                raise PaperFillIntegrityError(
+                    f"paper fill {fill_id} does not match its order context"
+                )
+            app_cursor = await conn.execute(
+                "SELECT applied_at_ms, application_json FROM paper_fill_applications "
+                "WHERE fill_id = ?",
+                (fill_id,),
+            )
+            app_row = await app_cursor.fetchone()
+            if app_row is not None:
+                try:
+                    application_fill = PaperFill.model_validate_json(app_row[1])
+                except Exception as exc:
+                    raise StoreCorruptionError(
+                        f"paper fill {fill_id} has corrupt application JSON"
+                    ) from exc
+                if application_fill != fill:
+                    raise StoreCorruptionError(
+                        f"paper fill {fill_id} application does not match journal"
+                    )
+            projected = _paper_read_projection(fill.model_dump(mode="python"))
+            projected.update({
+                "kind": "fill",
+                "fill_id": fill.fill_id,
+                "order_id": fill.order_id,
+                "account_id": indexed_account,
+                "session_id": indexed_session,
+                "environment": environment,
+                "applied": app_row is not None,
+                "applied_at_ms": None if app_row is None else str(app_row[0]),
+            })
+            fills.append((fill, projected))
+        fills.sort(key=lambda item: (item[0].timestamp_ms, item[0].fill_id))
+        return [item[1] for item in fills]
+
+    @staticmethod
+    async def _get_paper_lifecycle_snapshot_inner(
+        conn: aiosqlite.Connection, account_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        state = await SQLiteStore._load_lifecycle_state_inner(conn, account_id, session_id)
+        if state is None:
+            return None
+        report_cursor = await conn.execute(
+            "SELECT account_id, paper_session_id, report_json "
+            "FROM paper_lifecycle_reconciliations "
+            "WHERE account_id = ? AND paper_session_id = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (account_id, session_id),
+        )
+        report_row = await report_cursor.fetchone()
+        report = None
+        if report_row is not None:
+            try:
+                report_model = PaperLifecycleReconciliationReport.model_validate_json(report_row[2])
+            except Exception as exc:
+                raise PaperLifecycleStateError(
+                    f"lifecycle reconciliation report for {account_id}/{session_id} is invalid"
+                ) from exc
+            if (
+                report_model.account_id != report_row[0]
+                or report_model.paper_session_id != report_row[1]
+            ):
+                raise PaperLifecycleStateError(
+                    "lifecycle reconciliation report does not match indexed identity"
+                )
+            report = report_model.model_dump(mode="python")
+        return _paper_read_projection({
+            "account_id": account_id,
+            "paper_session_id": session_id,
+            "session_id": session_id,
+            "environment": "paper",
+            "state": state.model_dump(mode="python"),
+            "reconciliation": report,
+        })
+
+    @staticmethod
+    async def _get_paper_activity_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        session_id: str | None,
+    ) -> list[dict[str, Any]]:
+        orders = await SQLiteStore._get_paper_orders_inner(conn, account_id, session_id)
+        fills = await SQLiteStore._get_paper_fills_inner(conn, account_id, session_id)
+        entries = orders + fills
+        entries.sort(key=lambda item: (
+            int(item.get("timestamp_ms", "0")),
+            0 if item.get("kind") == "order" else 1,
+            item.get("order_id", ""),
+            item.get("fill_id", ""),
+        ))
+        return entries
+
     # ── initial PAPER order context helpers (v8; no lifecycle) ──────────────
 
     @staticmethod
@@ -2604,6 +3107,449 @@ class SQLiteStore:
         return _exact_sum(tuple(amounts))
 
     @staticmethod
+    async def _load_lifecycle_state_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        paper_session_id: str,
+    ) -> PaperLifecycleState | None:
+        cursor = await conn.execute(
+            "SELECT account_id, paper_session_id, state, last_command_id, "
+            "last_updated_ms FROM paper_lifecycle_states "
+            "WHERE account_id = ? AND paper_session_id = ?",
+            (account_id, paper_session_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return PaperLifecycleState(
+            account_id=row[0],
+            paper_session_id=row[1],
+            state=row[2],
+            last_command_id=row[3],
+            last_updated_ms=row[4],
+        )
+
+    @staticmethod
+    async def _check_lifecycle_reconciliation_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        session_id: str,
+        expected_state: str | None = None,
+    ) -> PaperLifecycleReconciliationReport:
+        """Check indexed PAPER state and payload identities without repairing it."""
+        state_cursor = await conn.execute(
+            "SELECT account_id, paper_session_id, state, last_command_id, last_updated_ms "
+            "FROM paper_lifecycle_states WHERE account_id = ? AND paper_session_id = ?",
+            (account_id, session_id),
+        )
+        state_row = await state_cursor.fetchone()
+        observed_state = None if state_row is None else state_row[2]
+        discrepancies: list[str] = []
+        if state_row is None:
+            discrepancies.append("lifecycle state is missing")
+        if expected_state is not None and expected_state != observed_state:
+            discrepancies.append(
+                f"expected lifecycle state '{expected_state}' but observed '{observed_state}'"
+            )
+
+        order_cursor = await conn.execute(
+            "SELECT order_id, paper_account_id, paper_session_id, environment, order_json "
+            "FROM paper_orders"
+        )
+        order_rows = await order_cursor.fetchall()
+        orders_by_id: dict[str, PaperOrder] = {}
+        relevant_order_ids: set[str] = set()
+        for order_id, indexed_account, indexed_session, indexed_environment, order_json in order_rows:
+            try:
+                order = _PAPER_ORDER_ADAPTER.validate_json(order_json)
+            except Exception:
+                if indexed_account == account_id and indexed_session == session_id:
+                    discrepancies.append(f"order {order_id} has invalid JSON payload")
+                continue
+            orders_by_id[order_id] = order
+            payload_relevant = (
+                order.paper_account_id == account_id
+                and order.paper_session_id == session_id
+            )
+            indexed_relevant = indexed_account == account_id and indexed_session == session_id
+            if payload_relevant or indexed_relevant:
+                relevant_order_ids.add(order_id)
+                if (
+                    order.order_id != order_id
+                    or order.paper_account_id != indexed_account
+                    or order.paper_session_id != indexed_session
+                    or order.environment != indexed_environment
+                ):
+                    discrepancies.append(
+                        f"order {order_id} indexed scope does not match JSON payload"
+                    )
+
+        reservation_cursor = await conn.execute(
+            "SELECT reservation_id, owner_order_id, account_id, paper_session_id, "
+            "environment, asset, amount_json, reservation_json "
+            "FROM paper_reservations"
+        )
+        reservation_rows = await reservation_cursor.fetchall()
+        relevant_reservation_rows: list[tuple[Any, ...]] = []
+        for row in reservation_rows:
+            reservation_id, owner_order_id, r_account, r_session, r_environment = row[:5]
+            owner = orders_by_id.get(owner_order_id)
+            relevant = (
+                (r_account == account_id and r_session == session_id)
+                or owner_order_id in relevant_order_ids
+                or (owner is not None and owner.paper_account_id == account_id
+                    and owner.paper_session_id == session_id)
+            )
+            if not relevant:
+                continue
+            relevant_reservation_rows.append(row)
+            if owner is None:
+                discrepancies.append(
+                    f"active reservation {reservation_id} has no owner order"
+                )
+                continue
+            if (
+                r_account != account_id
+                or r_session != session_id
+                or r_environment != owner.environment
+                or owner.paper_account_id != account_id
+                or owner.paper_session_id != session_id
+                or owner.status not in (
+                    PaperOrderStatus.ACCEPTED,
+                    PaperOrderStatus.PARTIALLY_FILLED,
+                )
+            ):
+                discrepancies.append(
+                    f"active reservation {reservation_id} does not belong to an "
+                    "ACCEPTED/PARTIALLY_FILLED order in the requested scope"
+                )
+            try:
+                reservation = PaperReservationRef.model_validate_json(row[7])
+                if (
+                    reservation.reservation_id != reservation_id
+                    or reservation.owner_order_id != owner_order_id
+                    or reservation.amount.asset != row[5]
+                    or reservation.amount.model_dump_json() != row[6]
+                ):
+                    discrepancies.append(
+                        f"active reservation {reservation_id} indexed identity does not match JSON"
+                    )
+            except Exception:
+                discrepancies.append(f"active reservation {reservation_id} has invalid JSON payload")
+
+        lot_cursor = await conn.execute(
+            "SELECT order_id, account_id, paper_session_id, environment, lot_json "
+            "FROM position_lots"
+        )
+        lot_rows = await lot_cursor.fetchall()
+        relevant_lot_rows: list[tuple[Any, ...]] = []
+        for row in lot_rows:
+            position_id, l_account, l_session, l_environment, lot_json = row
+            try:
+                lot = PositionLot.model_validate_json(lot_json)
+            except Exception:
+                if l_account == account_id and l_session == session_id:
+                    discrepancies.append(f"position lot {position_id} has invalid JSON payload")
+                continue
+            payload_relevant = lot.account_id == account_id and lot.paper_session_id == session_id
+            indexed_relevant = l_account == account_id and l_session == session_id
+            if not (payload_relevant or indexed_relevant):
+                continue
+            relevant_lot_rows.append(row)
+            entry_order = orders_by_id.get(position_id)
+            if (
+                lot.order_id != position_id
+                or lot.account_id != l_account
+                or lot.paper_session_id != l_session
+                or lot.environment != l_environment
+                or lot.account_id != account_id
+                or lot.paper_session_id != session_id
+                or lot.environment != "paper"
+                or entry_order is None
+                or entry_order.order_id != position_id
+                or entry_order.paper_account_id != account_id
+                or entry_order.paper_session_id != session_id
+                or entry_order.environment != lot.environment
+                or lot.total_qty < 0
+            ):
+                discrepancies.append(
+                    f"position lot {position_id} has invalid identity, scope, or quantity"
+                )
+
+        if observed_state == "stopped":
+            positive_position = False
+            for row in relevant_lot_rows:
+                try:
+                    positive_position = positive_position or (
+                        PositionLot.model_validate_json(row[4]).total_qty > 0
+                    )
+                except Exception:
+                    pass
+            if positive_position:
+                discrepancies.append("stopped lifecycle has a positive open position quantity")
+            if relevant_reservation_rows:
+                discrepancies.append("stopped lifecycle has an active reservation")
+
+        snapshot = {
+            "account_id": account_id,
+            "paper_session_id": session_id,
+            "state": state_row,
+            "orders": order_rows,
+            "reservations": reservation_rows,
+            "position_lots": lot_rows,
+            "expected_state": expected_state,
+            "discrepancies": discrepancies,
+        }
+        snapshot_json = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str)
+        digest = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        report = PaperLifecycleReconciliationReport(
+            report_id=f"reconciliation-{digest}",
+            account_id=account_id,
+            paper_session_id=session_id,
+            expected_state=expected_state,
+            observed_state=observed_state,
+            consistent=not discrepancies,
+            discrepancies=tuple(discrepancies),
+            snapshot_digest=digest,
+        )
+        return report
+
+    @staticmethod
+    async def _persist_reconciliation_report_inner(
+        conn: aiosqlite.Connection,
+        report: PaperLifecycleReconciliationReport,
+    ) -> PaperLifecycleReconciliationReport:
+        report_json = report.model_dump_json()
+        await conn.execute(
+            "INSERT OR IGNORE INTO paper_lifecycle_reconciliations "
+            "(report_id, account_id, paper_session_id, report_json) VALUES (?, ?, ?, ?)",
+            (report.report_id, report.account_id, report.paper_session_id, report_json),
+        )
+        cursor = await conn.execute(
+            "SELECT account_id, paper_session_id, report_json "
+            "FROM paper_lifecycle_reconciliations WHERE report_id = ?",
+            (report.report_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise PaperLifecycleStateError("reconciliation report did not persist")
+        if row[2] != report_json or row[0] != report.account_id or row[1] != report.paper_session_id:
+            raise PaperLifecycleCommandConflictError(
+                f"reconciliation report {report.report_id} has conflicting content"
+            )
+        return PaperLifecycleReconciliationReport.model_validate_json(row[2])
+
+    @staticmethod
+    async def _reconcile_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        session_id: str,
+        expected_state: str,
+    ) -> PaperLifecycleReconciliationReport:
+        report = await SQLiteStore._check_lifecycle_reconciliation_inner(
+            conn, account_id, session_id, expected_state
+        )
+        return await SQLiteStore._persist_reconciliation_report_inner(conn, report)
+
+    @staticmethod
+    async def _verify_close_preconditions(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        paper_session_id: str,
+    ) -> None:
+        """Require the selected account/session to have no live PAPER work."""
+        cursor = await conn.execute(
+            "SELECT order_id, lot_json FROM position_lots "
+            "WHERE account_id = ? AND paper_session_id = ?",
+            (account_id, paper_session_id),
+        )
+        for order_id, lot_json in await cursor.fetchall():
+            try:
+                lot = PositionLot.model_validate_json(lot_json)
+            except Exception as exc:
+                raise PaperLifecycleStateError(
+                    f"cannot close with invalid position lot {order_id}"
+                ) from exc
+            if lot.total_qty > 0:
+                raise PaperLifecycleStateError(
+                    "cannot close while a positive position quantity remains"
+                )
+
+        cursor = await conn.execute(
+            "SELECT order_id, order_json FROM paper_orders "
+            "WHERE paper_account_id = ? AND paper_session_id = ?",
+            (account_id, paper_session_id),
+        )
+        terminal_statuses = {
+            PaperOrderStatus.REJECTED,
+            PaperOrderStatus.FILLED,
+            PaperOrderStatus.CANCELLED,
+            PaperOrderStatus.EXPIRED,
+        }
+        for order_id, order_json in await cursor.fetchall():
+            try:
+                order = _PAPER_ORDER_ADAPTER.validate_json(order_json)
+            except Exception as exc:
+                raise PaperLifecycleStateError(
+                    f"cannot close with invalid paper order {order_id}"
+                ) from exc
+            if order.status not in terminal_statuses:
+                raise PaperLifecycleStateError(
+                    "cannot close while a nonterminal PAPER order remains"
+                )
+
+        cursor = await conn.execute(
+            "SELECT 1 FROM paper_reservations "
+            "WHERE account_id = ? AND paper_session_id = ? LIMIT 1",
+            (account_id, paper_session_id),
+        )
+        if await cursor.fetchone() is not None:
+            raise PaperLifecycleStateError(
+                "cannot close while an active PAPER reservation remains"
+            )
+
+        cursor = await conn.execute(
+            "SELECT 1 FROM paper_reservation_lot_allocations "
+            "WHERE account_id = ? AND paper_session_id = ? LIMIT 1",
+            (account_id, paper_session_id),
+        )
+        if await cursor.fetchone() is not None:
+            raise PaperLifecycleStateError(
+                "cannot close while an active PAPER lot allocation remains"
+            )
+
+    @staticmethod
+    async def _initialize_lifecycle_state_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        paper_session_id: str,
+        initialized_at_ms: int,
+    ) -> PaperLifecycleState:
+        await conn.execute(
+            "INSERT OR IGNORE INTO paper_lifecycle_states "
+            "(account_id, paper_session_id, state, last_command_id, last_updated_ms) "
+            "VALUES (?, ?, 'running', NULL, ?)",
+            (account_id, paper_session_id, initialized_at_ms),
+        )
+        state = await SQLiteStore._load_lifecycle_state_inner(
+            conn, account_id, paper_session_id
+        )
+        if state is None:
+            raise PaperLifecycleStateError("lifecycle initialization did not persist state")
+        return state
+
+    @staticmethod
+    async def _apply_lifecycle_command_inner(
+        conn: aiosqlite.Connection,
+        command: PaperLifecycleCommand,
+    ) -> PaperLifecycleState:
+        if command.action not in ("pause", "resume", "stop", "close", "reconcile"):
+            raise PaperLifecycleStateError(
+                "lifecycle action must be 'pause', 'resume', 'stop', 'close', or 'reconcile'"
+            )
+        event_cursor = await conn.execute(
+            "SELECT event_id, command_id, account_id, paper_session_id, action, "
+            "previous_state, resulting_state, transitioned, timestamp_ms "
+            "FROM paper_lifecycle_events WHERE command_id = ?",
+            (command.command_id,),
+        )
+        event_row = await event_cursor.fetchone()
+        if event_row is not None:
+            event = PaperLifecycleEvent(
+                event_id=event_row[0], command_id=event_row[1], account_id=event_row[2],
+                paper_session_id=event_row[3], action=event_row[4],
+                previous_state=event_row[5], resulting_state=event_row[6],
+                transitioned=bool(event_row[7]), timestamp_ms=event_row[8],
+            )
+            if (
+                event.account_id != command.account_id
+                or event.paper_session_id != command.paper_session_id
+                or event.action != command.action
+                or event.timestamp_ms != command.issued_at_ms
+            ):
+                raise PaperLifecycleCommandConflictError(
+                    f"lifecycle command {command.command_id} has conflicting payload"
+                )
+            state = await SQLiteStore._load_lifecycle_state_inner(
+                conn, command.account_id, command.paper_session_id
+            )
+            if state is None:
+                raise PaperLifecycleStateError("lifecycle state is missing for existing command")
+            return state
+
+        state = await SQLiteStore._load_lifecycle_state_inner(
+            conn, command.account_id, command.paper_session_id
+        )
+        if state is None:
+            raise PaperLifecycleStateError(
+                "lifecycle state must be explicitly initialized before commands"
+            )
+        if command.action in ("resume", "close", "reconcile"):
+            report = await SQLiteStore._check_lifecycle_reconciliation_inner(
+                conn, command.account_id, command.paper_session_id, state.state
+            )
+            if command.action == "reconcile":
+                await SQLiteStore._persist_reconciliation_report_inner(conn, report)
+            elif not report.consistent:
+                raise PaperLifecycleReconciliationError(report)
+        if command.action == "pause":
+            if state.state == "stopped":
+                raise PaperLifecycleStateError(
+                    "cannot pause a stopped lifecycle"
+                )
+            resulting_state = "paused"
+        elif command.action == "resume":
+            if state.state == "stopped":
+                raise PaperLifecycleStateError(
+                    "cannot resume a stopped lifecycle"
+                )
+            resulting_state = "running"
+        elif command.action == "stop":
+            resulting_state = "paused" if state.state == "running" else "stopped"
+            if state.state == "paused":
+                resulting_state = "paused"
+        elif command.action == "close":
+            if state.state == "running":
+                raise PaperLifecycleStateError(
+                    "cannot close a running lifecycle"
+                )
+            if state.state == "paused":
+                await SQLiteStore._verify_close_preconditions(
+                    conn, command.account_id, command.paper_session_id
+                )
+                resulting_state = "stopped"
+            else:
+                resulting_state = "stopped"
+        else:  # reconcile
+            resulting_state = state.state
+        transitioned = state.state != resulting_state
+        await conn.execute(
+            "INSERT INTO paper_lifecycle_events "
+            "(command_id, account_id, paper_session_id, action, previous_state, "
+            "resulting_state, transitioned, timestamp_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                command.command_id, command.account_id, command.paper_session_id,
+                command.action, state.state, resulting_state, int(transitioned),
+                command.issued_at_ms,
+            ),
+        )
+        if command.action != "reconcile":
+            await conn.execute(
+                "UPDATE paper_lifecycle_states SET state = ?, last_command_id = ?, "
+                "last_updated_ms = ? WHERE account_id = ? AND paper_session_id = ?",
+                (
+                    resulting_state, command.command_id, command.issued_at_ms,
+                    command.account_id, command.paper_session_id,
+                ),
+            )
+        updated = await SQLiteStore._load_lifecycle_state_inner(
+            conn, command.account_id, command.paper_session_id
+        )
+        if updated is None:
+            raise PaperLifecycleStateError("lifecycle command did not persist state")
+        return updated
+
+    @staticmethod
     async def _validate_sell_allocations_for_acceptance_inner(
         conn: aiosqlite.Connection,
         order: PaperOrder,
@@ -2813,6 +3759,25 @@ class SQLiteStore:
             raise PaperOrderAcceptanceStateError(
                 "only a PREPARED order without fills can be accepted"
             )
+
+        if order.side == PaperOrderSide.BUY:
+            lifecycle_state = await SQLiteStore._load_lifecycle_state_inner(
+                conn, order.paper_account_id, order.paper_session_id
+            )
+            if lifecycle_state is None:
+                raise PaperOrderAcceptanceStateError(
+                    "PAPER BUY admission requires an explicitly initialized lifecycle state"
+                )
+            if lifecycle_state.state != "running":
+                raise PaperOrderAcceptanceStateError(
+                    "PAPER BUY admission is blocked while lifecycle is "
+                    f"{lifecycle_state.state}"
+                )
+            report = await SQLiteStore._check_lifecycle_reconciliation_inner(
+                conn, order.paper_account_id, order.paper_session_id, "running"
+            )
+            if not report.consistent:
+                raise PaperLifecycleReconciliationError(report)
 
         reserve_amount = SQLiteStore._compute_order_reservation(order)
         filter_result = validate_symbol_filters(order, symbol_filter_snapshot, market_notional_references)
@@ -4312,20 +5277,124 @@ class SQLiteStore:
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0 through 14 or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         table_names = {row[0] for row in await cursor.fetchall()}
 
-        # Already at v12 — just verify completeness.
+        # Already at v15 — just verify completeness.
         if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V12_TABLES <= table_names:
+            if not _SCHEMA_V15_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 15 but required tables are missing"
+                )
+            return
+
+        # v14 → v15: rebuild the event table so RECONCILE is enforced by its
+        # CHECK constraint, preserving every historical event row atomically.
+        if version == 14:
+            if not _SCHEMA_V14_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 14 but required v14 tables are missing"
+                )
+            await conn.execute("DROP TABLE IF EXISTS paper_lifecycle_events_v15_new")
+            await conn.execute(
+                """CREATE TABLE paper_lifecycle_events_v15_new (
+                    event_id INTEGER PRIMARY KEY,
+                    command_id TEXT NOT NULL UNIQUE,
+                    account_id TEXT NOT NULL,
+                    paper_session_id TEXT NOT NULL,
+                    action TEXT NOT NULL CHECK (action IN ('pause', 'resume', 'stop', 'close', 'reconcile')),
+                    previous_state TEXT NOT NULL CHECK (previous_state IN ('running', 'paused', 'stopped')),
+                    resulting_state TEXT NOT NULL CHECK (resulting_state IN ('running', 'paused', 'stopped')),
+                    transitioned INTEGER NOT NULL CHECK (transitioned IN (0, 1)),
+                    timestamp_ms INTEGER NOT NULL
+                )"""
+            )
+            await conn.execute(
+                "INSERT INTO paper_lifecycle_events_v15_new SELECT * FROM paper_lifecycle_events"
+            )
+            await conn.execute("DROP TABLE paper_lifecycle_events")
+            await conn.execute(
+                "ALTER TABLE paper_lifecycle_events_v15_new RENAME TO paper_lifecycle_events"
+            )
+            await conn.execute(_PAPER_LIFECYCLE_DDL_STATEMENTS[2])
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            return
+
+        # v13 → v15: rebuild both lifecycle tables so SQLite enforces the new
+        # STOPPED/CLOSE contracts.  This remains inside the caller's write
+        # transaction; any failed DDL or copy therefore rolls back the old
+        # tables, their rows, and user_version together.
+        if version == 13:
+            if not _SCHEMA_V13_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 13 but required tables are missing"
+                )
+            await conn.execute("DROP TABLE IF EXISTS paper_lifecycle_events_v14_new")
+            await conn.execute("DROP TABLE IF EXISTS paper_lifecycle_states_v14_new")
+            await conn.execute(
+                """CREATE TABLE paper_lifecycle_states_v14_new (
+                    account_id TEXT NOT NULL,
+                    paper_session_id TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('running', 'paused', 'stopped')),
+                    last_command_id TEXT,
+                    last_updated_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, paper_session_id)
+                )"""
+            )
+            await conn.execute(
+                """CREATE TABLE paper_lifecycle_events_v14_new (
+                    event_id INTEGER PRIMARY KEY,
+                    command_id TEXT NOT NULL UNIQUE,
+                    account_id TEXT NOT NULL,
+                    paper_session_id TEXT NOT NULL,
+                    action TEXT NOT NULL CHECK (action IN ('pause', 'resume', 'stop', 'close', 'reconcile')),
+                    previous_state TEXT NOT NULL CHECK (previous_state IN ('running', 'paused', 'stopped')),
+                    resulting_state TEXT NOT NULL CHECK (resulting_state IN ('running', 'paused', 'stopped')),
+                    transitioned INTEGER NOT NULL CHECK (transitioned IN (0, 1)),
+                    timestamp_ms INTEGER NOT NULL
+                )"""
+            )
+            await conn.execute(
+                "INSERT INTO paper_lifecycle_states_v14_new "
+                "SELECT account_id, paper_session_id, state, last_command_id, last_updated_ms "
+                "FROM paper_lifecycle_states"
+            )
+            await conn.execute(
+                "INSERT INTO paper_lifecycle_events_v14_new "
+                "SELECT event_id, command_id, account_id, paper_session_id, action, "
+                "previous_state, resulting_state, transitioned, timestamp_ms "
+                "FROM paper_lifecycle_events"
+            )
+            await conn.execute("DROP TABLE paper_lifecycle_events")
+            await conn.execute("DROP TABLE paper_lifecycle_states")
+            await conn.execute(
+                "ALTER TABLE paper_lifecycle_states_v14_new "
+                "RENAME TO paper_lifecycle_states"
+            )
+            await conn.execute(
+                "ALTER TABLE paper_lifecycle_events_v14_new "
+                "RENAME TO paper_lifecycle_events"
+            )
+            await conn.execute(_PAPER_LIFECYCLE_DDL_STATEMENTS[2])
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            return
+
+        # Every historical path is upgraded atomically.  No lifecycle row is
+        # inserted here: initialization is an explicit caller operation.
+        for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
+            await conn.execute(statement)
+
+        if version == 12:
+            if not _SCHEMA_V12_BASE_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
                     "schema version is 12 but required tables are missing"
                 )
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
         # v8 → v12: add order reservations, fill application, SELL, and fill-evaluation tables.
@@ -4342,6 +5411,8 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
@@ -4357,6 +5428,8 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
@@ -4370,6 +5443,8 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
@@ -4380,6 +5455,8 @@ class SQLiteStore:
                     "schema version is 11 but required v11 tables are missing"
                 )
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
                 await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
@@ -4399,6 +5476,8 @@ class SQLiteStore:
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
                 await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
@@ -4420,6 +5499,8 @@ class SQLiteStore:
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
                 await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
@@ -4443,6 +5524,8 @@ class SQLiteStore:
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
                 await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
@@ -4468,6 +5551,8 @@ class SQLiteStore:
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
                 await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
@@ -4515,6 +5600,8 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
@@ -4543,6 +5630,8 @@ class SQLiteStore:
             for statement in _PAPER_SELL_DDL_STATEMENTS:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
                 await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
@@ -4575,6 +5664,8 @@ class SQLiteStore:
                 await conn.execute(statement)
             for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
@@ -4602,6 +5693,8 @@ class SQLiteStore:
         for statement in _PAPER_SELL_DDL_STATEMENTS:
             await conn.execute(statement)
         for statement in _PAPER_FILL_EVALUATION_DDL_STATEMENTS:
+            await conn.execute(statement)
+        for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
             await conn.execute(statement)
         await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 

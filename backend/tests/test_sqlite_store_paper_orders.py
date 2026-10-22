@@ -38,8 +38,7 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _SCHEMA_V7_TABLES,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V12_TABLES,
-    _SCHEMA_V12_TABLES,
+    _SCHEMA_V15_TABLES,
 )
 
 
@@ -341,6 +340,9 @@ def _make_v7_database(db: Path) -> None:
     conn.execute("DROP TABLE position_lots")
     conn.execute("DROP TABLE IF EXISTS paper_reservation_lot_allocations")
     conn.execute("DROP TABLE IF EXISTS paper_sell_accounting")
+    conn.execute("DROP TABLE IF EXISTS paper_lifecycle_reconciliations")
+    conn.execute("DROP TABLE IF EXISTS paper_lifecycle_states")
+    conn.execute("DROP TABLE IF EXISTS paper_lifecycle_events")
     conn.execute("PRAGMA user_version = 7")
     conn.commit()
     conn.close()
@@ -355,12 +357,12 @@ def test_direct_v7_to_v12_migration_preserves_accepted_paper_data(
 
     store = SQLiteStore(db)
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V12_TABLES
+    assert _table_names(db) == _SCHEMA_V15_TABLES
     assert _run(store.load_paper_fill("fill-before-v8")) is not None
     assert _run(store.load_paper_account_opening("account-before-v8")) is not None
     assert _run(store.load_paper_order("order-not-registered")) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
     conn.close()
     _run(store.close())
 
@@ -432,6 +434,7 @@ def _open_quote_base(store: SQLiteStore, account_id: str = "acc-1") -> None:
         environment="paper", account_id=account_id, balances=(quote_bal, base_bal),
     )
     _run(store.open_paper_account(opening))
+    _run(store.initialize_lifecycle_state(account_id, "sess-1", 10000))
 
 
 def _make_buy_order(

@@ -38,8 +38,7 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceScopeError,
     PaperOrderAcceptanceStateError,
     SQLiteStore,
-    _SCHEMA_V12_TABLES,
-    _SCHEMA_V12_TABLES,
+    _SCHEMA_V15_TABLES,
     _PAPER_SELL_DDL_STATEMENTS,
 )
 
@@ -198,7 +197,7 @@ class TestV10ToV12MigrationPreservation:
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 12
+        assert version == 15
 
         _run(store.close())
 
@@ -329,7 +328,7 @@ class TestMigrationRollbackV12:
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 12
+        assert version == 15
 
         _run(store.close())
 
@@ -376,7 +375,7 @@ class TestReInitializationIdempotencyV12:
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 12
+        assert version == 15
 
         _run(store1.close())
 
@@ -388,7 +387,7 @@ class TestReInitializationIdempotencyV12:
         conn = sqlite3.connect(temp_db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 12
+        assert version == 15
 
         _run(store2.close())
 

@@ -14,7 +14,13 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from src.persistence.sqlite_store import _SCHEMA_V9_TABLES, _SCHEMA_V10_TABLES, _SCHEMA_V12_TABLES
+from src.persistence import sqlite_store as sqlite_store_module
+from src.persistence.sqlite_store import (
+    SQLiteStore,
+    _SCHEMA_V9_TABLES,
+    _SCHEMA_V10_TABLES,
+    _SCHEMA_V15_TABLES,
+)
 
 # ── Fake MarketEngine that mimics the real interface without external calls ─────
 
@@ -80,7 +86,7 @@ def test_lifespan_store_initialized_with_user_version_10(
         conn = sqlite3.connect(str(db_path))
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 12
+        assert version == 15
 
 
 # ── 2. Normal shutdown: store closed and reference removed ──────────────────────
@@ -287,7 +293,7 @@ def test_reopen_preserves_data_no_duplicate_migration(
     # Verify the schema remains at current v12 after re-open.
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 12
+    assert version == 15
 
     # Tables should exist exactly once
     tables = {
@@ -295,7 +301,7 @@ def test_reopen_preserves_data_no_duplicate_migration(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V12_TABLES
+    assert tables == _SCHEMA_V15_TABLES
     conn.close()
 
     _run(store.close())
@@ -341,6 +347,216 @@ def test_config_default_db_path_is_relative_to_backend_root(monkeypatch: pytest.
     assert cfg.database_path == expected
 
 
+def _seed_v13_lifecycle_tables(db_path: Path) -> None:
+    """Create an old lifecycle schema after creating the cumulative v13 DB."""
+    store = sqlite_store_module.SQLiteStore(db_path)
+    _run(store.initialize())
+    _run(store.close())
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        DROP TABLE paper_lifecycle_events;
+        DROP TABLE paper_lifecycle_states;
+        CREATE TABLE paper_lifecycle_states (
+            account_id TEXT NOT NULL,
+            paper_session_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('running', 'paused')),
+            last_command_id TEXT,
+            last_updated_ms INTEGER NOT NULL,
+            PRIMARY KEY (account_id, paper_session_id)
+        );
+        CREATE TABLE paper_lifecycle_events (
+            event_id INTEGER PRIMARY KEY,
+            command_id TEXT NOT NULL UNIQUE,
+            account_id TEXT NOT NULL,
+            paper_session_id TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('pause', 'resume')),
+            previous_state TEXT NOT NULL CHECK (previous_state IN ('running', 'paused')),
+            resulting_state TEXT NOT NULL CHECK (resulting_state IN ('running', 'paused')),
+            transitioned INTEGER NOT NULL CHECK (transitioned IN (0, 1)),
+            timestamp_ms INTEGER NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO paper_lifecycle_states VALUES (?, ?, ?, ?, ?)",
+        ("acct-migrate", "session-migrate", "paused", "pause-1", 10),
+    )
+    conn.execute(
+        "INSERT INTO paper_lifecycle_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (1, "pause-1", "acct-migrate", "session-migrate", "pause", "running", "paused", 1, 10),
+    )
+    conn.execute("PRAGMA user_version = 13")
+    conn.commit()
+    conn.close()
+
+
+def _seed_v14_lifecycle_tables(db_path: Path) -> None:
+    """Create a v14 database with the pre-v15 event CHECK constraint."""
+    store = SQLiteStore(db_path)
+    _run(store.initialize())
+    _run(store.close())
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE paper_lifecycle_reconciliations")
+    conn.execute("ALTER TABLE paper_lifecycle_events RENAME TO paper_lifecycle_events_old")
+    conn.execute(
+        """CREATE TABLE paper_lifecycle_events (
+            event_id INTEGER PRIMARY KEY,
+            command_id TEXT NOT NULL UNIQUE,
+            account_id TEXT NOT NULL,
+            paper_session_id TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('pause', 'resume', 'stop', 'close')),
+            previous_state TEXT NOT NULL CHECK (previous_state IN ('running', 'paused', 'stopped')),
+            resulting_state TEXT NOT NULL CHECK (resulting_state IN ('running', 'paused', 'stopped')),
+            transitioned INTEGER NOT NULL CHECK (transitioned IN (0, 1)),
+            timestamp_ms INTEGER NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO paper_lifecycle_events SELECT * FROM paper_lifecycle_events_old"
+    )
+    conn.execute("DROP TABLE paper_lifecycle_events_old")
+    conn.execute(
+        "INSERT INTO paper_lifecycle_states VALUES (?, ?, ?, ?, ?)",
+        ("acct-mig", "sess-mig", "running", None, 1000),
+    )
+    conn.execute(
+        "INSERT INTO paper_lifecycle_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (1, "pause-mig", "acct-mig", "sess-mig", "pause", "running", "paused", 1, 1001),
+    )
+    conn.execute("PRAGMA user_version = 14")
+    conn.commit()
+    conn.close()
+
+
+def test_v14_to_v15_migration_adds_reconciliation_table_and_rebuilds_event_check(tmp_path: Path) -> None:
+    """Migration v14→v15 adds reconciliation table and rebuilds event CHECK."""
+    db = tmp_path / "v14-to-v15.db"
+    _seed_v14_lifecycle_tables(db)
+    store = SQLiteStore(db)
+    _run(store.initialize())
+    assert {
+        row[0]
+        for row in sqlite3.connect(str(db)).execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    } == _SCHEMA_V15_TABLES
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    event_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='paper_lifecycle_events'"
+    ).fetchone()[0]
+    conn.close()
+    assert "'reconcile'" in event_sql
+
+
+def test_v14_to_v15_migration_preserves_lifecycle_rows(tmp_path: Path) -> None:
+    """Migration v14→v15 preserves all lifecycle state and event rows."""
+    db = tmp_path / "v14-preserve.db"
+    _seed_v14_lifecycle_tables(db)
+    _run(SQLiteStore(db).initialize())
+    conn = sqlite3.connect(str(db))
+    state = conn.execute(
+        "SELECT account_id, paper_session_id, state, last_updated_ms "
+        "FROM paper_lifecycle_states WHERE account_id='acct-mig'"
+    ).fetchone()
+    event = conn.execute(
+        "SELECT command_id, action, resulting_state FROM paper_lifecycle_events "
+        "WHERE command_id='pause-mig'"
+    ).fetchone()
+    conn.close()
+    assert state == ("acct-mig", "sess-mig", "running", 1000)
+    assert event == ("pause-mig", "pause", "paused")
+
+
+def test_v14_to_v15_migration_rolls_back_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed v14→v15 migration rolls back tables, rows, and user_version."""
+    db = tmp_path / "v14-to-v15-rollback.db"
+    _seed_v14_lifecycle_tables(db)
+    original_execute = sqlite_store_module.aiosqlite.Connection.execute
+
+    async def fail_event_rename(self: Any, sql: Any, *args: Any, **kwargs: Any) -> Any:
+        if "ALTER TABLE paper_lifecycle_events_v15_new" in str(sql):
+            raise RuntimeError("synthetic v15 lifecycle rebuild failure")
+        return await original_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite_store_module.aiosqlite.Connection, "execute", fail_event_rename)
+    with pytest.raises(RuntimeError, match="synthetic v15 lifecycle rebuild failure"):
+        _run(SQLiteStore(db).initialize())
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+    assert conn.execute(
+        "SELECT state FROM paper_lifecycle_states WHERE account_id='acct-mig'"
+    ).fetchone()[0] == "running"
+    assert conn.execute(
+        "SELECT action FROM paper_lifecycle_events WHERE command_id='pause-mig'"
+    ).fetchone()[0] == "pause"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%_v15_new'"
+    ).fetchone()[0] == 0
+    conn.close()
+
+
+def test_v13_to_v14_migration_rebuilds_lifecycle_checks_and_preserves_rows(tmp_path: Path) -> None:
+    db = tmp_path / "v13-to-v14.db"
+    _seed_v13_lifecycle_tables(db)
+    store = sqlite_store_module.SQLiteStore(db)
+    _run(store.initialize())
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute(
+        "SELECT account_id, paper_session_id, state, last_command_id, last_updated_ms "
+        "FROM paper_lifecycle_states"
+    ).fetchall() == [("acct-migrate", "session-migrate", "paused", "pause-1", 10)]
+    assert conn.execute(
+        "SELECT event_id, command_id, action, previous_state, resulting_state, transitioned, timestamp_ms "
+        "FROM paper_lifecycle_events"
+    ).fetchall() == [(1, "pause-1", "pause", "running", "paused", 1, 10)]
+    state_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='paper_lifecycle_states'"
+    ).fetchone()[0]
+    event_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='paper_lifecycle_events'"
+    ).fetchone()[0]
+    assert "'stopped'" in state_sql
+    assert "'stop'" in event_sql and "'close'" in event_sql
+    conn.close()
+    _run(store.close())
+
+
+def test_v13_to_v14_migration_rolls_back_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "v13-to-v14-rollback.db"
+    _seed_v13_lifecycle_tables(db)
+    original_execute = sqlite_store_module.aiosqlite.Connection.execute
+
+    async def fail_event_rename(self, sql, *args, **kwargs):
+        if "ALTER TABLE paper_lifecycle_events_v14_new" in str(sql):
+            raise RuntimeError("synthetic lifecycle rebuild failure")
+        return await original_execute(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite_store_module.aiosqlite.Connection, "execute", fail_event_rename)
+    with pytest.raises(RuntimeError, match="synthetic lifecycle rebuild failure"):
+        _run(sqlite_store_module.SQLiteStore(db).initialize())
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute(
+        "SELECT state FROM paper_lifecycle_states WHERE account_id='acct-migrate'"
+    ).fetchone()[0] == "paused"
+    assert conn.execute(
+        "SELECT action FROM paper_lifecycle_events WHERE command_id='pause-1'"
+    ).fetchone()[0] == "pause"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%_v14_new'"
+    ).fetchone()[0] == 0
+    conn.close()
+
+
 # ── 8. Directory creation on startup ────────────────────────────────────────────
 
 
@@ -379,7 +595,7 @@ def test_multiple_lifespan_cycles_safe(tmp_path: Path, monkeypatch: pytest.Monke
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 12
+    assert version == 15
 
 
 # ── 10. Store is not accessible outside lifespan ───────────────────────────────

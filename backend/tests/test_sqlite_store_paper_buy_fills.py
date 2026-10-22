@@ -83,6 +83,7 @@ def _open_account(
         balances=(quote_bal, base_bal),
     )
     _run(store.open_paper_account(opening))
+    _run(store.initialize_lifecycle_state(account_id, session_id, 1000))
 
 
 def _make_order(

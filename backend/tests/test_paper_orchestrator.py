@@ -17,6 +17,7 @@ from src.models.paper_execution import (
     PaperMarketCapacitySnapshot,
     PaperMarketExecutionSnapshot,
 )
+from src.models.paper_lifecycle import PaperLifecycleCommand
 from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot
 from src.models.paper_symbol_filters import (
     LotSizeFilter,
@@ -54,6 +55,7 @@ def _store(db: Path) -> SQLiteStore:
             )
         )
     )
+    _run(store.initialize_lifecycle_state("acct-1", "session-1", 1))
     return store
 
 
@@ -245,6 +247,51 @@ def test_registration_acceptance_recovery_is_idempotent(tmp_path: Path, monkeypa
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM paper_fill_applications").fetchone()[0] == 1
     conn.close()
+    _run(store.close())
+
+
+def test_paused_lifecycle_blocks_orchestrator_buy_preflight(tmp_path: Path) -> None:
+    store = _store(tmp_path / "orchestrator-paused.db")
+    _run(
+        store.apply_lifecycle_command(
+            PaperLifecycleCommand(
+                command_id="orchestrator-pause",
+                account_id="acct-1",
+                paper_session_id="session-1",
+                action="pause",
+                issued_at_ms=2000,
+            )
+        )
+    )
+    result = _run(run_paper_cycle(store, **_kwargs()))
+    assert result.success is False
+    assert "lifecycle" in (result.error or "")
+    assert _run(store.load_paper_order("order-id-1")) is None
+    _run(store.close())
+
+
+def test_stopped_lifecycle_blocks_orchestrator_buy_preflight(tmp_path: Path) -> None:
+    store = _store(tmp_path / "orchestrator-stopped.db")
+    _run(
+        store.apply_lifecycle_command(
+            PaperLifecycleCommand(
+                command_id="orchestrator-stop", account_id="acct-1",
+                paper_session_id="session-1", action="stop", issued_at_ms=2000,
+            )
+        )
+    )
+    _run(
+        store.apply_lifecycle_command(
+            PaperLifecycleCommand(
+                command_id="orchestrator-close", account_id="acct-1",
+                paper_session_id="session-1", action="close", issued_at_ms=3000,
+            )
+        )
+    )
+    result = _run(run_paper_cycle(store, **_kwargs()))
+    assert result.success is False
+    assert "lifecycle" in (result.error or "")
+    assert _run(store.load_paper_order("order-id-1")) is None
     _run(store.close())
 
 

@@ -1,105 +1,97 @@
-// Barra inferior funcional: posiciones, órdenes, actividad reciente.
-
-import type { Position, Order } from "../types/state"
+import { useState } from "react"
+import type { ReactNode } from "react"
+import { usePaperData } from "../hooks/usePaperData"
 
 interface BottomBarProps {
-  positions: Position[]
-  orders: Order[]
-  activityLog: ActivityEntry[]
+  accountId?: string | null
+  sessionId?: string | null
 }
 
-interface ActivityEntry {
-  id: string
-  timestamp_ms: number
-  type: "order_created" | "order_filled" | "order_cancelled" | "position_opened" | "position_closed" | "analysis"
-  symbol: string
-  description: string
+type PaperTab = "balances" | "positions" | "orders" | "fills" | "activity"
+
+function displayItem(item: Record<string, unknown>): string {
+  return JSON.stringify(item, (key, value) => {
+    // PAPER may expose P&L fields in a projection; this surface must not
+    // calculate or present them.
+    return /(?:^|_)pnl$/i.test(key) ? undefined : value
+  }) ?? ""
 }
 
-export function BottomBar({ positions, orders, activityLog }: BottomBarProps) {
-  const tabs = [
-    { key: "positions", label: `Posiciones (${positions.length})` },
-    { key: "orders", label: `Órdenes (${orders.length})` },
-    { key: "activity", label: `Actividad (${activityLog.length})` },
+export function BottomBar({ accountId, sessionId }: BottomBarProps) {
+  const paper = usePaperData(accountId, sessionId)
+  const [activeTab, setActiveTab] = useState<PaperTab>("balances")
+  const tabData: Record<PaperTab, readonly unknown[]> = {
+    balances: paper.balances,
+    positions: paper.positions,
+    orders: paper.orders,
+    fills: paper.fills,
+    activity: paper.activity,
+  }
+  const tabs: Array<{ key: PaperTab; label: string }> = [
+    { key: "balances", label: `Balance (${paper.balances.length})` },
+    { key: "positions", label: `Positions (${paper.positions.length})` },
+    { key: "orders", label: `Orders (${paper.orders.length})` },
+    { key: "fills", label: `Fills (${paper.fills.length})` },
+    { key: "activity", label: `Activity (${paper.activity.length})` },
   ]
 
-  return (
-    <footer className="bottom-bar">
-      {/* Tabs de navegación */}
-      <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-        {tabs.map(tab => (
-          <span
-            key={tab.key}
-            style={{
-              cursor: "pointer",
-              borderBottom: "2px solid transparent",
-              paddingBottom: 4,
-              fontSize: 12,
-              fontWeight: 600,
-              color: "#e6edf3",
-            }}
-            onMouseEnter={e => {
-              e.currentTarget.style.borderBottomColor = "#4f8cff"
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.borderBottomColor = "transparent"
-            }}
-          >
-            {tab.label}
-          </span>
+  let content: ReactNode
+  if (!accountId) {
+    content = <span>PAPER data unavailable</span>
+  } else if (paper.loading) {
+    content = <span role="status" aria-label="Loading PAPER data">Loading PAPER data…</span>
+  } else if (paper.error) {
+    content = <span role="alert">PAPER data unavailable</span>
+  } else if (tabData[activeTab].length === 0) {
+    content = <span>No PAPER data available</span>
+  } else {
+    content = (
+      <div style={{ display: "flex", gap: 12, overflow: "auto", whiteSpace: "nowrap" }}>
+        {tabData[activeTab].map((item, index) => (
+          <code key={index} style={{ fontSize: 11 }}>
+            {displayItem(item as Record<string, unknown>)}
+          </code>
         ))}
       </div>
+    )
+  }
 
-      {/* Resumen de posiciones */}
-      {positions.length > 0 && (
-        <div style={{ display: "flex", gap: 24, alignItems: "center" }}>
-          {positions.map(p => (
-            <div key={`${p.symbol}-${p.side}`} style={{ display: "flex", gap: 8, fontSize: 12 }}>
-              <span>
-                <strong>{p.symbol}</strong>{" "}
-                <span className={p.side === "buy" ? "text-green" : "text-red"}>
-                  {p.side.toUpperCase()}
-                </span>
-              </span>
-              <span>Cant: {p.quantity.toFixed(4)}</span>
-              <span>Entry: ${p.entry_price.toLocaleString()}</span>
-              <span className={p.unrealized_pnl >= 0 ? "text-green" : "text-red"}>
-                P&L: {p.unrealized_pnl >= 0 ? "+" : ""}${p.unrealized_pnl.toFixed(2)}
-              </span>
-            </div>
+  return (
+    <footer className="bottom-bar" aria-label="PAPER read-only data">
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0, flex: 1 }}>
+        <div role="tablist" aria-label="PAPER data tabs" style={{ display: "flex", gap: 10, alignItems: "center", overflow: "auto" }}>
+          <strong style={{ fontSize: 11 }}>PAPER · read-only</strong>
+          {tabs.map(tab => (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              style={{
+                cursor: "pointer",
+                border: 0,
+                borderBottom: activeTab === tab.key ? "2px solid #4f8cff" : "2px solid transparent",
+                padding: "0 0 2px",
+                background: "transparent",
+                color: "#e6edf3",
+                fontSize: 11,
+              }}
+            >
+              {tab.label}
+            </button>
           ))}
+          <span style={{ marginLeft: "auto", fontSize: 10, color: "#8b949e" }}>
+            Lifecycle: {paper.lifecycle ? "available" : "unavailable"}
+          </span>
         </div>
-      )}
-
-      {/* Resumen de órdenes pendientes */}
-      {orders.length > 0 && (
-        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-          {orders.slice(0, 3).map(o => (
-            <span key={o.id} style={{ fontSize: 12 }}>
-              <strong>{o.symbol}</strong>{" "}
-              <span className={o.side === "buy" ? "text-green" : "text-red"}>
-                {o.side.toUpperCase()}
-              </span>{" "}
-              · {o.order_type.toUpperCase()}{" "}
-              · ${o.price?.toLocaleString() ?? "MKT"}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Últimas actividades */}
-      {activityLog.length > 0 && (
-        <div style={{ marginLeft: "auto", fontSize: 11, color: "#8b949e" }}>
-          Última actividad:{" "}
-          {new Date(activityLog[activityLog.length - 1].timestamp_ms).toLocaleTimeString()}
-        </div>
-      )}
-
-      {/* Estado general */}
-      <div style={{ marginLeft: "auto", display: "flex", gap: 12, fontSize: 11, color: "#8b949e" }}>
-        <span>P&L realizado hoy: <strong className="text-green">$0.00</strong></span>
-        <span>P&L no realizado: <strong>$0.00</strong></span>
+        <div style={{ minHeight: 14, overflow: "hidden" }}>{content}</div>
       </div>
+      {accountId && (
+        <button type="button" onClick={paper.refetch} style={{ fontSize: 11 }}>
+          Refresh
+        </button>
+      )}
     </footer>
   )
 }

@@ -40,8 +40,7 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceScopeError,
     PaperOrderAcceptanceStateError,
     SQLiteStore,
-    _SCHEMA_V12_TABLES,
-    _SCHEMA_V12_TABLES,
+    _SCHEMA_V15_TABLES,
     _SCHEMA_V8_TABLES,
 )
 
@@ -97,6 +96,7 @@ def _run_with_open_account(db: Path, quote_available: Decimal = Decimal("100.00"
         ),
     )
     _run(store.open_paper_account(opening))
+    _run(store.initialize_lifecycle_state("account-1", "session-1", 1000))
     return store
 
 
@@ -776,6 +776,9 @@ def _make_v8_database(db: Path) -> tuple[PaperOrder, PaperAccountOpening]:
     conn.execute("DROP TABLE IF EXISTS paper_order_acceptances")
     conn.execute("DROP TABLE IF EXISTS paper_reservation_lot_allocations")
     conn.execute("DROP TABLE IF EXISTS paper_sell_accounting")
+    conn.execute("DROP TABLE IF EXISTS paper_lifecycle_reconciliations")
+    conn.execute("DROP TABLE IF EXISTS paper_lifecycle_states")
+    conn.execute("DROP TABLE IF EXISTS paper_lifecycle_events")
     conn.execute("PRAGMA user_version = 8")
     conn.commit()
     conn.close()
@@ -792,12 +795,12 @@ def test_direct_v8_to_v12_migration_preserves_previous_paper_slices(
     store = SQLiteStore(db)
 
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V12_TABLES
+    assert _table_names(db) == _SCHEMA_V15_TABLES
     assert _run(store.load_paper_order(order.order_id)) == order
     assert _run(store.load_paper_account_opening(opening.account_id)) == opening
     assert _run(store.load_paper_reservation(order.order_id)) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
     assert conn.execute("SELECT COUNT(*) FROM paper_order_acceptances").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_reservations").fetchone()[0] == 0
     conn.close()

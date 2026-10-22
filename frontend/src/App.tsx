@@ -6,6 +6,7 @@ import type { MarketDataSource, MarketStatus } from './types/market'
 import { useMarketData } from './hooks/useMarketData'
 import { ChartPanel } from './components/ChartPanel'
 import { AnalysisPanel } from './components/AnalysisPanel'
+import { BottomBar } from './components/BottomBar'
 import { useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 
@@ -158,6 +159,9 @@ function TerminalView() {
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewId>('terminal')
+  // PAPER identifiers are session state only; no account is inferred or persisted.
+  const [paperAccountId] = useState<string | null>(null)
+  const [paperSessionId] = useState<string | null>(null)
 
   return (
     <div className="app-layout">
@@ -200,15 +204,7 @@ export default function App() {
         </section>
       </div>
 
-      {/* Footer honesto — sin datos ficticios */}
-      <footer className="bottom-bar" style={{ flexWrap: 'wrap' }}>
-        <span>Posiciones: no consultadas</span>
-        <span>Órdenes: no consultadas</span>
-        <span>P&amp;L: no disponible</span>
-        <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)' }}>
-          Cartera y simulador PAPER: no implementados
-        </span>
-      </footer>
+      <BottomBar accountId={paperAccountId} sessionId={paperSessionId} />
     </div>
   )
 }

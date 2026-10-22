@@ -126,6 +126,13 @@ async def run_paper_cycle(
         evaluated_at_ms,
     )
 
+    if not await store.is_buy_allowed(account_id, session_id):
+        return OrchestratorResult(
+            success=False,
+            signal="BUY",
+            error="PAPER BUY admission requires an explicit RUNNING lifecycle state",
+        )
+
     risk_result = evaluate_paper_risk(order, risk_policy, risk_snapshot)
     if not risk_result.approved:
         return OrchestratorResult(

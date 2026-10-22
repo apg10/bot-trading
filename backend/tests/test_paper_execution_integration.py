@@ -68,6 +68,7 @@ def _store(db: Path) -> SQLiteStore:
             )
         )
     )
+    _run(store.initialize_lifecycle_state("acct-1", "sess-1", 1000))
     return store
 
 

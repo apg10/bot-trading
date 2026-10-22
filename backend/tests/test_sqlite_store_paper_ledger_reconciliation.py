@@ -67,6 +67,7 @@ def _open_store(db: Path) -> SQLiteStore:
         ),
     )
     _run(store.open_paper_account(opening))
+    _run(store.initialize_lifecycle_state("acct-ledger", "session-ledger", 10000))
     return store
 
 

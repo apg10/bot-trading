@@ -92,6 +92,9 @@ def _open_account(db: Path, *, base: str = "0", quote: str = "10000") -> SQLiteS
             )
         )
     )
+    _run(
+        store.initialize_lifecycle_state("acct-sell", "session-sell", 1000)
+    )
     return store
 
 
