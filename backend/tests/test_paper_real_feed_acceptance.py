@@ -1,7 +1,8 @@
 """Acceptance-only harness for public-feed → PAPER orchestrator integration.
 
-No production changes. All transport is mocked. Financial inputs are explicit
-TEST_ONLY strategy, risk, capacity, and fee snapshots.
+No production changes. The default harness transport is mocked; the explicit
+opt-in session test reads only Binance public market data. Financial inputs are
+explicit TEST_ONLY strategy, risk, capacity, and fee snapshots.
 """
 
 import asyncio
@@ -514,3 +515,121 @@ def test_smoke_public_feed_unavailable_reports_blocked(tmp_path: Path) -> None:
     result = _run(run_paper_cycle(store, **_kwargs(), engine=engine))
     assert result.success is False
     assert "unavailable" in result.error.lower() or "error" in result.error.lower()
+
+
+@pytest.mark.skipif(not _PUBLIC_FEED_SMOKE, reason="opt-in session acceptance; set ACT_PAPER_SMOKETEST=1")
+def test_session_acceptance_buy_sell_with_real_public_feed(tmp_path: Path) -> None:
+    """Bounded BUY→SELL cycle with real public feed; only local PAPER mutations."""
+    import aiohttp
+
+    # Fetch real public quote
+    async def fetch_quote():
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(
+                "https://api.binance.com/api/v3/ticker/bookTicker",
+                params={"symbol": "BTCUSDT"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            resp.raise_for_status()
+            data = await resp.json()
+            return data
+
+    quote = _run(fetch_quote())
+
+    # Verify real data
+    assert "bidPrice" in quote and "askPrice" in quote
+    bid = Decimal(quote["bidPrice"])
+    ask = Decimal(quote["askPrice"])
+    assert bid > 0 and ask > 0 and bid < ask  # valid uncrossed quote
+
+    # Create snapshot from real data
+    quote_time_ms = int(
+        quote.get("time", datetime.now(tz=timezone.utc).timestamp() * 1000)
+    )
+    snap = _fake_paper_snapshot(
+        bid=bid,
+        ask=ask,
+        bid_qty=Decimal(quote["bidQty"]),
+        ask_qty=Decimal(quote["askQty"]),
+        timestamp=datetime.fromtimestamp(quote_time_ms / 1000, tz=timezone.utc),
+    )
+
+    store = _store(tmp_path)
+    engine = _FakeEngine(snap)
+    # The harness uses a deterministic bar identity, while the public quote is
+    # current-time data.  Keep the adapter's clock at the quote capture time so
+    # the normal freshness gate remains meaningful.
+    engine._clock_ms = lambda: quote_time_ms + 1_000
+
+    # Record initial state
+    initial_orders = _run(store.get_paper_orders("acct-1", "session-1"))
+    initial_fills = _run(store.get_paper_fills("acct-1", "session-1"))
+
+    # The TEST_ONLY strategy fixture is denominated near 100, whereas BTCUSDT
+    # is not.  Scale that explicit fixture (without using it as market data) so
+    # its deterministic BUY limit is executable against this real quote.
+    from src.models.state import Candle
+    from src.strategies.test_only_keltner import TEST_ONLY_OHLCV_FIXTURE
+
+    quantity = Decimal("0.001")
+    scale = float(ask / Decimal("104") * Decimal("1.01"))
+    candles = tuple(
+        Candle(
+            timestamp_ms=bar.timestamp_ms,
+            open=bar.open * scale,
+            high=bar.high * scale,
+            low=bar.low * scale,
+            close=bar.close * scale,
+            volume=bar.volume,
+        )
+        for bar in TEST_ONLY_OHLCV_FIXTURE[:7]
+    )
+    buy_kwargs = _kwargs()
+    buy_kwargs["quantity"] = quantity
+    buy_kwargs["candles"] = candles
+    buy_kwargs["fee_snapshot"] = _fee().model_copy(update={"quantity": quantity})
+
+    # BUY
+    buy_result = _run(run_paper_cycle(store, **buy_kwargs, engine=engine))
+    assert buy_result.success is True, f"BUY failed: {buy_result.error}"
+    assert buy_result.signal == "BUY"
+    assert buy_result.order_id is not None
+    assert buy_result.fill_id is not None
+
+    # Verify order/fill count increased
+    post_buy_orders = _run(store.get_paper_orders("acct-1", "session-1"))
+    post_buy_fills = _run(store.get_paper_fills("acct-1", "session-1"))
+    assert len(post_buy_orders) == len(initial_orders) + 1
+    assert len(post_buy_fills) == len(initial_fills) + 1
+
+    # SELL
+    sell_kwargs = _sell_kwargs()
+    sell_kwargs["fee_snapshot"] = _fee().model_copy(update={"quantity": quantity})
+    sell_result = _run(run_paper_cycle_sell(store, **sell_kwargs, engine=engine))
+    assert sell_result.success is True, f"SELL failed: {sell_result.error}"
+    assert sell_result.signal == "SELL"
+    assert sell_result.fill_id is not None
+
+    # Verify final state
+    final_orders = _run(store.get_paper_orders("acct-1", "session-1"))
+    final_fills = _run(store.get_paper_fills("acct-1", "session-1"))
+    assert len(final_orders) == len(initial_orders) + 2  # BUY order plus its local SELL close
+    assert len(final_fills) == len(initial_fills) + 2  # one BUY fill + one SELL fill
+
+    # Verify no exchange order IDs in persistence
+    for order in final_orders:
+        assert order.get("exchange_order_id") is None
+
+    # Report endpoint/source/timing (no secrets)
+    print(f"\n=== ACT-P-010-T4 Session Acceptance ===")
+    print(f"Source: Binance public bookTicker")
+    print(f"Symbol: BTC/USDT")
+    print(f"Quote: bid={bid}, ask={ask}")
+    print(f"Provenance: {snap.provenance}")
+    print(f"Order ID: {buy_result.order_id}")
+    print(f"BUY Fill ID: {buy_result.fill_id}")
+    print(f"SELL Fill ID: {sell_result.fill_id}")
+    print(f"Orders in DB: {len(final_orders)}")
+    print(f"Fills in DB: {len(final_fills)}")
+    print(f"======================================\n")
+    _run(store.close())
