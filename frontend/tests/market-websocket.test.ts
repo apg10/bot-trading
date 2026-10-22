@@ -607,7 +607,6 @@ describe("C09 — MarketWebSocket real", () => {
     ws.connect()
     const first = socket()
     first.emitOpen()
-    first.emitOpen()
     ws.subscribe("candles")
     ws.subscribe("status")
     expect(opened).toHaveBeenCalledTimes(1)
@@ -947,6 +946,7 @@ describe("C09 — useMarketData real con hooks React controlados", () => {
   it("usa el intervalo incluido en el snapshot como origen del stream", async () => {
     await mountHook()
     const first = socket()
+    first.emitOpen()
     first.emitMessage(JSON.stringify({
       type: "snapshot", schema_version: "market_transport.v1",
       stream_id: "stream-a", sequence: 1, interval: "1m", candles: [], complete: true,
@@ -997,6 +997,61 @@ describe("C09 — useMarketData real con hooks React controlados", () => {
     expect(renderHook().candles).toEqual([bBar.candle])
   })
 
+  it("descarta el histórico inicial tardío de un stream anterior", async () => {
+    type InitialResponse = CandleHistoryResponse & { stream_id: string }
+    let resolveInitial!: (value: InitialResponse) => void
+    const initial = new Promise<InitialResponse>(resolve => { resolveInitial = resolve })
+    vi.mocked(fetch).mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => initial,
+    }) as Response)
+
+    await mountHook()
+    const first = socket()
+    first.emitOpen()
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 1, interval: "1m", candles: [], complete: true,
+    }))
+    const bCandle = { ...bar().candle, open_time: 2000, close_time: 2060 }
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-b", sequence: 1, interval: "1m", candles: [bCandle], complete: true,
+    }))
+
+    resolveInitial({ ...fixture, stream_id: "stream-a" })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(renderHook().candles).toEqual([bCandle])
+  })
+
+  it("descarta un histórico tardío del mismo stream tras recibir snapshot", async () => {
+    type InitialResponse = CandleHistoryResponse & { stream_id: string }
+    let resolveInitial!: (value: InitialResponse) => void
+    const initial = new Promise<InitialResponse>(resolve => { resolveInitial = resolve })
+    vi.mocked(fetch).mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => initial,
+    }) as Response)
+
+    await mountHook()
+    const first = socket()
+    first.emitOpen()
+
+    // Snapshot for stream-a sets the buffer
+    first.emitMessage(JSON.stringify({
+      type: "snapshot", schema_version: "market_transport.v1",
+      stream_id: "stream-a", sequence: 1, interval: "1m", candles: [bar().candle], complete: true,
+    }))
+
+    // Late HTTP response from THE SAME stream must be rejected
+    resolveInitial({ ...fixture, stream_id: "stream-a" })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // WS snapshot data preserved, not overwritten by late HTTP
+    expect(renderHook().candles).toEqual([bar().candle])
+  })
+
   it("conserva una barra del mismo stream mientras la recuperación está pendiente", async () => {
     await mountHook()
     const first = socket()
@@ -1036,6 +1091,17 @@ describe("C09 — useMarketData real con hooks React controlados", () => {
     expect(renderHook().candles).toEqual([
       { ...fixture.candles[0], open_time: 1000, close_time: 1060 },
       delayedBar.candle,
+    ])
+
+    const nextBar = {
+      ...bar(), schema_version: "market_transport.v1", stream_id: "stream-a", sequence: 4,
+      candle: { ...bar().candle, open_time: 3000, close_time: 3060 },
+    }
+    first.emitMessage(JSON.stringify(nextBar))
+    expect(renderHook().candles).toEqual([
+      { ...fixture.candles[0], open_time: 1000, close_time: 1060 },
+      delayedBar.candle,
+      nextBar.candle,
     ])
   })
 

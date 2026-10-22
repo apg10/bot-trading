@@ -63,6 +63,7 @@ export function useMarketData(
   const candleHistoryRef = useRef<CandleData[]>([])
   const transportRef = useRef<{ streamId: string; sequence: number } | null>(null)
   const streamEpochRef = useRef(0)
+  const snapshotReceivedRef = useRef(false)
   // Identifica también la petición de recuperación que está en vuelo.  El
   // epoch invalida recuperaciones de otro stream, mientras que este token
   // evita que una respuesta antigua de la misma identidad vuelva a publicar
@@ -91,6 +92,7 @@ export function useMarketData(
   // Cargar histórico por HTTP
   useEffect(() => {
     let cancelled = false
+    const initialStreamEpoch = streamEpochRef.current
 
     async function loadHistorical() {
       try {
@@ -110,6 +112,21 @@ export function useMarketData(
         const data = await getCandles(symbol, MAX_CANDLES)
 
         if (!cancelled) {
+          // El histórico inicial pertenece al stream que estaba activo al
+          // iniciar la petición. Si el WS ya cambió de dueño, no mezclar su
+          // respuesta tardía con el buffer actual.
+          // A stream snapshot is authoritative even when the HTTP response
+          // does not carry an epoch of its own.  In particular, do not let a
+          // late initial response put the fixture back over a newer stream.
+          const responseStream = data.stream_id ?? null
+          if (streamEpochRef.current !== initialStreamEpoch
+            || (responseStream !== null
+              && responseStream !== transportRef.current?.streamId)
+            || (snapshotReceivedRef.current && !awaitingResyncRef.current)) {
+            // Una respuesta inicial obsoleta no modifica el buffer actual.
+            setLoading(false)
+            return
+          }
           // Una fixture tardía nunca reemplaza datos ya recibidos del motor.
           if (!(data.data_source === "TEST_ONLY" && originRef.current.dataSource === "market_engine")) {
             const origin = originRef.current
@@ -138,6 +155,7 @@ export function useMarketData(
       }
     }
 
+    snapshotReceivedRef.current = false
     loadHistorical()
 
     return () => {
@@ -180,6 +198,8 @@ export function useMarketData(
       }
       if (transportRef.current?.streamId !== metadata.streamId) resetForStream(metadata.streamId)
       const previous = transportRef.current
+      const wasAwaitingResync = awaitingResyncRef.current
+      let sequenceGap = false
       if (previous && previous.sequence >= 0) {
         if (metadata.sequence < previous.sequence) {
           awaitingResyncRef.current = true
@@ -187,9 +207,13 @@ export function useMarketData(
           return { metadata, duplicate: false, rejected: true }
         }
         if (metadata.sequence > previous.sequence + 1 && kind !== "snapshot") {
+          sequenceGap = true
           awaitingResyncRef.current = true
           markDegraded("Hueco de secuencia en el mercado; recuperación de datos pendiente")
-          return { metadata, duplicate: false, rejected: true }
+          // Una barra recibida durante la recuperación aún aporta datos
+          // válidos al buffer. El hueco queda marcado para el backfill, pero
+          // no se descarta la actualización por ello.
+          if (kind !== "bar") return { metadata, duplicate: false, rejected: true }
         }
         if (metadata.sequence === previous.sequence && kind === "bar") {
           return { metadata, duplicate: true, rejected: false }
@@ -198,7 +222,10 @@ export function useMarketData(
       // A snapshot is authoritative, and a resync signal is meaningful even
       // when its sequence repeats the last published value.
       transportRef.current = metadata
-      if (kind !== "resync_required") awaitingResyncRef.current = false
+      if (kind !== "resync_required"
+        && (kind === "snapshot" || (!wasAwaitingResync && !sequenceGap))) {
+        awaitingResyncRef.current = false
+      }
       return { metadata, duplicate: false, rejected: false }
     }
 
@@ -245,11 +272,15 @@ export function useMarketData(
         ) throw new Error("Respuesta de recuperación incompatible")
         const next = mergeHistoricalCandles(candleHistoryRef.current, data.candles as CandleData[])
         publishCandles(next)
-        originRef.current = { dataSource: data.data_source as MarketDataSource, interval: data.interval }
+        // Recovery is requested by the live stream, so its result must not
+        // downgrade ownership to TEST_ONLY.  Otherwise the next live bar
+        // would see a different origin and replace the recovered buffer.
+        originRef.current = { dataSource: "market_engine", interval: data.interval }
         setDataSource(originRef.current.dataSource)
         setCandleInterval(data.interval)
-        if (typeof data.sequence === "number" && Number.isSafeInteger(data.sequence) && data.sequence >= 0) {
-          transportRef.current = { streamId: responseStream, sequence: data.sequence }
+        if (typeof data.sequence === "number" && Number.isSafeInteger(data.sequence) && data.sequence >= 0
+          && transportRef.current && data.sequence > transportRef.current.sequence) {
+          transportRef.current = { streamId: transportRef.current.streamId, sequence: data.sequence }
         }
         if (data.complete === false) {
           awaitingResyncRef.current = true
@@ -314,6 +345,7 @@ export function useMarketData(
           markDegraded("Snapshot de mercado con envelope inválido")
           return
         }
+        snapshotReceivedRef.current = true
         publishCandles(next)
         awaitingResyncRef.current = !msg.complete
         originRef.current = {
