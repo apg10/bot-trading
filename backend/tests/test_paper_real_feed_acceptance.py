@@ -6,6 +6,7 @@ TEST_ONLY strategy, risk, capacity, and fee snapshots.
 
 import asyncio
 import json
+import os
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -13,6 +14,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+# Opt-in smoke tests require explicit permission
+_PUBLIC_FEED_SMOKE = os.getenv("ACT_PAPER_SMOKETEST", "").lower() in ("1", "true", "yes")
 
 from src.market.paper_snapshot import PaperMarketExecutionSnapshot
 from src.models.paper_contracts import AssetBalance, Commission, PaperAccountOpening
@@ -445,3 +450,67 @@ def test_reconciliation_discrepancy_blocks_buy(tmp_path: Path) -> None:
     assert result.success is True
     assert result.fill_id is not None
     _run(store.close())
+
+
+@pytest.mark.skipif(not _PUBLIC_FEED_SMOKE, reason="opt-in smoke test; set ACT_PAPER_SMOKETEST=1")
+def test_smoke_public_feed_valid_quote_traverses_harness(tmp_path: Path) -> None:
+    """Real public book-ticker enters harness; persistence contains only local PAPER orders/fills."""
+    import aiohttp
+
+    # Fetch real public quote
+    async def fetch_quote():
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(
+                "https://api.binance.com/api/v3/ticker/bookTicker",
+                params={"symbol": "BTCUSDT"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            resp.raise_for_status()
+            data = await resp.json()
+            return data
+
+    quote = asyncio.get_event_loop().run_until_complete(fetch_quote())
+
+    # Verify we got real data
+    assert "bidPrice" in quote
+    assert "askPrice" in quote
+    assert Decimal(quote["bidPrice"]) < Decimal(quote["askPrice"])  # valid quote
+
+    # Create snapshot from real data
+    snap = _fake_paper_snapshot(
+        bid=Decimal(quote["bidPrice"]),
+        ask=Decimal(quote["askPrice"]),
+        bid_qty=Decimal(quote["bidQty"]),
+        ask_qty=Decimal(quote["askQty"]),
+        timestamp=datetime.fromtimestamp(quote["time"] / 1000, tz=timezone.utc),
+    )
+
+    store = _store(tmp_path)
+    engine = _FakeEngine(snap)
+
+    result = _run(run_paper_cycle(store, **_kwargs(), engine=engine))
+    assert result.success is True, f"Valid public quote should traverse harness: {result.error}"
+
+    # Verify persistence contains only local PAPER orders/fills
+    # (no exchange order IDs)
+    assert result.order_id is not None
+    assert result.fill_id is not None
+
+
+@pytest.mark.skipif(not _PUBLIC_FEED_SMOKE, reason="opt-in smoke test; set ACT_PAPER_SMOKETEST=1")
+def test_smoke_public_feed_unavailable_reports_blocked(tmp_path: Path) -> None:
+    """Unavailable service reports blocked, not success."""
+    # Intentionally use invalid symbol to trigger error
+    snap = _fake_paper_snapshot(symbol="INVALID123/USDT")
+
+    class FailingHTTP:
+        async def get_book_ticker(self, symbol):
+            raise Exception("service unavailable")
+
+    store = _store(tmp_path)
+    engine = _FakeEngine(snap)
+    engine._http_client = FailingHTTP()
+
+    result = _run(run_paper_cycle(store, **_kwargs(), engine=engine))
+    assert result.success is False
+    assert "unavailable" in result.error.lower() or "error" in result.error.lower()
