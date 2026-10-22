@@ -209,6 +209,62 @@ class ReplaySegment:
         }
 
 
+# --- PAPER signal DTO ---
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class PaperSignal:
+    """Immutable PAPER signal with complete provenance."""
+
+    signal_id: str
+    segment_id: str
+    symbol: str
+    strategy: str
+    data_source: DataSource
+    timestamp_ms: int
+    candle_index: int
+    side: DecisionSide
+    reason: str
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PaperSignal):
+            return NotImplemented
+        return (
+            self.signal_id,
+            self.segment_id,
+            self.symbol,
+            self.strategy,
+            self.data_source,
+            self.timestamp_ms,
+            self.candle_index,
+            self.side,
+            self.reason,
+        ) == (
+            other.signal_id,
+            other.segment_id,
+            other.symbol,
+            other.strategy,
+            other.data_source,
+            other.timestamp_ms,
+            other.candle_index,
+            other.side,
+            other.reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "signal_id": self.signal_id,
+            "segment_id": self.segment_id,
+            "symbol": self.symbol,
+            "strategy": self.strategy,
+            "data_source": self.data_source.value,
+            "timestamp_ms": self.timestamp_ms,
+            "candle_index": self.candle_index,
+            "side": self.side.value,
+            "reason": self.reason,
+        }
+
+
 # --- Strategy adapter ---
 
 
@@ -261,6 +317,75 @@ def replay_with_strategy(
     assert len(decisions) == len(candles), "decision count must match candle count"
 
     return decisions
+
+
+def decisions_to_signals(
+    decisions: list[Decision],
+    segment: ReplaySegment,
+) -> list[PaperSignal]:
+    """
+    Project replay decisions to PAPER signals.
+
+    Validates provenance alignment between decisions and segment and returns
+    exactly one signal per decision with preserved order.
+    """
+    if len(decisions) != len(segment.candles):
+        raise ReplayError(
+            f"decision count {len(decisions)} must match candle count {len(segment.candles)}"
+        )
+
+    signals: list[PaperSignal] = []
+
+    for i, (decision, candle) in enumerate(zip(decisions, segment.candles)):
+        if decision.symbol != segment.symbol:
+            raise ReplayError(
+                f"symbol mismatch at index {i}: {decision.symbol} != {segment.symbol}"
+            )
+
+        if decision.strategy != segment.strategy:
+            raise ReplayError(
+                f"strategy mismatch at index {i}: {decision.strategy} != {segment.strategy}"
+            )
+
+        if decision.data_source != segment.data_source:
+            raise ReplayError(f"data_source mismatch at index {i}")
+
+        if decision.candle_index != i:
+            raise ReplayError(
+                f"candle_index mismatch at index {i}: {decision.candle_index} != {i}"
+            )
+
+        if decision.timestamp_ms != candle.timestamp_ms:
+            raise ReplayError(
+                f"timestamp mismatch at index {i}: "
+                f"{decision.timestamp_ms} != {candle.timestamp_ms}"
+            )
+
+        signal_id = f"{segment.segment_id}-sig-{i:04d}"
+        signals.append(
+            PaperSignal(
+                signal_id=signal_id,
+                segment_id=segment.segment_id,
+                symbol=decision.symbol,
+                strategy=decision.strategy,
+                data_source=decision.data_source,
+                timestamp_ms=decision.timestamp_ms,
+                candle_index=decision.candle_index,
+                side=decision.side,
+                reason=decision.reason,
+            )
+        )
+
+    return signals
+
+
+def replay_to_signals(
+    segment: ReplaySegment,
+    strategy: StrategyCallback,
+) -> list[PaperSignal]:
+    """End-to-end: replay decisions to PAPER signals."""
+    decisions = replay_with_strategy(segment, strategy)
+    return decisions_to_signals(decisions, segment)
 
 
 def replay_decisions(

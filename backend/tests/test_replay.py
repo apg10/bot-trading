@@ -12,9 +12,11 @@ from src.replay import (
     DecisionSide,
     ReplayError,
     ReplaySegment,
+    decisions_to_signals,
     replay_decisions,
     replay_deterministic,
     replay_segment,
+    replay_to_signals,
     replay_with_strategy,
     validate_candles,
 )
@@ -433,3 +435,170 @@ class TestStrategyAdapter:
 
         decisions_new = replay_with_strategy(seg, same_logic)
         assert len(decisions_new) == 3
+
+
+class TestSignalBridge:
+    """Tests for the replay-to-signal bridge."""
+
+    _VALID_CANDLES = tuple(
+        [
+            _candle(0, 100, 110, 90, 105),
+            _candle(1, 105, 112, 95, 108),
+            _candle(2, 108, 130, 100, 125),
+        ]
+    )
+
+    def _make_segment(self, **overrides) -> ReplaySegment:
+        kwargs = dict(
+            segment_id="seg-signal-001",
+            symbol="BTC/USDT",
+            strategy="TEST_ONLY",
+            data_source=DataSource.TEST_ONLY,
+            source_ref="ref://test-source",
+            clock_ref="ref://test-clock",
+            cost_policy_ref="ref://test-cost",
+            fill_policy_ref="ref://test-fill",
+            start_ms=_BASE_MS,
+            end_ms=_BASE_MS + 3 * _STEP_S * 1000,
+            candles=self._VALID_CANDLES,
+        )
+        kwargs.update(overrides)
+        return ReplaySegment(**kwargs)
+
+    def test_one_signal_per_candle_preserves_order(self):
+        """Exactly one signal per candle with preserved order."""
+        seg = self._make_segment()
+        decisions = replay_decisions(list(seg.candles), seg.symbol, seg.strategy)
+        signals = decisions_to_signals(decisions, seg)
+
+        assert len(signals) == len(seg.candles)
+        assert len(signals) == 3
+
+        for i, sig in enumerate(signals):
+            assert sig.candle_index == i
+            assert sig.timestamp_ms == seg.candles[i].timestamp_ms
+
+    def test_deterministic_signals(self):
+        """Same segment + callback produces identical signals."""
+        seg = self._make_segment()
+
+        def always_hold(
+            prefix: list[Candle], index: int
+        ) -> tuple[DecisionSide, str]:
+            return DecisionSide.HOLD, "hold"
+
+        s1 = replay_to_signals(seg, always_hold)
+        s2 = replay_to_signals(seg, always_hold)
+
+        assert s1 == s2
+
+    def test_provenance_alignment_validated(self):
+        """Provenance mismatches produce ReplayError."""
+        seg = self._make_segment()
+
+        bad_decision = Decision(
+            timestamp_ms=seg.candles[0].timestamp_ms,
+            symbol="WRONG/USDT",
+            side=DecisionSide.HOLD,
+            strategy=seg.strategy,
+            data_source=seg.data_source,
+            candle_index=0,
+            reason="test",
+        )
+
+        with pytest.raises(ReplayError, match="symbol mismatch"):
+            decisions_to_signals(
+                [bad_decision]
+                + replay_decisions(
+                    list(seg.candles)[1:], seg.symbol, seg.strategy
+                ),
+                seg,
+            )
+
+    def test_count_mismatch_rejected(self):
+        """Decision count mismatch is rejected."""
+        seg = self._make_segment()
+        decisions = replay_decisions(list(seg.candles), seg.symbol, seg.strategy)
+
+        extra_decision = Decision(
+            timestamp_ms=seg.candles[0].timestamp_ms,
+            symbol=seg.symbol,
+            side=DecisionSide.HOLD,
+            strategy=seg.strategy,
+            data_source=seg.data_source,
+            candle_index=999,
+            reason="extra",
+        )
+
+        with pytest.raises(ReplayError, match="must match"):
+            decisions_to_signals(decisions + [extra_decision], seg)
+
+    def test_signal_id_is_deterministic(self):
+        """Signal ID is deterministic from segment + index."""
+        seg = self._make_segment()
+        decisions = replay_decisions(list(seg.candles), seg.symbol, seg.strategy)
+        signals = decisions_to_signals(decisions, seg)
+
+        for i, sig in enumerate(signals):
+            assert sig.signal_id == f"{seg.segment_id}-sig-{i:04d}"
+
+    def test_hold_buy_sell_preserved(self):
+        """HOLD/BUY/SELL sides are preserved without modification."""
+        seg = self._make_segment()
+
+        def varied_strategy(
+            prefix: list[Candle], index: int
+        ) -> tuple[DecisionSide, str]:
+            if index == 0:
+                return DecisionSide.HOLD, "initial"
+            prev_high = max(c.high for c in prefix[:-1])
+            if prefix[-1].close > prev_high:
+                return DecisionSide.BUY, "breakout"
+            return DecisionSide.SELL, "breakdown"
+
+        decisions = replay_with_strategy(seg, varied_strategy)
+        signals = decisions_to_signals(decisions, seg)
+
+        sides = [s.side for s in signals]
+        assert DecisionSide.HOLD in sides
+        assert DecisionSide.BUY in sides
+        assert DecisionSide.SELL in sides
+
+    def test_signal_to_dict(self):
+        """Signal serializes correctly."""
+        seg = self._make_segment()
+        decisions = replay_decisions(list(seg.candles), seg.symbol, seg.strategy)
+        signals = decisions_to_signals(decisions, seg)
+
+        sig_dict = signals[0].to_dict()
+        assert sig_dict["signal_id"] == signals[0].signal_id
+        assert sig_dict["segment_id"] == seg.segment_id
+        assert sig_dict["data_source"] == "TEST_ONLY"
+        assert sig_dict["side"] == "HOLD"
+
+    def test_frozen_signal_cannot_be_modified(self):
+        """Signal is frozen and cannot be modified."""
+        seg = self._make_segment()
+        decisions = replay_decisions(list(seg.candles), seg.symbol, seg.strategy)
+        signals = decisions_to_signals(decisions, seg)
+
+        with pytest.raises(Exception):
+            signals[0].side = DecisionSide.BUY
+
+    def test_no_financial_effects(self):
+        """Signals contain no qty, price, balance, or order/fill IDs."""
+        seg = self._make_segment()
+
+        def buy_strategy(
+            prefix: list[Candle], index: int
+        ) -> tuple[DecisionSide, str]:
+            return DecisionSide.BUY, "buy"
+
+        signals = replay_to_signals(seg, buy_strategy)
+
+        for sig in signals:
+            assert not hasattr(sig, "qty")
+            assert not hasattr(sig, "price")
+            assert not hasattr(sig, "balance")
+            assert not hasattr(sig, "order_id")
+            assert not hasattr(sig, "fill_id")
