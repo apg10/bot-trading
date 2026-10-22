@@ -19,7 +19,7 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _SCHEMA_V6_TABLES,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V15_TABLES,
+    _SCHEMA_V16_TABLES,
 )
 
 
@@ -345,7 +345,9 @@ def _make_v6_database(db: Path) -> None:
     conn.execute("DROP TABLE IF EXISTS paper_lifecycle_events")
     conn.execute("PRAGMA user_version = 6")
     conn.commit()
-    assert _table_names(db) == _SCHEMA_V6_TABLES
+    # The v6 fixture is carved out of a v16 database; ui_preferences is
+    # pre-existing and must survive the failed migration rollback.
+    assert _table_names(db) == _SCHEMA_V6_TABLES | {"ui_preferences"}
     conn.close()
 
 
@@ -355,9 +357,9 @@ def test_v6_to_v12_migration_preserves_paper_fill(tmp_path: Path) -> None:
 
     store = SQLiteStore(db)
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V15_TABLES
+    assert _table_names(db) == _SCHEMA_V16_TABLES
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     conn.close()
     assert _run(store.load_paper_fill("historical-fill")) is not None
     _run(store.close())
@@ -379,7 +381,7 @@ def test_v6_to_v12_migration_rolls_back_all_ddl_and_version(
     with pytest.raises(sqlite3.OperationalError):
         _run(store.initialize())
 
-    assert _table_names(db) == _SCHEMA_V6_TABLES
+    assert _table_names(db) == _SCHEMA_V6_TABLES | {"ui_preferences"}
     conn = sqlite3.connect(str(db))
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     row = conn.execute(

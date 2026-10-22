@@ -38,7 +38,7 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _SCHEMA_V7_TABLES,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V15_TABLES,
+    _SCHEMA_V16_TABLES,
 )
 
 
@@ -346,7 +346,9 @@ def _make_v7_database(db: Path) -> None:
     conn.execute("PRAGMA user_version = 7")
     conn.commit()
     conn.close()
-    assert _table_names(db) == _SCHEMA_V7_TABLES
+    # The v7 fixture is carved out of a v16 database; preserve the existing
+    # v16 UI-preferences table when rolling back attempted order DDL.
+    assert _table_names(db) == _SCHEMA_V7_TABLES | {"ui_preferences"}
 
 
 def test_direct_v7_to_v12_migration_preserves_accepted_paper_data(
@@ -357,12 +359,12 @@ def test_direct_v7_to_v12_migration_preserves_accepted_paper_data(
 
     store = SQLiteStore(db)
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V15_TABLES
+    assert _table_names(db) == _SCHEMA_V16_TABLES
     assert _run(store.load_paper_fill("fill-before-v8")) is not None
     assert _run(store.load_paper_account_opening("account-before-v8")) is not None
     assert _run(store.load_paper_order("order-not-registered")) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     conn.close()
     _run(store.close())
 
@@ -383,7 +385,7 @@ def test_v7_to_v12_migration_rolls_back_order_ddl_and_version(
     with pytest.raises(sqlite3.OperationalError):
         _run(store.initialize())
 
-    assert _table_names(db) == _SCHEMA_V7_TABLES
+    assert _table_names(db) == _SCHEMA_V7_TABLES | {"ui_preferences"}
     conn = sqlite3.connect(str(db))
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
     assert conn.execute(

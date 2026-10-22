@@ -66,4 +66,14 @@ export interface MarketStatus {
   last_bar_open_time: number | null
   interval: string | null
   data_source: "market_engine" | "unavailable"
+  // Estado completo emitido por el motor.  Son opcionales únicamente para que
+  // fixtures antiguas del websocket sigan siendo representables; N02 exige
+  // todos estos campos antes de construir un snapshot.
+  recovering?: boolean
+  history_loaded?: boolean
+  complete?: boolean
+  stale?: boolean
+  pending_gaps?: number
+  last_closed_close_time?: number | null
+  execution_available?: false
 }

@@ -40,7 +40,7 @@ from src.persistence.sqlite_store import (
     VariantDiscardConflictError,
     _SCHEMA_V4_TABLES,
     _SCHEMA_V9_TABLES,
-    _SCHEMA_V15_TABLES,
+    _SCHEMA_V16_TABLES,
 )
 
 
@@ -118,7 +118,7 @@ def test_double_initialize_applies_single_migration(tmp_path: Path) -> None:
     _run(store.initialize())  # second init must not duplicate tables
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     # FKs are set per-connection during writes; verify by checking the schema
     fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
     assert fk == 0  # default off when not explicitly enabled
@@ -128,7 +128,7 @@ def test_double_initialize_applies_single_migration(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
     conn.close()
     _run(store.close())
 
@@ -396,7 +396,7 @@ def test_v10_order_acceptance_tables_without_lifecycle_or_preference_tables(
     }
     conn.close()
     # v11 adds paper_reservation_lot_allocations and paper_sell_accounting tables.
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
     _run(store.close())
 
 
@@ -586,7 +586,7 @@ def test_new_database_initializes_directly_at_v12(tmp_path: Path) -> None:
     _run(store.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     tables = {
         row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -649,7 +649,7 @@ def test_v1_to_v12_migration_preserves_existing_sessions_and_configs(
     assert _run(upgraded.load_session("existing-session"))["dataset_refs"] == ["existing-dataset"]
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     assert conn.execute("SELECT COUNT(*) FROM experiment_definitions").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM run_attempts").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM experiment_results").fetchone()[0] == 0
@@ -1579,13 +1579,13 @@ def test_migration_v2_to_v12_preserves_sessions_and_configs(tmp_path: Path) -> N
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     tables = {
         row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
     conn.close()
     _run(upgraded.close())
 
@@ -1731,11 +1731,11 @@ def test_v3_to_v12_migration_preserves_all_v3_data(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
 
     # All v3 data preserved.
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
@@ -1859,13 +1859,13 @@ def test_v4_to_v12_migration_creates_current_tables_and_preserves_data(
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     tables = {
         row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
     assert conn.execute(
         "SELECT session_id FROM sessions WHERE session_id='preserved-v4-session'"
     ).fetchone() == ("preserved-v4-session",)
@@ -1909,7 +1909,10 @@ def test_v4_migration_failure_rolls_back_ddl_and_version(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V4_TABLES
+    # Historical fixtures are derived from a current v16 database.  The
+    # migration rollback must remove only the DDL attempted by this upgrade;
+    # the v16 UI-preferences table remains part of the pre-existing schema.
+    assert tables == _SCHEMA_V4_TABLES | {"ui_preferences"}
     assert conn.execute(
         "SELECT session_id FROM sessions WHERE session_id='preserved-v4-session'"
     ).fetchone() == ("preserved-v4-session",)
@@ -1923,11 +1926,11 @@ def test_new_database_initializes_directly_at_v12_with_paper_acceptance(tmp_path
     _run(store.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
     # experiment_results table exists and is empty.
     assert conn.execute("SELECT COUNT(*) FROM experiment_results").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 0
@@ -2802,11 +2805,11 @@ def test_v9_to_v12_migration_preserves_v9_data(tmp_path: Path) -> None:
     _run(upgraded.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
 
     # All v9 data preserved.
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
@@ -2948,11 +2951,11 @@ def test_reinitialize_v12_is_idempotent(tmp_path: Path) -> None:
     _run(store1.initialize())
 
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
     conn.close()
     _run(store1.close())
 

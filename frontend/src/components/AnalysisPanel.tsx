@@ -1,10 +1,18 @@
 // Panel de análisis técnico con señales de Keltner, MACD y FYL.
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { getApiUrl } from "../api/market"
 import { AnalysisRequestTracker, createAnalysisSnapshotKey, type AnalysisRequestTicket } from "../analysis/request_tracker"
+import {
+  buildScenarioSnapshot,
+  requestScenarioAnalysis,
+  ScenarioApiError,
+  type ScenarioAnalysisResult,
+  type ScenarioSnapshot,
+  type ScenarioErrorCode,
+} from "../api/scenarios"
 import { MAX_CANDLES } from "../market/candle_store"
-import type { CandleData, MarketDataSource } from "../types/market"
+import type { CandleData, MarketDataSource, MarketStatus } from "../types/market"
 
 interface AnalysisPanelProps {
   candles: CandleData[]
@@ -12,6 +20,7 @@ interface AnalysisPanelProps {
   loading: boolean
   dataSource: MarketDataSource
   interval: string | null
+  status?: MarketStatus | null
 }
 
 // Tipos para las respuestas de la API de análisis
@@ -196,6 +205,178 @@ function useAnalysis(symbol: string, candles: CandleData[], dataSource: MarketDa
   }
 }
 
+type ScenarioRecord = {
+  data: ScenarioAnalysisResult
+  snapshot: ScenarioSnapshot
+  snapshotKey: string
+  ticket: AnalysisRequestTicket
+}
+
+function scenarioInputKey(
+  symbol: string, candles: CandleData[], dataSource: MarketDataSource,
+  interval: string | null, status: MarketStatus | null | undefined,
+): string {
+  const closed = candles.filter(candle => candle.is_closed)
+    .reduce<CandleData | null>((latest, candle) => latest === null || candle.close_time > latest.close_time ? candle : latest, null)
+  // Transport sequence/stream metadata is not N02 evidence.  Excluding it
+  // avoids re-requesting the same advisory on every status envelope.
+  const state = status && {
+    symbol: status.symbol, interval: status.interval, data_source: status.data_source,
+    connected: status.connected, history_loaded: status.history_loaded,
+    complete: status.complete, recovering: status.recovering, stale: status.stale,
+    pending_gaps: status.pending_gaps, closed_candles_count: status.closed_candles_count,
+    last_closed_close_time: status.last_closed_close_time,
+    execution_available: status.execution_available,
+  }
+  return JSON.stringify({ symbol, interval, dataSource, status: state, closed })
+}
+
+function useScenarioAnalysis(
+  symbol: string, candles: CandleData[], dataSource: MarketDataSource,
+  interval: string | null, status: MarketStatus | null | undefined,
+) {
+  const inputKey = scenarioInputKey(symbol, candles, dataSource, interval, status)
+  const built = useMemo(() => {
+    try {
+      return { snapshot: buildScenarioSnapshot({ candles, status, symbol, interval, dataSource }) as ScenarioSnapshot, error: null }
+    } catch (error: unknown) {
+      return {
+        snapshot: null,
+        error: error instanceof ScenarioApiError ? error : new ScenarioApiError("missing_context"),
+      }
+    }
+    // inputKey is deliberately the only dependency: N02 is built from the
+    // last closed candle and market status, never from indicator output.
+  }, [inputKey])
+  const snapshot = built.snapshot
+  const snapshotKey = snapshot ? JSON.stringify(snapshot) : `unavailable:${inputKey}`
+  const eligible = snapshot !== null
+  const [record, setRecord] = useState<ScenarioRecord | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [, setClock] = useState(0)
+  const [error, setError] = useState<{ snapshotKey: string; code: ScenarioErrorCode } | null>(null)
+  const trackerRef = useRef<AnalysisRequestTracker | null>(null)
+  if (trackerRef.current === null) trackerRef.current = new AnalysisRequestTracker()
+  const tracker = trackerRef.current
+  const latestRef = useRef({ snapshotKey, eligible })
+  latestRef.current = { snapshotKey, eligible }
+
+  useEffect(() => {
+    if (!snapshot || !eligible) {
+      tracker.invalidate()
+      setLoading(false)
+      return
+    }
+    const ticket = tracker.begin(snapshotKey)
+    const current = () => latestRef.current.eligible
+      && tracker.isCurrent(ticket, latestRef.current.snapshotKey)
+    const run = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+        const data = await requestScenarioAnalysis(snapshot, ticket.signal)
+        if (current()) setRecord({ data, snapshot, snapshotKey, ticket })
+      } catch (reason: unknown) {
+        if (current() && !(reason instanceof ScenarioApiError && reason.code === "cancelled")) {
+          const code = reason instanceof ScenarioApiError ? reason.code : "unavailable"
+          setError({ snapshotKey, code })
+        }
+      } finally {
+        if (current()) setLoading(false)
+      }
+    }
+    void run()
+    return () => { tracker.invalidate() }
+  }, [snapshotKey, eligible])
+
+  useEffect(() => {
+    if (!record) return
+    const delay = Math.max(0, record.data.analysis.valid_until_ms - Date.now() + 1)
+    const timer = setTimeout(() => setClock(Date.now()), delay)
+    return () => clearTimeout(timer)
+  }, [record?.snapshotKey, record?.data.analysis.valid_until_ms])
+
+  const currentError = built.error?.code ?? (eligible && error?.snapshotKey === snapshotKey ? error.code : null)
+  const expired = record !== null && Date.now() > record.data.analysis.valid_until_ms
+  const visible = eligible && !currentError && !expired && record?.snapshotKey === snapshotKey
+    && tracker.isCurrent(record.ticket, snapshotKey) ? record.data : null
+  return {
+    result: visible,
+    snapshot,
+    loading,
+    error: currentError,
+    pending: eligible && visible === null && currentError === null && !expired,
+    expired: expired || currentError === "snapshot_expired",
+  }
+}
+
+function ScenarioState({
+  result, loading, pending, error, expired, snapshot,
+}: ReturnType<typeof useScenarioAnalysis>) {
+  const stateText = (code: ScenarioErrorCode | null): string => {
+    switch (code) {
+      case "incompatible_interval": return "N02 requiere intervalo 1m; este escenario no está disponible para la selección actual."
+      case "missing_context": return "N02 no está disponible: falta estado completo de mercado o una vela cerrada identificada."
+      case "market_incomplete": return "N02 espera un estado de mercado completo y vigente; el mercado continúa disponible."
+      case "busy": return "N02 está ocupado; no se ha publicado un resultado advisory."
+      case "snapshot_expired": return "El snapshot N02 caducó; no se muestran escenarios antiguos."
+      case "invalid_structure": return "N02 devolvió una respuesta vacía o no disponible."
+      case "snapshot_mismatch":
+      case "invalid_evidence":
+      case "unavailable": return "N02 no está disponible para este snapshot; no se muestran detalles internos."
+      default: return "N02 no está disponible para este contexto."
+    }
+  }
+
+  if (result && snapshot) {
+    const scenarios: [string, keyof ScenarioAnalysisResult["summaries"]][] = [
+      ["Continuación", "continuation"], ["Fallo", "failure"], ["Lateralización", "sideways"],
+    ]
+    return (
+      <div className="panel-section" aria-label="Escenarios N02 advisory">
+        <h3>N02 · Escenarios advisory</h3>
+        <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 8 }}>
+          Solo hipótesis informativas; sin capacidad operativa.
+        </div>
+        <div style={{ fontSize: 11, color: "#8b949e" }}>Fuente declarada: {result.analysis.data_source}</div>
+        <div style={{ fontSize: 11, color: "#8b949e" }}>Modelo identificado: {result.model_used}</div>
+        <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 8 }}>
+          Válido hasta (valid_until): {new Date(snapshot.valid_until_ms).toISOString()}
+        </div>
+        <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 8 }}>
+          Contexto ausente declarado: {snapshot.missing_data.join(", ")}. No se ha fabricado evidencia.
+        </div>
+        {scenarios.map(([label, key]) => (
+          <div key={key} className="card" style={{ marginBottom: 4 }}>
+            <div className="card-title">{label}</div>
+            <div className="card-detail">{result.summaries[key]}</div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  if (expired) return <div className="panel-section" role="status" aria-live="polite" style={{ padding: 12, fontSize: 12, color: "#8b949e" }}>{stateText("snapshot_expired")}</div>
+  if (error) {
+    // Missing/incomplete context is an expected unavailable state for the
+    // advisory, not an error in an otherwise valid analysis panel. Keep the
+    // message visible, but reserve alert semantics for actual failures.
+    const actualError = !["incompatible_interval", "missing_context", "market_incomplete"].includes(error)
+    return (
+      <div
+        className="panel-section"
+        role={actualError ? "alert" : "status"}
+        {...(actualError ? {} : { "aria-live": "polite" })}
+        style={{ padding: 12, fontSize: 12, color: "#f0883e" }}
+      >
+        {stateText(error)}
+      </div>
+    )
+  }
+  if (loading || pending) return <div className="panel-section" role="status" aria-live="polite" style={{ padding: 12, fontSize: 12, color: "#8b949e" }}>Solicitando escenarios N02 advisory…</div>
+  return <div className="panel-section" role="status" aria-live="polite" style={{ padding: 12, fontSize: 12, color: "#8b949e" }}>{stateText(null)}</div>
+}
+
 // Componente: Señal de trading basada en cruce de MACD
 function MACDSignal({ macdPoints }: { macdPoints: MACDPoint[] }) {
   if (macdPoints.length < 2) return null
@@ -291,8 +472,9 @@ function PivotList({ pivots }: { pivots: PivotPoint[] }) {
 }
 
 // Componente principal del panel de análisis
-export function AnalysisPanel({ candles, symbol, loading, dataSource, interval }: AnalysisPanelProps) {
+export function AnalysisPanel({ candles, symbol, loading, dataSource, interval, status }: AnalysisPanelProps) {
   const { analysis, analysisSource, loading: analysisLoading, error, stale, pending, provisional } = useAnalysis(symbol, candles, dataSource, interval, loading)
+  const scenario = useScenarioAnalysis(symbol, candles, dataSource, interval, status)
   const testOnly = dataSource === "TEST_ONLY" || analysisSource === "TEST_ONLY"
 
   return (
@@ -306,6 +488,9 @@ export function AnalysisPanel({ candles, symbol, loading, dataSource, interval }
           : "Snapshot de velas cerradas; estrategia todavía no validada"}</div>
         <div>Intervalo: {interval && interval !== "unknown" ? interval : "sin verificar"}</div>
       </div>
+
+      <ScenarioState {...scenario} />
+
       {/* Reglas pendientes */}
       <div className="panel-section">
         <div className="pending-rules">
@@ -328,7 +513,7 @@ export function AnalysisPanel({ candles, symbol, loading, dataSource, interval }
           Error de análisis técnico: {error}. No hay un resultado vigente para este snapshot.
         </div>
       ) : loading || analysisLoading || pending || stale ? (
-        <div style={{ padding: 12, fontSize: 12, color: "#8b949e" }}>
+        <div role="status" aria-live="polite" style={{ padding: 12, fontSize: 12, color: "#8b949e" }}>
           {stale ? "Análisis anterior caducado; esperando el snapshot actual..."
             : "Calculando indicadores del snapshot actual..."}
         </div>
@@ -383,7 +568,7 @@ export function AnalysisPanel({ candles, symbol, loading, dataSource, interval }
           )}
         </>
       ) : (
-        <div style={{ padding: 12, fontSize: 12, color: "#8b949e" }}>
+        <div role="status" aria-live="polite" style={{ padding: 12, fontSize: 12, color: "#8b949e" }}>
           Sin datos suficientes para análisis (mínimo 50 velas)
         </div>
       )}

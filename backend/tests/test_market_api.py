@@ -205,6 +205,7 @@ def test_engine_history_preserves_symbol_interval_and_source(client, monkeypatch
     assert status["interval"] == "15m"
 
 
+
 def test_candles_range_is_inclusive_exclusive_and_complete(client, monkeypatch):
     engine = FakeMarketEngine()
     monkeypatch.setattr(market_api, "_market_engine", engine)

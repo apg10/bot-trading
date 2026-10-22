@@ -27,6 +27,7 @@ class StartMarketRequest(BaseModel):
     environment: Environment = Environment.PAPER
 
 
+
 class MarketStatusResponse(BaseModel):
     schema_version: Literal["market_transport.v1"] = MARKET_TRANSPORT_VERSION
     stream_id: str
@@ -182,7 +183,7 @@ async def get_market_status(symbol: str = "BTC/USDT") -> MarketStatusResponse:
                                 reconnecting=s.reconnecting,
                                 closed_candles_count=s.closed_candles_count,
                                 last_bar_open_time=s.last_bar_open_time,
-                                **{k: v for k, v in _engine_metadata(engine).items() if k != "symbol"})
+                                 **{k: v for k, v in _engine_metadata(engine).items() if k != "symbol"})
 
 
 @router.get("/candles", response_model=CandleHistoryResponse)
@@ -282,7 +283,12 @@ async def market_websocket(websocket: WebSocket):
     # descartan velas silenciosamente ni se frena la recepción de Binance.
     outgoing: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=128)
     overflow = asyncio.Event()
+    # Keep the engine method/callback pairs as well as the optional remover
+    # returned by adapters.  Calling the engine's ``off_*`` method directly
+    # makes disconnect cleanup deterministic for both the native engine and
+    # test/integration adapters whose ``on_*`` methods do not return a remover.
     removers = []
+    handlers_removed = False
 
     def enqueue(message: dict[str, Any]) -> None:
         if overflow.is_set():
@@ -382,6 +388,10 @@ async def market_websocket(websocket: WebSocket):
                         "type": "snapshot",
                         **_transport_metadata(engine),
                         "candles": current[-500:],
+                        "complete": bool(
+                            engine is not None
+                            and getattr(getattr(engine, "state", None), "complete", False)
+                        ),
                     })
 
             elif msg_type == "unsubscribe":
@@ -416,9 +426,9 @@ async def market_websocket(websocket: WebSocket):
             ):
                 unregister = getattr(engine, register)(callback)
                 if callable(unregister):
-                    removers.append(unregister)
+                    removers.append((remove, callback, unregister))
                 elif hasattr(engine, remove):
-                    removers.append(lambda name=remove, cb=callback: getattr(engine, name)(cb))
+                    removers.append((remove, callback, None))
         tasks = [asyncio.create_task(receive()), asyncio.create_task(send()),
                  asyncio.create_task(overflow.wait())]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -437,8 +447,13 @@ async def market_websocket(websocket: WebSocket):
     finally:
         with anyio.CancelScope(shield=True):
             subscriptions.clear()
-            for unregister in removers:
-                unregister()
+            if not handlers_removed:
+                handlers_removed = True
+                for remove, callback, unregister in removers:
+                    if hasattr(engine, remove):
+                        getattr(engine, remove)(callback)
+                    elif unregister is not None:
+                        unregister()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

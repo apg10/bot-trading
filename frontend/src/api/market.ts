@@ -3,6 +3,23 @@
 
 import type { CandleData, CandleHistoryResponse, MarketStatus } from "../types/market"
 
+export const ENGINE_INTERVALS = [
+  "1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h",
+  "8h", "12h", "1d", "3d", "1w",
+] as const
+
+export type EngineInterval = typeof ENGINE_INTERVALS[number]
+
+export interface EngineContext {
+  symbol: string
+  interval: string
+  stream_id: string
+}
+
+export interface ReconfigureResponse extends EngineContext {
+  status: "reconfiguring" | "ok"
+}
+
 // ── Resolución común de URLs ──────────────────────────────────────────────────
 
 export function getApiUrl(path: string): string {
@@ -59,6 +76,52 @@ export async function getCandles(
     || (data.schema_version !== undefined && data.schema_version !== "market_transport.v1")
   ) {
     throw new Error("Histórico sin procedencia válida o con contrato incompatible")
+  }
+  return data
+}
+
+export async function reconfigure(
+  symbol: string,
+  interval: string,
+): Promise<ReconfigureResponse> {
+  const resp = await fetch(getApiUrl("/api/market/reconfigure"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ symbol, interval }),
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json() as Partial<ReconfigureResponse>
+  if (
+    !data || typeof data.symbol !== "string" || typeof data.interval !== "string"
+    || typeof data.stream_id !== "string" || !data.stream_id
+    || (data.status !== "reconfiguring" && data.status !== "ok")
+  ) throw new Error("Respuesta de reconfiguración incompatible")
+  return data as ReconfigureResponse
+}
+
+// ── Capacidades del backend ──────────────────────────────────────────────────
+
+export interface CapabilitiesResponse {
+  schema_version: string
+  environment: "paper" | "exchange_demo"
+  runtime_health_checked: boolean
+  market_data_supported: boolean
+  technical_analysis_supported: boolean
+  ai_scenarios_supported: boolean
+  original_method_supported: boolean
+  execution_available: boolean
+  portfolio_available: boolean
+  paper_simulation_available: boolean
+  exchange_demo_execution_available: boolean
+  live_execution_available: boolean
+}
+
+export async function getCapabilities(): Promise<CapabilitiesResponse> {
+  const resp = await fetch(getApiUrl("/api/capabilities"))
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json() as CapabilitiesResponse
+  if (data.schema_version !== "backend_capabilities.v1") {
+    throw new Error("Capabilities con versión de contrato desconocida")
   }
   return data
 }

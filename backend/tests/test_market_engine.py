@@ -490,3 +490,34 @@ def test_normal_stream_end_does_not_claim_connected(fake_clients):
         assert fake_clients[0].instances[0].close_count == 1
         assert asyncio.all_tasks() == {asyncio.current_task()}
     asyncio.run(scenario())
+
+
+def test_reconfigure_serializes_in_place_and_replaces_stream_buffer(fake_clients):
+    async def scenario():
+        engine = MarketEngine(BinanceConfig())
+        task, initial_ws = await _start(engine, fake_clients[1])
+        initial_stream = engine.stream_id
+        try:
+            first, second = await asyncio.gather(
+                engine.reconfigure("ETH/USDT", "5m"),
+                engine.reconfigure("SOL/USDT", "15m"),
+            )
+            assert first["stream_id"] != initial_stream
+            assert second["stream_id"] != first["stream_id"]
+            assert engine.config.kline_interval == "15m"
+            assert engine.state.symbol == "SOL/USDT"
+            assert engine.closed_candles == []
+            assert len(fake_clients[1].instances) == 3
+            assert initial_ws.stop_count == 1
+        finally:
+            await _stop(engine, task)
+    asyncio.run(scenario())
+
+
+def test_reconfigure_invalid_interval_preserves_original_config(fake_clients):
+    async def scenario():
+        engine = MarketEngine(BinanceConfig(kline_interval="1m"))
+        with pytest.raises(ValueError):
+            await engine.reconfigure("BTC/USDT", "7m")
+        assert engine.config.kline_interval == "1m"
+    asyncio.run(scenario())

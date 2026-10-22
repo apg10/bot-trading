@@ -42,6 +42,8 @@ Schema versions:
     v13 — adds explicit PAPER lifecycle tables.
     v14 — extends lifecycle checks for STOPPED, STOP, and CLOSE.
     v15 — adds immutable lifecycle reconciliation reports and RECONCILE events.
+     v16 — adds the singleton ui_preferences payload table and its optimistic
+         concurrency revision.
 """
 
 from __future__ import annotations
@@ -166,7 +168,7 @@ def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, res
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 15
+_SCHEMA_VERSION = 16
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -405,6 +407,10 @@ class _PaperSellAccountingRecordV1(BaseModel):
 
 class StoreClosedError(RuntimeError):
     """Raised when an operation is attempted on a closed store."""
+
+
+class UIPreferencesConflictError(ValueError):
+    """The UI preference write was based on a stale revision."""
 
 
 class ConfigConflictError(ValueError):
@@ -683,6 +689,7 @@ _SCHEMA_V13_TABLES = _SCHEMA_V12_TABLES | {
 }
 _SCHEMA_V14_TABLES = _SCHEMA_V13_TABLES
 _SCHEMA_V15_TABLES = _SCHEMA_V14_TABLES | {"paper_lifecycle_reconciliations"}
+_SCHEMA_V16_TABLES = _SCHEMA_V15_TABLES | {"ui_preferences"}
 
 _PAPER_FILL_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS paper_fills (
@@ -847,6 +854,17 @@ _PAPER_LIFECYCLE_DDL_STATEMENTS = (
         account_id TEXT NOT NULL,
         paper_session_id TEXT NOT NULL,
         report_json TEXT NOT NULL
+    )""",
+)
+
+_UI_PREFERENCES_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS ui_preferences (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        preferences TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )""",
 )
 
@@ -1941,6 +1959,88 @@ class SQLiteStore:
         return await self._read(
             lambda conn: self._load_paper_fill_evaluation_inner(conn, evaluation_id)
         )
+
+    async def save_ui_preferences(self, raw_text: str, expected_revision: int) -> int:
+        """Persist preferences only when *expected_revision* is current.
+
+        The update and revision increment are one SQLite statement, so a stale
+        request cannot replace a newer document.  An empty store accepts the
+        initial revision baseline (zero, or one for schema-baseline clients).
+        """
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(raw_text, str):
+            raise TypeError("raw_text must be a string")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise TypeError("expected_revision must be an integer")
+        if expected_revision < 0:
+            raise ValueError("expected_revision must be non-negative")
+        return await self._write(
+            lambda conn: self._save_ui_preferences_inner(
+                conn, raw_text, expected_revision
+            )
+        )
+
+    async def get_ui_preferences(self) -> dict[str, Any] | None:
+        """Return the stored document, revision, version, and timestamps."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        return await self._read(self._get_ui_preferences_inner)
+
+    @staticmethod
+    async def _save_ui_preferences_inner(
+        conn: aiosqlite.Connection, raw_text: str, expected_revision: int
+    ) -> int:
+        cursor = await conn.execute(
+            "UPDATE ui_preferences "
+            "SET preferences = ?, revision = revision + 1, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE id = 1 AND revision = ? "
+            "RETURNING revision",
+            (raw_text, expected_revision),
+        )
+        row = await cursor.fetchone()
+
+        # There is no row to update on the first save.  Treat revision zero as
+        # the normal empty-store revision.  Revision one is also accepted for
+        # clients that use the schema's initial revision as their baseline.
+        if row is None and expected_revision in (0, 1):
+            new_revision = expected_revision + 1
+            cursor = await conn.execute(
+                "INSERT INTO ui_preferences "
+                "(id, preferences, revision, version, created_at, updated_at) "
+                "SELECT 1, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+                "WHERE NOT EXISTS (SELECT 1 FROM ui_preferences WHERE id = 1) "
+                "RETURNING revision",
+                (raw_text, new_revision),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise UIPreferencesConflictError("UI_PREFERENCES_CONFLICT")
+        return int(row[0])
+
+    @staticmethod
+    async def _get_ui_preferences_inner(
+        conn: aiosqlite.Connection,
+    ) -> dict[str, Any] | None:
+        cursor = await conn.execute(
+            "SELECT preferences, revision, version, created_at, updated_at "
+            "FROM ui_preferences WHERE id = 1"
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "preferences": row[0],
+            "revision": row[1],
+            "version": row[2],
+            "created_at": row[3],
+            "updated_at": row[4],
+        }
 
     async def _write(
         self, fn, *args: Any, _fill_commit_recovery: bool = False
@@ -5271,29 +5371,71 @@ class SQLiteStore:
 
     @staticmethod
     async def _initialize_inner(conn: aiosqlite.Connection) -> None:
-        """Create v9 directly or atomically migrate the accepted schema path."""
+        """Create the current schema or atomically migrate the accepted path."""
         cursor = await conn.execute("PRAGMA user_version")
         row = await cursor.fetchone()
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0 through 14 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0 through 15 or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         table_names = {row[0] for row in await cursor.fetchall()}
 
-        # Already at v15 — just verify completeness.
-        if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V15_TABLES <= table_names:
-                raise SchemaVersionMismatchError(
-                    "schema version is 15 but required tables are missing"
+        async def create_ui_preferences_table() -> None:
+            for statement in _UI_PREFERENCES_DDL_STATEMENTS:
+                await conn.execute(statement)
+
+            # Keep already-created v16 databases forward compatible.  The
+            # revision column is the important part of the v15→v16 contract;
+            # the timestamp columns are also repaired for databases created
+            # by the original v16 DDL.
+            cursor = await conn.execute("PRAGMA table_info(ui_preferences)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if "revision" not in columns:
+                await conn.execute(
+                    "ALTER TABLE ui_preferences "
+                    "ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
                 )
+            if "version" not in columns:
+                await conn.execute(
+                    "ALTER TABLE ui_preferences "
+                    "ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+                )
+            if "created_at" not in columns:
+                await conn.execute(
+                    "ALTER TABLE ui_preferences "
+                    "ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+                )
+            if "updated_at" not in columns:
+                await conn.execute(
+                    "ALTER TABLE ui_preferences "
+                    "ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+                )
+
+        # Already at v16 — just verify completeness.
+        if version == _SCHEMA_VERSION:
+            if not _SCHEMA_V16_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 16 but required tables are missing"
+                )
+            await create_ui_preferences_table()
             return
 
-        # v14 → v15: rebuild the event table so RECONCILE is enforced by its
+        # v15 → v16: add the singleton UI preference payload table.
+        if version == 15:
+            if not _SCHEMA_V15_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 15 but required v15 tables are missing"
+                )
+            await create_ui_preferences_table()
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            return
+
+        # v14 → v16: rebuild the event table and add UI preferences so RECONCILE is enforced by its
         # CHECK constraint, preserving every historical event row atomically.
         if version == 14:
             if not _SCHEMA_V14_TABLES <= table_names:
@@ -5322,10 +5464,11 @@ class SQLiteStore:
                 "ALTER TABLE paper_lifecycle_events_v15_new RENAME TO paper_lifecycle_events"
             )
             await conn.execute(_PAPER_LIFECYCLE_DDL_STATEMENTS[2])
+            await create_ui_preferences_table()
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v13 → v15: rebuild both lifecycle tables so SQLite enforces the new
+        # v13 → v16: rebuild both lifecycle tables so SQLite enforces the new
         # STOPPED/CLOSE contracts.  This remains inside the caller's write
         # transaction; any failed DDL or copy therefore rolls back the old
         # tables, their rows, and user_version together.
@@ -5381,6 +5524,7 @@ class SQLiteStore:
                 "RENAME TO paper_lifecycle_events"
             )
             await conn.execute(_PAPER_LIFECYCLE_DDL_STATEMENTS[2])
+            await create_ui_preferences_table()
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
@@ -5388,6 +5532,7 @@ class SQLiteStore:
         # inserted here: initialization is an explicit caller operation.
         for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
             await conn.execute(statement)
+        await create_ui_preferences_table()
 
         if version == 12:
             if not _SCHEMA_V12_BASE_TABLES <= table_names:
@@ -5669,7 +5814,7 @@ class SQLiteStore:
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v0 (new database): initialise directly at v12.
+        # v0 (new database): initialise directly at the current schema.
         for statement in _SCHEMA_V1_STATEMENTS:
             await conn.execute(statement)
         for statement in _SCHEMA_V2_STATEMENTS:

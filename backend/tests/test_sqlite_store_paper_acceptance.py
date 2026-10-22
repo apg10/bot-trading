@@ -40,7 +40,7 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceScopeError,
     PaperOrderAcceptanceStateError,
     SQLiteStore,
-    _SCHEMA_V15_TABLES,
+    _SCHEMA_V16_TABLES,
     _SCHEMA_V8_TABLES,
 )
 
@@ -795,12 +795,12 @@ def test_direct_v8_to_v12_migration_preserves_previous_paper_slices(
     store = SQLiteStore(db)
 
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V15_TABLES
+    assert _table_names(db) == _SCHEMA_V16_TABLES
     assert _run(store.load_paper_order(order.order_id)) == order
     assert _run(store.load_paper_account_opening(opening.account_id)) == opening
     assert _run(store.load_paper_reservation(order.order_id)) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     assert conn.execute("SELECT COUNT(*) FROM paper_order_acceptances").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_reservations").fetchone()[0] == 0
     conn.close()
@@ -823,7 +823,9 @@ def test_v8_to_v12_migration_rolls_back_on_v9_ddl_failure_and_version(
     with pytest.raises(sqlite3.OperationalError):
         _run(store.initialize())
 
-    assert _table_names(db) == _SCHEMA_V8_TABLES
+    # The v8 fixture is carved out of a v16 database, so rollback preserves
+    # the pre-existing v16 UI-preferences table as well as the v8 tables.
+    assert _table_names(db) == _SCHEMA_V8_TABLES | {"ui_preferences"}
     conn = sqlite3.connect(str(db))
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     stored_order = conn.execute(

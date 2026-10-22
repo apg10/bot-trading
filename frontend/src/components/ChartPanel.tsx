@@ -1,8 +1,14 @@
 // Panel de gráfico con velas (Lightweight Charts) + indicadores overlay.
 
 import { useEffect, useRef } from "react"
-import { createChart, ColorType, CandlestickSeries, type IChartApi } from "lightweight-charts"
-import type { CandlestickData, ISeriesApi, UTCTimestamp } from "lightweight-charts"
+import {
+  createChart,
+  ColorType,
+  CandlestickSeries,
+  HistogramSeries,
+  type IChartApi,
+} from "lightweight-charts"
+import type { CandlestickData, HistogramData, ISeriesApi, UTCTimestamp } from "lightweight-charts"
 import { MAX_CANDLES } from "../market/candle_store"
 import type { CandleData, MarketDataSource } from "../types/market"
 
@@ -10,23 +16,34 @@ interface ChartPanelProps {
   candles: CandleData[]
   symbol: string
   loading: boolean
+  error?: string | null
   wsConnected: boolean
   dataSource: MarketDataSource
   interval: string | null
 }
 
 type ChartBar = CandlestickData<UTCTimestamp>
+type VolumeBar = HistogramData<UTCTimestamp>
 
 function sameBar(a: ChartBar, b: ChartBar): boolean {
   return a.time === b.time && a.open === b.open && a.high === b.high
     && a.low === b.low && a.close === b.close
 }
 
-export function ChartPanel({ candles, symbol, loading, wsConnected, dataSource, interval }: ChartPanelProps) {
+function sameVolume(a: VolumeBar, b: VolumeBar): boolean {
+  return a.time === b.time && a.value === b.value
+}
+
+export function ChartPanel({ candles, symbol, loading, error, wsConnected, dataSource, interval }: ChartPanelProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null)
-  const plottedRef = useRef<{ context: string | null; data: ChartBar[] }>({ context: null, data: [] })
+  const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null)
+  const plottedRef = useRef<{
+    context: string | null
+    candles: ChartBar[]
+    volumes: VolumeBar[]
+  }>({ context: null, candles: [], volumes: [] })
 
   // Inicializar gráfico
   useEffect(() => {
@@ -80,6 +97,18 @@ export function ChartPanel({ candles, symbol, loading, wsConnected, dataSource, 
 
     candleSeriesRef.current = candleSeries
 
+    // El volumen usa una escala independiente, reservada para la franja
+    // inferior del gráfico. No se calcula ningún indicador adicional.
+    const volumeSeries = chart.addSeries(HistogramSeries, {
+      color: "#3b82f6",
+      priceFormat: { type: "volume" },
+      priceScaleId: "volume",
+    })
+    volumeSeriesRef.current = volumeSeries
+    chart.priceScale("volume").applyOptions({
+      scaleMargins: { top: 0.8, bottom: 0 },
+    })
+
     // Resize automático
     const resizeObserver = new ResizeObserver(() => {
       chart.applyOptions({
@@ -97,14 +126,16 @@ export function ChartPanel({ candles, symbol, loading, wsConnected, dataSource, 
       chart.remove()
       chartRef.current = null
       candleSeriesRef.current = null
-      plottedRef.current = { context: null, data: [] }
+      volumeSeriesRef.current = null
+      plottedRef.current = { context: null, candles: [], volumes: [] }
     }
   }, [])
 
   // Actualizar datos del gráfico
   useEffect(() => {
-    const series = candleSeriesRef.current
-    if (!series) return
+    const candleSeries = candleSeriesRef.current
+    const volumeSeries = volumeSeriesRef.current
+    if (!candleSeries || !volumeSeries) return
 
     const context = JSON.stringify([symbol, interval, dataSource])
     const data: ChartBar[] = candles.slice(-MAX_CANDLES).map(c => ({
@@ -114,29 +145,41 @@ export function ChartPanel({ candles, symbol, loading, wsConnected, dataSource, 
       low: c.low,
       close: c.close,
     }))
+    const volumes: VolumeBar[] = candles.slice(-MAX_CANDLES).map(c => ({
+      time: (c.open_time / 1000) as UTCTimestamp,
+      value: c.volume,
+    }))
 
     const previous = plottedRef.current
-    const lastIndex = previous.data.length - 1
+    const lastIndex = previous.candles.length - 1
     // update() solo modifica el último punto o añade puntos posteriores. Si se
     // recorta la izquierda o cambia un punto histórico, reconstruir para no
     // acumular barras fuera de la ventana acotada de C10.
     const compatible = previous.context === context && lastIndex >= 0
-      && data.length >= previous.data.length
-      && data[lastIndex]?.time === previous.data[lastIndex].time
-      && previous.data.slice(0, lastIndex).every((bar, index) => sameBar(bar, data[index]))
+      && data.length >= previous.candles.length
+      && data[lastIndex]?.time === previous.candles[lastIndex].time
+      && volumes[lastIndex]?.time === previous.volumes[lastIndex].time
+      && previous.candles.slice(0, lastIndex).every((bar, index) => sameBar(bar, data[index]))
+      && previous.volumes.slice(0, lastIndex).every((bar, index) => sameVolume(bar, volumes[index]))
 
     let rebuilt = false
     if (compatible) {
-      if (!sameBar(previous.data[lastIndex], data[lastIndex])) series.update(data[lastIndex])
-      for (let index = previous.data.length; index < data.length; index++) series.update(data[index])
+      if (!sameBar(previous.candles[lastIndex], data[lastIndex])) candleSeries.update(data[lastIndex])
+      if (!sameVolume(previous.volumes[lastIndex], volumes[lastIndex])) volumeSeries.update(volumes[lastIndex])
+      for (let index = previous.candles.length; index < data.length; index++) {
+        candleSeries.update(data[index])
+        volumeSeries.update(volumes[index])
+      }
     } else if (
-      previous.context !== context || previous.data.length !== data.length
-      || previous.data.some((bar, index) => !sameBar(bar, data[index]))
+      previous.context !== context || previous.candles.length !== data.length
+      || previous.candles.some((bar, index) => !sameBar(bar, data[index]))
+      || previous.volumes.some((bar, index) => !sameVolume(bar, volumes[index]))
     ) {
-      series.setData(data)
+      candleSeries.setData(data)
+      volumeSeries.setData(volumes)
       rebuilt = true
     }
-    plottedRef.current = { context, data }
+    plottedRef.current = { context, candles: data, volumes }
 
     // Ajustar vista a los datos (timeScale es del chart, no de la serie)
     const chart = chartRef.current
@@ -158,7 +201,16 @@ export function ChartPanel({ candles, symbol, loading, wsConnected, dataSource, 
       ? marketConnected ? "Motor conectado · frescura no validada" : "Datos del motor · desconectado"
       : "Procedencia sin verificar"
   const intervalLabel = interval && interval !== "unknown" ? interval : "intervalo sin verificar"
+  const chartLabel = `Gráfico de velas para ${symbol}, intervalo ${intervalLabel}`
   const hasData = !loading && candles.length > 0
+
+  // Lightweight Charts creates the canvas itself; keep its accessible name in
+  // sync when the selected symbol or interval changes.
+  useEffect(() => {
+    const container = chartContainerRef.current
+    if (!container || typeof container.querySelector !== "function") return
+    container.querySelector("canvas")?.setAttribute("aria-label", chartLabel)
+  }, [chartLabel])
 
   return (
     <div className="chart-panel" style={{ position: "relative" }}>
@@ -189,29 +241,43 @@ export function ChartPanel({ candles, symbol, loading, wsConnected, dataSource, 
         </span>
       </div>
 
-      {/* Área del gráfico — siempre montado para evitar recrear el gráfico */}
-      <div className="chart-area">
-        <div ref={chartContainerRef} style={{ width: "100%", height: "100%" }} />
-        {!hasData && (
-          <div className="chart-placeholder" style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-          }}>
-            <span className="icon">{loading ? "⏳" : "📊"}</span>
-            <span>{loading ? "Cargando velas..." : "Sin datos"}</span>
-            {!wsConnected && (
-              <span style={{ color: "#f85149", fontSize: 12 }}>
-                Conexión de mercado no verificada
-              </span>
-            )}
+      <figure style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", margin: 0 }}>
+        <figcaption style={{ padding: "4px 16px", fontSize: 11, color: "#8b949e" }}>
+          {chartLabel}
+        </figcaption>
+        {/* Área del gráfico — siempre montado para evitar recrear el gráfico */}
+        <div
+          className="chart-area"
+          role="img"
+          aria-label={`${chartLabel}. ${hasData ? `${candles.length} velas disponibles.` : loading ? "Cargando datos." : "Sin datos disponibles."}`}
+        >
+          <div ref={chartContainerRef} aria-label={chartLabel} style={{ width: "100%", height: "100%" }} />
+          {!hasData && (
+            <div className="chart-placeholder" role={error ? "alert" : "status"} aria-live={error ? undefined : "polite"} style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+            }}>
+              <span className="icon">{loading ? "⏳" : "📊"}</span>
+              <span>{error ?? (loading ? "Cargando velas..." : "Sin datos")}</span>
+              {!wsConnected && (
+                <span style={{ color: "#f85149", fontSize: 12 }}>
+                  Conexión de mercado no verificada
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        {error && hasData && (
+          <div role="alert" style={{ padding: "4px 16px", color: "#f85149", fontSize: 12 }}>
+            Error de datos de mercado: {error}
           </div>
         )}
-      </div>
+      </figure>
 
       {/* Leyenda inferior: cantidad de velas + última actualización */}
       {hasData && (

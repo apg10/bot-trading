@@ -261,7 +261,7 @@ def test_v12_to_v14_migration_adds_empty_lifecycle_tables(tmp_path: Path) -> Non
     reopened = SQLiteStore(db)
     _run(reopened.initialize())
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     assert conn.execute("SELECT COUNT(*) FROM paper_lifecycle_states").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_lifecycle_events").fetchone()[0] == 0
     conn.close()

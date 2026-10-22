@@ -19,7 +19,7 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _SCHEMA_V9_TABLES,
     _SCHEMA_V10_TABLES,
-    _SCHEMA_V15_TABLES,
+    _SCHEMA_V16_TABLES,
 )
 
 # ── Fake MarketEngine that mimics the real interface without external calls ─────
@@ -86,7 +86,7 @@ def test_lifespan_store_initialized_with_user_version_10(
         conn = sqlite3.connect(str(db_path))
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 15
+        assert version == 16
 
 
 # ── 2. Normal shutdown: store closed and reference removed ──────────────────────
@@ -293,7 +293,7 @@ def test_reopen_preserves_data_no_duplicate_migration(
     # Verify the schema remains at current v12 after re-open.
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 15
+    assert version == 16
 
     # Tables should exist exactly once
     tables = {
@@ -301,7 +301,7 @@ def test_reopen_preserves_data_no_duplicate_migration(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V15_TABLES
+    assert tables == _SCHEMA_V16_TABLES
     conn.close()
 
     _run(store.close())
@@ -429,9 +429,41 @@ def _seed_v14_lifecycle_tables(db_path: Path) -> None:
     conn.close()
 
 
-def test_v14_to_v15_migration_adds_reconciliation_table_and_rebuilds_event_check(tmp_path: Path) -> None:
-    """Migration v14→v15 adds reconciliation table and rebuilds event CHECK."""
-    db = tmp_path / "v14-to-v15.db"
+def _seed_v15_lifecycle_tables(db_path: Path) -> None:
+    """Create a v15 database without the v16 UI preferences table."""
+    store = SQLiteStore(db_path)
+    _run(store.initialize())
+    _run(store.close())
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE ui_preferences")
+    conn.execute("PRAGMA user_version = 15")
+    conn.commit()
+    conn.close()
+
+
+def test_v15_to_v16_migration_adds_ui_preferences_table(tmp_path: Path) -> None:
+    """Migration v15→v16 adds the singleton UI preferences table."""
+    db = tmp_path / "v15-to-v16.db"
+    _seed_v15_lifecycle_tables(db)
+
+    _run(SQLiteStore(db).initialize())
+
+    conn = sqlite3.connect(str(db))
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert tables == _SCHEMA_V16_TABLES
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+    assert conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='ui_preferences'"
+    ).fetchone()[0] is not None
+    conn.close()
+
+
+def test_v14_to_v16_migration_adds_reconciliation_table_and_rebuilds_event_check(tmp_path: Path) -> None:
+    """Migration v14→v16 adds reconciliation/UI tables and rebuilds event CHECK."""
+    db = tmp_path / "v14-to-v16.db"
     _seed_v14_lifecycle_tables(db)
     store = SQLiteStore(db)
     _run(store.initialize())
@@ -440,9 +472,9 @@ def test_v14_to_v15_migration_adds_reconciliation_table_and_rebuilds_event_check
         for row in sqlite3.connect(str(db)).execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
-    } == _SCHEMA_V15_TABLES
+    } == _SCHEMA_V16_TABLES
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     event_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE name='paper_lifecycle_events'"
     ).fetchone()[0]
@@ -450,8 +482,8 @@ def test_v14_to_v15_migration_adds_reconciliation_table_and_rebuilds_event_check
     assert "'reconcile'" in event_sql
 
 
-def test_v14_to_v15_migration_preserves_lifecycle_rows(tmp_path: Path) -> None:
-    """Migration v14→v15 preserves all lifecycle state and event rows."""
+def test_v14_to_v16_migration_preserves_lifecycle_rows(tmp_path: Path) -> None:
+    """Migration v14→v16 preserves all lifecycle state and event rows."""
     db = tmp_path / "v14-preserve.db"
     _seed_v14_lifecycle_tables(db)
     _run(SQLiteStore(db).initialize())
@@ -469,11 +501,11 @@ def test_v14_to_v15_migration_preserves_lifecycle_rows(tmp_path: Path) -> None:
     assert event == ("pause-mig", "pause", "paused")
 
 
-def test_v14_to_v15_migration_rolls_back_atomically(
+def test_v14_to_v16_migration_rolls_back_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Failed v14→v15 migration rolls back tables, rows, and user_version."""
-    db = tmp_path / "v14-to-v15-rollback.db"
+    """Failed v14→v16 migration rolls back tables, rows, and user_version."""
+    db = tmp_path / "v14-to-v16-rollback.db"
     _seed_v14_lifecycle_tables(db)
     original_execute = sqlite_store_module.aiosqlite.Connection.execute
 
@@ -506,7 +538,7 @@ def test_v13_to_v14_migration_rebuilds_lifecycle_checks_and_preserves_rows(tmp_p
     store = sqlite_store_module.SQLiteStore(db)
     _run(store.initialize())
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     assert conn.execute(
         "SELECT account_id, paper_session_id, state, last_command_id, last_updated_ms "
         "FROM paper_lifecycle_states"
@@ -595,7 +627,7 @@ def test_multiple_lifespan_cycles_safe(tmp_path: Path, monkeypatch: pytest.Monke
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 15
+    assert version == 16
 
 
 # ── 10. Store is not accessible outside lifespan ───────────────────────────────

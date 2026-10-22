@@ -8,6 +8,7 @@ import {
 } from "../src/analysis/request_tracker"
 import { AnalysisPanel } from "../src/components/AnalysisPanel"
 import { ChartPanel } from "../src/components/ChartPanel"
+import { buildScenarioSnapshot, ScenarioApiError } from "../src/api/scenarios"
 import type { CandleData } from "../src/types/market"
 
 type TestNode = {
@@ -206,11 +207,14 @@ vi.mock("react/jsx-dev-runtime", () => ({ jsxDEV: reactHarness.jsx, Fragment: re
 
 const charts = vi.hoisted(() => {
   type Bar = { time: number; open: number; high: number; low: number; close: number }
+  type VolumeBar = { time: number; value: number }
   const instances: ReturnType<typeof makeChart>[] = []
   const CandlestickSeries = Symbol("C11.CandlestickSeries")
+  const HistogramSeries = Symbol("C11.HistogramSeries")
   function makeChart(container: unknown) {
     let removed = false
     let rows: Bar[] = []
+    let volumeRows: VolumeBar[] = []
     let range: { from: number; to: number } | null = null
     const operations: { kind: "setData" | "update"; data: Bar[] }[] = []
     const live = () => { if (removed) throw new Error("Trabajo sobre un gráfico eliminado") }
@@ -239,6 +243,25 @@ const charts = vi.hoisted(() => {
         operations.push({ kind: "update", data: [{ ...bar }] })
       }),
     }
+    const volumeSeries = {
+      setData: vi.fn((data: VolumeBar[]) => {
+        live()
+        validate(data as Bar[])
+        volumeRows = data.map(row => ({ ...row }))
+        operations.push({ kind: "setData", data: volumeRows as unknown as Bar[] })
+      }),
+      update: vi.fn((bar: VolumeBar) => {
+        live()
+        const last = volumeRows[volumeRows.length - 1]
+        if (last && bar.time < last.time) throw new Error("update no puede corregir un volumen histórico")
+        const next = volumeRows.map(row => ({ ...row }))
+        if (last?.time === bar.time) next[next.length - 1] = { ...bar }
+        else next.push({ ...bar })
+        validate(next as Bar[])
+        volumeRows = next
+        operations.push({ kind: "update", data: [bar] as unknown as Bar[] })
+      }),
+    }
     const scale = {
       getVisibleLogicalRange: vi.fn(() => { live(); return range }),
       fitContent: vi.fn(() => { live(); range = { from: 0, to: Math.max(0, rows.length - 1) } }),
@@ -246,9 +269,11 @@ const charts = vi.hoisted(() => {
     return {
       container,
       series,
+      volumeSeries,
       operations,
       get rows() { return rows },
-      addSeries: vi.fn(() => { live(); return series }),
+      addSeries: vi.fn((kind: unknown) => { live(); return kind === HistogramSeries ? volumeSeries : series }),
+      priceScale: vi.fn(() => ({ applyOptions: vi.fn(() => { live() }) })),
       timeScale: vi.fn(() => { live(); return scale }),
       applyOptions: vi.fn((_options: unknown) => { live() }),
       remove: vi.fn(() => {
@@ -260,6 +285,7 @@ const charts = vi.hoisted(() => {
   return {
     instances,
     CandlestickSeries,
+    HistogramSeries,
     createChart: vi.fn((container: unknown, _options: unknown) => {
       const chart = makeChart(container)
       instances.push(chart)
@@ -275,6 +301,7 @@ const charts = vi.hoisted(() => {
 vi.mock("lightweight-charts", () => ({
   createChart: charts.createChart,
   CandlestickSeries: charts.CandlestickSeries,
+  HistogramSeries: charts.HistogramSeries,
   ColorType: { Solid: "solid" },
 }))
 
@@ -446,9 +473,15 @@ function bars(rows: readonly CandleData[]) {
   return rows.slice(-200).map(row => ({ time: row.open_time / 1000, open: row.open, high: row.high, low: row.low, close: row.close }))
 }
 
+function volumeBars(rows: readonly CandleData[]) {
+  return rows.slice(-200).map(row => ({ time: row.open_time / 1000, value: row.volume }))
+}
+
 function clearChartWork() {
   chart().series.setData.mockClear()
   chart().series.update.mockClear()
+  chart().volumeSeries.setData.mockClear()
+  chart().volumeSeries.update.mockClear()
   chart().operations.length = 0
 }
 
@@ -623,6 +656,12 @@ describe("C11 — AnalysisRequestTracker puro", () => {
     expect(tracker.isCurrent(a1, "A")).toBe(false)
     expect(tracker.isCurrent(b, "B")).toBe(false)
     expect(tracker.isCurrent(a2, "A")).toBe(true)
+  })
+
+  it("N02 rechaza intervalos incompatibles sin construir contexto sintético", () => {
+    expect(() => buildScenarioSnapshot({
+      candles: [], status: null, symbol: "BTC/USDT", interval: "5m", dataSource: "market_engine",
+    })).toThrowError(expect.objectContaining({ code: "incompatible_interval" }) as ScenarioApiError)
   })
 })
 
@@ -965,8 +1004,12 @@ describe("C11 — ChartPanel real con Lightweight Charts, ResizeObserver y eleme
     const container = reactHarness.attachedElements[0]
     expect(container).toBeDefined()
     expect(current.container).toBe(container)
-    expect(current.addSeries).toHaveBeenCalledTimes(1)
+    expect(current.addSeries).toHaveBeenCalledTimes(2)
     expect(current.addSeries).toHaveBeenCalledWith(charts.CandlestickSeries, expect.any(Object))
+    expect(current.addSeries).toHaveBeenCalledWith(charts.HistogramSeries, expect.objectContaining({
+      priceScaleId: "volume",
+      priceFormat: { type: "volume" },
+    }))
     expect(FakeResizeObserver.instances).toHaveLength(1)
     const observer = FakeResizeObserver.instances[0]!
     expect(observer.observe).toHaveBeenCalledTimes(1)
@@ -978,7 +1021,7 @@ describe("C11 — ChartPanel real con Lightweight Charts, ResizeObserver y eleme
     expect(reactHarness.attachedElements).toHaveLength(1)
     expect(reactHarness.attachedElements[0]).toBe(container)
     expect(charts.createChart).toHaveBeenCalledTimes(1)
-    expect(current.addSeries).toHaveBeenCalledTimes(1)
+    expect(current.addSeries).toHaveBeenCalledTimes(2)
     expect(observer.disconnect).not.toHaveBeenCalled()
     expect(current.remove).not.toHaveBeenCalled()
     reactHarness.unmount()
@@ -1025,6 +1068,27 @@ describe("C11 — ChartPanel real con Lightweight Charts, ResizeObserver y eleme
     expect(charts.createChart).toHaveBeenCalledTimes(1)
   })
 
+  it("crea una barra de volumen por vela y actualiza OHLC y volumen de forma independiente", () => {
+    const rows = candles()
+    renderChart({ candles: rows })
+    expect(chart().volumeSeries.setData.mock.calls).toEqual([[volumeBars(rows)]])
+    clearChartWork()
+
+    renderChart({ candles: changed(rows, 49, { volume: 42 }) })
+    expect(chart().series.setData).not.toHaveBeenCalled()
+    expect(chart().series.update).not.toHaveBeenCalled()
+    expect(chart().volumeSeries.setData).not.toHaveBeenCalled()
+    expect(chart().volumeSeries.update.mock.calls).toEqual([[volumeBars(changed(rows, 49, { volume: 42 }))[49]]])
+
+    clearChartWork()
+    const corrected = changed(rows, 20, { volume: 99 })
+    renderChart({ candles: corrected })
+    expect(chart().series.setData.mock.calls).toEqual([[bars(corrected)]])
+    expect(chart().volumeSeries.setData.mock.calls).toEqual([[volumeBars(corrected)]])
+    expect(chart().series.update).not.toHaveBeenCalled()
+    expect(chart().volumeSeries.update).not.toHaveBeenCalled()
+  })
+
   it.each(fields.slice(2, 6))("OHLC último (%s) con mismo tiempo/prefijo usa solo update", (_field, patch) => {
     const rows = candles()
     renderChart({ candles: rows })
@@ -1061,7 +1125,7 @@ describe("C11 — ChartPanel real con Lightweight Charts, ResizeObserver y eleme
     expect(chart().rows).toEqual(bars(next))
   })
 
-  it("clones, volumen/cierre/close_time solos no hacen trabajo; preservan comparación para el siguiente OHLC", () => {
+  it("clones y metadatos se comparan; el volumen histórico reconstruye ambas series", () => {
     const rows = candles()
     renderChart({ candles: rows })
     clearChartWork()
@@ -1070,9 +1134,13 @@ describe("C11 — ChartPanel real con Lightweight Charts, ResizeObserver y eleme
     const metadata = changed(changed(rows, 20, { volume: 99, is_closed: false }), 49,
       { volume: 20, is_closed: true, close_time: candle(49).close_time + 1000 })
     renderChart({ candles: metadata })
-    expectNoChartWork()
+    expect(chart().series.setData.mock.calls).toEqual([[bars(metadata)]])
+    expect(chart().volumeSeries.setData.mock.calls).toEqual([[volumeBars(metadata)]])
+    expect(chart().series.update).not.toHaveBeenCalled()
+    expect(chart().volumeSeries.update).not.toHaveBeenCalled()
     expect(chart().rows).toEqual(bars(rows))
     const next = changed(metadata, 49, { close: 115 })
+    clearChartWork()
     renderChart({ candles: next })
     expect(chart().series.update.mock.calls).toEqual([[bars(next)[49]]])
     expect(chart().series.setData).not.toHaveBeenCalled()

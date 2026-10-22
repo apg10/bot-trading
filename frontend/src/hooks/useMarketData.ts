@@ -43,11 +43,14 @@ interface UseMarketDataResult {
   error: string | null
   dataSource: MarketDataSource
   interval: string | null
+  streamId: string | null
   degraded: boolean
 }
 
 export function useMarketData(
   symbol: string = "BTC/USDT",
+  interval: string = "1m",
+  reconfiguring: boolean = false,
 ): UseMarketDataResult {
   const [candles, setCandles] = useState<CandleData[]>([])
   const [status, setStatus] = useState<MarketStatus | null>(null)
@@ -60,9 +63,17 @@ export function useMarketData(
   const [degraded, setDegraded] = useState(false)
 
   const wsRef = useRef<MarketWebSocket | null>(null)
+  // The engine is shared by all tabs.  The props identify the context this tab
+  // requested, but a transport status can announce a newer context before the
+  // parent has rendered that update.  Keep the observed context separately so
+  // events from that stream are not rejected during that hand-off.
+  const activeContextRef = useRef({ symbol, interval })
+  const [contextRevision, setContextRevision] = useState(0)
+  const requestedContextRef = useRef({ symbol, interval })
   const candleHistoryRef = useRef<CandleData[]>([])
   const transportRef = useRef<{ streamId: string; sequence: number } | null>(null)
   const streamEpochRef = useRef(0)
+  const contextChangePendingRef = useRef(false)
   const snapshotReceivedRef = useRef(false)
   // Identifica también la petición de recuperación que está en vuelo.  El
   // epoch invalida recuperaciones de otro stream, mientras que este token
@@ -89,10 +100,46 @@ export function useMarketData(
     setWsConnected(false)
   }
 
+  function adoptContext(nextSymbol: string, nextInterval: string | null): void {
+    if (!nextSymbol) return
+    const current = activeContextRef.current
+    const intervalValue = nextInterval || current.interval
+    if (current.symbol === nextSymbol && current.interval === intervalValue) return
+    activeContextRef.current = { symbol: nextSymbol, interval: intervalValue }
+    setContextRevision(revision => revision + 1)
+  }
+
+  // A local selection still has to move the observed context.  This effect is
+  // intentionally separate from the transport effects: a status from another
+  // tab may have already moved activeContextRef while the prop is stale.
+  useEffect(() => {
+    const requested = requestedContextRef.current
+    requestedContextRef.current = { symbol, interval }
+    if (requested.symbol === symbol && requested.interval === interval) return
+    const active = activeContextRef.current
+    if (active.symbol !== symbol || active.interval !== interval) {
+      activeContextRef.current = { symbol, interval }
+    }
+  }, [symbol, interval])
+
   // Cargar histórico por HTTP
   useEffect(() => {
     let cancelled = false
     const initialStreamEpoch = streamEpochRef.current
+    const activeSymbol = activeContextRef.current.symbol
+    const activeInterval = activeContextRef.current.interval
+
+    if (reconfiguring) {
+      setLoading(true)
+      setError(null)
+      publishCandles([])
+      setStatus(null)
+      setWsConnected(false)
+      setDataSource("unknown")
+      setCandleInterval(activeInterval)
+      setDegraded(true)
+      return () => { cancelled = true }
+    }
 
     async function loadHistorical() {
       try {
@@ -109,7 +156,7 @@ export function useMarketData(
         setWsConnected(false)
         setDegraded(false)
 
-        const data = await getCandles(symbol, MAX_CANDLES)
+        const data = await getCandles(activeSymbol, MAX_CANDLES)
 
         if (!cancelled) {
           // El histórico inicial pertenece al stream que estaba activo al
@@ -161,17 +208,27 @@ export function useMarketData(
     return () => {
       cancelled = true
     }
-  }, [symbol])
+  }, [symbol, interval, reconfiguring, contextRevision])
 
   // Conectar WebSocket para streaming en vivo
   useEffect(() => {
     let cancelled = false
+
+    if (reconfiguring) {
+      wsRef.current?.disconnect()
+      wsRef.current = null
+      setSocketOpen(false)
+      setWsConnected(false)
+      return () => { cancelled = true }
+    }
+
     const ws = new MarketWebSocket()
     wsRef.current = ws
 
     function resetForStream(streamId: string): void {
       if (transportRef.current?.streamId === streamId) return
       streamEpochRef.current += 1
+      contextChangePendingRef.current = true
       recoveryTokenRef.current = null
       transportRef.current = { streamId, sequence: -1 }
       awaitingResyncRef.current = true
@@ -181,6 +238,7 @@ export function useMarketData(
       originRef.current = { dataSource: "unknown", interval: null }
       setDataSource("unknown")
       setCandleInterval(null)
+      setStatus(null)
       setDegraded(true)
     }
 
@@ -246,7 +304,8 @@ export function useMarketData(
       const end = current.length > 0
         ? current[current.length - 1].close_time + 1 : Math.max(Date.now(), start + 1)
       const params = new URLSearchParams({
-        symbol, limit: String(MAX_CANDLES), start_time: String(start), end_time: String(end),
+        symbol: activeContextRef.current.symbol, limit: String(MAX_CANDLES),
+        start_time: String(start), end_time: String(end),
       })
       const recoveryToken = Symbol("market-recovery")
       recoveryTokenRef.current = recoveryToken
@@ -266,7 +325,8 @@ export function useMarketData(
         if (
           !data || Array.isArray(data)
           || (data.schema_version !== undefined && data.schema_version !== MARKET_TRANSPORT_VERSION)
-          || data.symbol !== symbol || typeof data.interval !== "string" || !data.interval
+            || data.symbol !== activeContextRef.current.symbol
+            || typeof data.interval !== "string" || !data.interval
           || (data.data_source !== "TEST_ONLY" && data.data_source !== "market_engine")
           || !Array.isArray(data.candles)
         ) throw new Error("Respuesta de recuperación incompatible")
@@ -346,6 +406,9 @@ export function useMarketData(
           return
         }
         snapshotReceivedRef.current = true
+        if (typeof snapshotInterval === "string" && snapshotInterval) {
+          adoptContext(activeContextRef.current.symbol, snapshotInterval)
+        }
         publishCandles(next)
         awaitingResyncRef.current = !msg.complete
         originRef.current = {
@@ -386,12 +449,18 @@ export function useMarketData(
       // Actualizar status
       if (msg.type === "status") {
         const s = msg as unknown as MarketStatus
-        if (s.symbol !== symbol) return
+        // A status is emitted by the shared engine, not by this tab.  Once its
+        // stream envelope has been accepted it is authoritative, including
+        // when it announces the symbol selected in another tab.
+        if (typeof s.symbol !== "string" || !s.symbol) return
+        if (s.symbol !== activeContextRef.current.symbol && !contextChangePendingRef.current) return
+        adoptContext(s.symbol, typeof s.interval === "string" ? s.interval : null)
+        contextChangePendingRef.current = false
+        setStatus(s)
         if (s.data_source !== "market_engine" && s.data_source !== "unavailable") {
           setWsConnected(false)
           return
         }
-        setStatus(s)
         setWsConnected(ws.isOpen && s.data_source === "market_engine" && s.connected === true)
         return
       }
@@ -399,10 +468,16 @@ export function useMarketData(
       // Actualizar candle actual o agregar nueva barra
       if (msg.type === "bar_updated" || msg.type === "bar_closed") {
         const update = msg as unknown as MarketCandleEvent
-        if (
-          update.symbol !== symbol || update.data_source !== "market_engine"
+        if (update.data_source !== "market_engine"
           || typeof update.interval !== "string" || !update.interval
         ) return
+        if (update.symbol !== activeContextRef.current.symbol) {
+          // A bar can be the first context-bearing event after a stream switch
+          // (for example while the status packet is in flight).
+          if (!contextChangePendingRef.current) return
+          adoptContext(update.symbol, update.interval)
+        }
+        contextChangePendingRef.current = false
         if (
           originRef.current.dataSource === "market_engine"
           && !compatibleInterval(originRef.current.interval, update.interval)
@@ -436,7 +511,7 @@ export function useMarketData(
       // Notificar gaps
       if (msg.type === "gap") {
         if (
-          msg.symbol !== symbol || msg.data_source !== "market_engine"
+          msg.symbol !== activeContextRef.current.symbol || msg.data_source !== "market_engine"
           || typeof msg.interval !== "string" || !msg.interval
           || typeof msg.gap_ms !== "number" || !Number.isFinite(msg.gap_ms) || msg.gap_ms <= 0
         ) return
@@ -461,7 +536,7 @@ export function useMarketData(
       setStatus(null)
       setWsConnected(false)
     }
-  }, [symbol])
+  }, [symbol, interval, reconfiguring, contextRevision])
 
   // Ping cada 30s para mantener conexión
   useEffect(() => {
@@ -474,6 +549,8 @@ export function useMarketData(
   return {
     candles, status,
     wsConnected: dataSource === "market_engine" && socketOpen && wsConnected && !degraded,
-    loading, error, dataSource, interval: candleInterval, degraded,
+    loading, error, dataSource, interval: candleInterval,
+    streamId: transportRef.current?.streamId ?? status?.stream_id ?? null,
+    degraded,
   }
 }

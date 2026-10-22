@@ -21,6 +21,7 @@ from .analysis import router as analysis_router
 from .bot import router as bot_router
 from .capabilities import router as capabilities_router
 from .paper import router as paper_router
+from .preferences import router as preferences_router
 
 
 # ── Enum de acciones válidas ───────────────────────────────────────────────────
@@ -128,6 +129,7 @@ app.include_router(analysis_router)
 app.include_router(bot_router)
 app.include_router(capabilities_router)
 app.include_router(paper_router)
+app.include_router(preferences_router)
 
 
 @app.get("/health")

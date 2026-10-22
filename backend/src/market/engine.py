@@ -11,11 +11,17 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
-from .binance_client import BinanceHTTPClient, BinanceWSClient, BinanceConfig
+from .binance_client import BinanceHTTPClient, BinanceWSClient, BinanceConfig, _normalize_symbol
 from .candle_builder import CandleBuilder, BarEvent, BarEventType
 
 logger = logging.getLogger(__name__)
 Handler = Callable[[Any], Awaitable[None]]
+
+# The engine and the reconfiguration API intentionally share one allow-list.
+ENGINE_INTERVALS = frozenset({
+    "1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h",
+    "8h", "12h", "1d", "3d", "1w",
+})
 
 
 @dataclass
@@ -89,6 +95,7 @@ class MarketEngine:
         self._event_queue: Optional[asyncio.Queue[BarEvent | dict[str, Any]]] = None
         self._dispatch_task: Optional[asyncio.Task[None]] = None
         self._stream_task: Optional[asyncio.Task[None]] = None
+        self._stream_supervisor: Optional[asyncio.Task[None]] = None
 
         # Handlers de eventos del motor
         self._on_bar_closed: list[Handler] = []
@@ -145,7 +152,7 @@ class MarketEngine:
             raise ValueError("Intervalo no soportado por el constructor de duración fija")
         return fixed_intervals[interval]
 
-    async def start(self, symbol: str):
+    async def _start_locked(self, symbol: str) -> tuple[asyncio.Task[None], Any]:
         """Inicia y espera al streaming; stop() o cancelación liberan recursos.
 
         BinanceWSClient ya normaliza las klines. Una cola local serializa su
@@ -154,85 +161,89 @@ class MarketEngine:
         """
         interval_ms = self._interval_ms(self.config.kline_interval)
         self._max_age_ms = interval_ms + self._freshness_margin_ms
-        async with self._lifecycle_lock:
+        await self._stop()
+        self.started.clear()
+        self.stream_id = uuid.uuid4().hex
+        self.restart_count += 1
+        self._sequence = 0
+        self._state = MarketState(symbol=symbol, max_candle_age_ms=self._max_age_ms)
+        self._closed.clear()
+        self._stream_closed.clear()
+        self._coverage_start = self._coverage_end = None
+        self._pending_gaps.clear()
+        self._latest_message = None
+        self._recovery_verified = False
+        self._recovery_event.clear()
+        self._builder = CandleBuilder(symbol, interval_ms=interval_ms)
+        self._event_queue = queue = asyncio.Queue(maxsize=1024)
+        self._running = True
+        try:
+            self._http_client = BinanceHTTPClient(self.config)
+            self._ws_client = ws_client = BinanceWSClient(self.config)
+
+            def active() -> bool:
+                return self._running and self._ws_client is ws_client
+
+            def on_message(msg: dict[str, Any]) -> None:
+                if not active():
+                    return
+                try:
+                    candle = self._validated_candle(msg, streaming=True)
+                    if candle is None or msg.get("symbol", symbol) != symbol:
+                        return
+                    assert self._builder is not None
+                    events = self._builder.process_kline({**candle, "symbol": symbol})
+                except (KeyError, TypeError, ValueError):
+                    logger.warning("Mensaje kline normalizado inválido")
+                    return
+                if not self._latest_message or candle["open_time"] >= self._latest_message["open_time"]:
+                    self._latest_message = {**candle, "symbol": symbol}
+                for event in events:
+                    if event.event_type == BarEventType.GAP_DETECTED:
+                        self._add_gap(event.gap_start_time, event.gap_end_time)
+                        self._request_recovery()
+                    if event.event_type == BarEventType.BAR_CLOSED and event.candle:
+                        self._extend_coverage(event.candle["open_time"] + interval_ms)
+                        self._merge_candles([event.candle], streaming=True)
+                    elif event.event_type == BarEventType.BAR_UPDATED and event.candle:
+                        self._extend_coverage(event.candle["open_time"])
+                    self._enqueue(event)
+                self._refresh_state()
+
+            def connection_state(connected: bool, reconnecting: bool) -> None:
+                if active():
+                    self._state.connected = connected
+                    self._state.reconnecting = reconnecting
+                    self._connection_epoch += 1
+                    if connected:
+                        # Bloqueo sincrónico antes de cualquier mensaje posterior.
+                        self._request_recovery()
+                    else:
+                        self._state.complete = False
+                        self._state.recovering = True
+                    self._emit_state_change()
+
+            def on_error(_error: Exception) -> None:
+                connection_state(False, True)
+
+            ws_client.on_message(on_message)
+            ws_client.on_connect(lambda: connection_state(True, False))
+            ws_client.on_disconnect(lambda: connection_state(False, True))
+            ws_client.on_error(on_error)
+            self._dispatch_task = asyncio.create_task(self._dispatch_events(queue))
+            self._recovery_task = asyncio.create_task(self._recover())
+            self._freshness_task = asyncio.create_task(self._watch_freshness())
+            self._emit_state_change()
+            self._stream_task = stream_task = asyncio.create_task(ws_client.start(symbol))
+            self.started.set()
+        except BaseException:
             await self._stop()
-            self.started.clear()
-            self.stream_id = uuid.uuid4().hex
-            self.restart_count += 1
-            self._sequence = 0
-            self._state = MarketState(symbol=symbol, max_candle_age_ms=self._max_age_ms)
-            self._closed.clear()
-            self._stream_closed.clear()
-            self._coverage_start = self._coverage_end = None
-            self._pending_gaps.clear()
-            self._latest_message = None
-            self._recovery_verified = False
-            self._recovery_event.clear()
-            self._builder = CandleBuilder(symbol, interval_ms=interval_ms)
-            self._event_queue = queue = asyncio.Queue(maxsize=1024)
-            self._running = True
-            try:
-                self._http_client = BinanceHTTPClient(self.config)
-                self._ws_client = ws_client = BinanceWSClient(self.config)
+            raise
+        return stream_task, ws_client
 
-                def active() -> bool:
-                    return self._running and self._ws_client is ws_client
-
-                def on_message(msg: dict[str, Any]) -> None:
-                    if not active():
-                        return
-                    try:
-                        candle = self._validated_candle(msg, streaming=True)
-                        if candle is None or msg.get("symbol", symbol) != symbol:
-                            return
-                        assert self._builder is not None
-                        events = self._builder.process_kline({**candle, "symbol": symbol})
-                    except (KeyError, TypeError, ValueError):
-                        logger.warning("Mensaje kline normalizado inválido")
-                        return
-                    if not self._latest_message or candle["open_time"] >= self._latest_message["open_time"]:
-                        self._latest_message = {**candle, "symbol": symbol}
-                    for event in events:
-                        if event.event_type == BarEventType.GAP_DETECTED:
-                            self._add_gap(event.gap_start_time, event.gap_end_time)
-                            self._request_recovery()
-                        if event.event_type == BarEventType.BAR_CLOSED and event.candle:
-                            self._extend_coverage(event.candle["open_time"] + interval_ms)
-                            self._merge_candles([event.candle], streaming=True)
-                        elif event.event_type == BarEventType.BAR_UPDATED and event.candle:
-                            self._extend_coverage(event.candle["open_time"])
-                        self._enqueue(event)
-                    self._refresh_state()
-
-                def connection_state(connected: bool, reconnecting: bool) -> None:
-                    if active():
-                        self._state.connected = connected
-                        self._state.reconnecting = reconnecting
-                        self._connection_epoch += 1
-                        if connected:
-                            # Bloqueo sincrónico antes de cualquier mensaje posterior.
-                            self._request_recovery()
-                        else:
-                            self._state.complete = False
-                            self._state.recovering = True
-                        self._emit_state_change()
-
-                def on_error(_error: Exception) -> None:
-                    connection_state(False, True)
-
-                ws_client.on_message(on_message)
-                ws_client.on_connect(lambda: connection_state(True, False))
-                ws_client.on_disconnect(lambda: connection_state(False, True))
-                ws_client.on_error(on_error)
-                self._dispatch_task = asyncio.create_task(self._dispatch_events(queue))
-                self._recovery_task = asyncio.create_task(self._recover())
-                self._freshness_task = asyncio.create_task(self._watch_freshness())
-                self._emit_state_change()
-                self._stream_task = stream_task = asyncio.create_task(ws_client.start(symbol))
-                self.started.set()
-            except BaseException:
-                await self._stop()
-                raise
+    async def start(self, symbol: str):
+        async with self._lifecycle_lock:
+            stream_task, ws_client = await self._start_locked(symbol)
 
         try:
             await stream_task
@@ -248,6 +259,74 @@ class MarketEngine:
                     stopped_snapshot = await self._stop()
             if stopped_snapshot is not None:
                 await self._notify_stopped(stopped_snapshot)
+
+    async def _supervise_stream(self, stream_task: asyncio.Task[None], ws_client: Any) -> None:
+        """Finish streams created by reconfigure(), which has no caller task."""
+        try:
+            await stream_task
+        except asyncio.CancelledError:
+            return
+        stopped_snapshot = None
+        async with self._lifecycle_lock:
+            if self._ws_client is ws_client:
+                stopped_snapshot = await self._stop()
+        if self._stream_supervisor is asyncio.current_task():
+            self._stream_supervisor = None
+        if stopped_snapshot is not None:
+            await self._notify_stopped(stopped_snapshot)
+
+    async def reconfigure(self, symbol: str, interval: str) -> dict[str, Any]:
+        """Reconfigure this engine in place, serializing stream ownership.
+
+        Validation happens before the current stream is stopped.  The same
+        engine object is restarted with a new stream identity; no per-tab
+        engines are ever created.
+        """
+        try:
+            _normalize_symbol(symbol)
+        except ValueError:
+            raise ValueError("Símbolo inválido")
+        if interval not in ENGINE_INTERVALS:
+            raise ValueError("Intervalo no soportado")
+        # Validate the duration before touching the live stream as well.
+        self._interval_ms(interval)
+
+        async with self._lifecycle_lock:
+            old_interval = self.config.kline_interval
+            old_symbol = self._state.symbol
+            was_running = self._running
+            self.config.kline_interval = interval
+            try:
+                if was_running:
+                    # _start_locked stops the old stream and publishes a new
+                    # stream_id while retaining this MarketEngine instance.
+                    stream_task, ws_client = await self._start_locked(symbol)
+                    self._stream_supervisor = asyncio.create_task(
+                        self._supervise_stream(stream_task, ws_client),
+                    )
+                    status = "reconfiguring"
+                else:
+                    self.stream_id = uuid.uuid4().hex
+                    self._sequence = 0
+                    self._state = MarketState(symbol=symbol, max_candle_age_ms=self._interval_ms(interval) + self._freshness_margin_ms)
+                    self._closed.clear()
+                    self._stream_closed.clear()
+                    self._pending_gaps.clear()
+                    self.config.kline_interval = interval
+                    status = "ok"
+            except BaseException:
+                self.config.kline_interval = old_interval
+                # A failed startup must not leave the old configuration
+                # silently replaced.  The old stream is intentionally not
+                # fabricated; callers receive the failure and can retry.
+                self._state.symbol = old_symbol
+                raise
+            return {
+                "symbol": symbol,
+                "interval": interval,
+                "stream_id": self.stream_id,
+                "status": status,
+            }
 
     async def stop(self):
         """Detiene el motor y libera recursos."""
@@ -291,10 +370,10 @@ class MarketEngine:
         self._connection_epoch += 1
 
         ws_client, http_client = self._ws_client, self._http_client
-        dispatcher, stream = self._dispatch_task, self._stream_task
+        dispatcher, stream, supervisor = self._dispatch_task, self._stream_task, self._stream_supervisor
         recovery, freshness = self._recovery_task, self._freshness_task
         self._ws_client = self._http_client = None
-        self._dispatch_task = self._stream_task = None
+        self._dispatch_task = self._stream_task = self._stream_supervisor = None
         self._recovery_task = self._freshness_task = None
         self._event_queue = None
         # El llamador puede cancelarse mientras cerramos HTTP. Mantener una tarea
@@ -302,7 +381,7 @@ class MarketEngine:
         caller = asyncio.current_task()
         self._cleanup_task = asyncio.create_task(self._release_resources(
             ws_client, http_client,
-            [task for task in (dispatcher, recovery, freshness, stream) if task is not caller],
+            [task for task in (dispatcher, recovery, freshness, stream, supervisor) if task is not caller],
         ))
         await asyncio.shield(self._cleanup_task)
         self._cleanup_task = None
