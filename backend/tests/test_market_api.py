@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import src.api.market as market_api
+from src.market.candle_builder import BarEvent, BarEventType
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +101,12 @@ class TestMarketStatus:
         data = resp.json()
         assert data["symbol"] == "ETH/USDT"
 
+    def test_status_has_versioned_transport_identity(self, client: TestClient):
+        data = client.get("/api/market/status").json()
+        assert data["schema_version"] == market_api.MARKET_TRANSPORT_VERSION
+        assert isinstance(data["stream_id"], str)
+        assert isinstance(data["sequence"], int)
+
 
 # ── /api/market/candles ─────────────────────────────────────────────────────
 
@@ -135,6 +142,13 @@ class TestMarketCandles:
         data = resp.json()
         assert len(data["candles"]) <= 10
 
+    def test_candles_has_versioned_transport_identity_and_complete(self, client: TestClient):
+        data = client.get("/api/market/candles?limit=2").json()
+        assert data["schema_version"] == market_api.MARKET_TRANSPORT_VERSION
+        assert isinstance(data["stream_id"], str)
+        assert isinstance(data["sequence"], int)
+        assert isinstance(data["complete"], bool)
+
     def test_custom_symbol_fixture_is_still_test_only(self, client: TestClient):
         data = client.get("/api/market/candles?symbol=ETH/USDT&limit=10").json()
         assert data["symbol"] == "ETH/USDT"
@@ -146,13 +160,16 @@ class FakeMarketEngine:
     """Buffer explícito de prueba que representa datos recibidos por el motor."""
 
     def __init__(self):
+        self.stream_id = "fake-stream"
+        self.sequence = 7
+        self.restart_count = 2
         self.state = SimpleNamespace(
             symbol="BTC/USDT", connected=True, reconnecting=False,
-            closed_candles_count=1, last_bar_open_time=1_700_000_000_000,
+            closed_candles_count=1, last_bar_open_time=1_699_999_200_000,
         )
         self.config = SimpleNamespace(kline_interval="15m")
         self.closed_candles = [{
-            "open_time": 1_700_000_000_000, "close_time": 1_700_000_899_999,
+            "open_time": 1_699_999_200_000, "close_time": 1_700_000_099_999,
             "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0,
             "volume": 10.0, "is_closed": True,
         }]
@@ -176,13 +193,65 @@ def test_engine_history_preserves_symbol_interval_and_source(client, monkeypatch
     monkeypatch.setattr(market_api, "_market_engine", engine)
     data = client.get("/api/market/candles").json()
     assert data == {
+        "schema_version": market_api.MARKET_TRANSPORT_VERSION,
+        "stream_id": "fake-stream", "sequence": 7, "restart_count": 2,
         "symbol": "BTC/USDT", "interval": "15m", "data_source": "market_engine",
         "candles": engine.closed_candles,
+        "complete": False,
     }
     status = client.get("/api/market/status").json()
     assert status["connected"] is True
     assert status["data_source"] == "market_engine"
     assert status["interval"] == "15m"
+
+
+def test_candles_range_is_inclusive_exclusive_and_complete(client, monkeypatch):
+    engine = FakeMarketEngine()
+    monkeypatch.setattr(market_api, "_market_engine", engine)
+    candle_start = engine.closed_candles[0]["open_time"]
+    # Neither request boundary is on the 15m grid; the aligned candle is
+    # nevertheless fully covered and must make the response complete.
+    start = candle_start - 1
+    end = candle_start + 900_000 - 1
+    data = client.get(f"/api/market/candles?start_time={start}&end_time={end}").json()
+    assert len(data["candles"]) == 1
+    assert data["candles"][0]["open_time"] == candle_start
+    assert data["complete"] is True
+
+
+def test_ranged_request_without_data_is_empty_and_incomplete(client):
+    data = client.get(
+        "/api/market/candles?start_time=1700000000000&end_time=1700000060000"
+    ).json()
+    assert data["candles"] == []
+    assert data["complete"] is False
+    assert data["schema_version"] == market_api.MARKET_TRANSPORT_VERSION
+    assert data["stream_id"] == "unavailable"
+    assert isinstance(data["sequence"], int)
+
+
+def test_empty_engine_ranged_request_does_not_use_fixture(client, monkeypatch):
+    engine = FakeMarketEngine()
+    engine.closed_candles = []
+    monkeypatch.setattr(market_api, "_market_engine", engine)
+    data = client.get(
+        "/api/market/candles?start_time=1700000000000&end_time=1700000060000"
+    ).json()
+    assert data["candles"] == []
+    assert data["complete"] is False
+    assert data["data_source"] == "market_engine"
+    assert data["stream_id"] == engine.stream_id
+    assert data["sequence"] == engine.sequence
+
+
+def test_positive_subinterval_without_aligned_boundary_is_valid(client, monkeypatch):
+    engine = FakeMarketEngine()
+    monkeypatch.setattr(market_api, "_market_engine", engine)
+    start = engine.closed_candles[0]["open_time"] + 1
+    response = client.get(f"/api/market/candles?start_time={start}&end_time={start + 1}")
+    assert response.status_code == 200
+    assert response.json()["candles"] == []
+    assert response.json()["complete"] is True
 
 
 def test_another_symbol_never_receives_current_engine_history(client, monkeypatch):
@@ -220,6 +289,8 @@ class TestMarketWebSocket:
         with client.websocket_connect("/api/market/ws") as websocket:
             websocket.send_json({"type": "subscribe", "channel": channel})
             assert websocket.receive_json()["type"] == "subscribed"
+            if channel == "candles":
+                assert websocket.receive_json()["type"] == "snapshot"
             client.portal.call(engine.handlers[handler], engine.closed_candles[0])
             data = websocket.receive_json()
             assert data["type"] == event_type
@@ -241,13 +312,74 @@ class TestMarketWebSocket:
             assert data["interval"] == "15m"
             assert "is_running" not in data
 
+    def test_candles_snapshot_contains_current_buffer(self, client, monkeypatch):
+        engine = FakeMarketEngine()
+        monkeypatch.setattr(market_api, "_market_engine", engine)
+        with client.websocket_connect("/api/market/ws") as websocket:
+            websocket.send_json({"type": "subscribe", "channel": "candles"})
+            assert websocket.receive_json()["type"] == "subscribed"
+            snapshot = websocket.receive_json()
+            assert snapshot["type"] == "snapshot"
+            assert snapshot["schema_version"] == market_api.MARKET_TRANSPORT_VERSION
+            assert snapshot["candles"] == engine.closed_candles
+
+    def test_candle_events_expose_monotonic_sequence(self, client, monkeypatch):
+        engine = FakeMarketEngine()
+        monkeypatch.setattr(market_api, "_market_engine", engine)
+        with client.websocket_connect("/api/market/ws") as websocket:
+            websocket.send_json({"type": "subscribe", "channel": "candles"})
+            websocket.receive_json()
+            websocket.receive_json()
+            first = {**engine.closed_candles[0], "sequence": 4}
+            second = {**engine.closed_candles[0], "sequence": 5}
+            client.portal.call(engine.handlers["closed"], first)
+            client.portal.call(engine.handlers["closed"], second)
+            assert websocket.receive_json()["sequence"] == 4
+            assert websocket.receive_json()["sequence"] == 5
+
+    def test_gap_emits_explicit_resync_signal(self, client, monkeypatch):
+        engine = FakeMarketEngine()
+        monkeypatch.setattr(market_api, "_market_engine", engine)
+        with client.websocket_connect("/api/market/ws") as websocket:
+            websocket.send_json({"type": "subscribe", "channel": "gaps"})
+            assert websocket.receive_json()["type"] == "subscribed"
+            event = BarEvent(
+                event_type=BarEventType.GAP_DETECTED, symbol="BTC/USDT", gap_ms=60_000,
+                previous_close_time=1, gap_start_time=2, gap_end_time=3,
+            )
+            event.sequence = 8
+            client.portal.call(engine.handlers["gap"], event)
+            assert websocket.receive_json()["type"] == "gap"
+            signal = websocket.receive_json()
+            assert signal["type"] == "resync_required"
+            assert signal["reason"] == "gap"
+            assert signal["last_sequence"] == 8
+            assert signal["recovery_required"] is True
+
+    def test_overflow_emits_explicit_resync_signal(self, client, monkeypatch):
+        engine = FakeMarketEngine()
+        monkeypatch.setattr(market_api, "_market_engine", engine)
+        with client.websocket_connect("/api/market/ws") as websocket:
+            websocket.send_json({"type": "subscribe", "channel": "status"})
+            assert websocket.receive_json()["type"] == "subscribed"
+            client.portal.call(
+                engine.handlers["state"],
+                {"resync_required": True, "reason": "overflow", "last_sequence": 7,
+                 "sequence": 7},
+            )
+            signal = websocket.receive_json()
+            assert signal["type"] == "resync_required"
+            assert signal["reason"] == "overflow"
+            assert signal["last_sequence"] == 7
+            assert signal["recovery_required"] is True
+
     def test_ws_accepts_connection(self, client: TestClient):
         """El endpoint acepta la conexión y responde al primer ping."""
         with client.websocket_connect("/api/market/ws") as websocket:
             # El protocolo no incluye un mensaje de bienvenida espontáneo.
             websocket.send_json({"type": "ping"})
             data = websocket.receive_json()
-            assert data == {"type": "pong"}
+            assert data["type"] == "pong"
 
     def test_ws_subscribe_candles(self, client: TestClient):
         """Suscribirse al canal candles devuelve acknowledged."""
@@ -256,6 +388,7 @@ class TestMarketWebSocket:
             data = websocket.receive_json()
             assert data["type"] == "subscribed"
             assert data["channel"] == "candles"
+            assert websocket.receive_json()["type"] == "snapshot"
 
     def test_ws_subscribe_status(self, client: TestClient):
         """Suscribirse al canal status devuelve acknowledged."""
@@ -269,10 +402,9 @@ class TestMarketWebSocket:
         """El canal de actualizaciones intrabar está en la misma ruta WS."""
         with client.websocket_connect("/api/market/ws") as websocket:
             websocket.send_json({"type": "subscribe", "channel": "updates"})
-            assert websocket.receive_json() == {
-                "type": "subscribed",
-                "channel": "updates",
-            }
+            data = websocket.receive_json()
+            assert data["type"] == "subscribed"
+            assert data["channel"] == "updates"
 
     def test_ws_subscribe_gaps(self, client: TestClient):
         """Suscribirse al canal gaps devuelve acknowledged."""
@@ -295,11 +427,12 @@ class TestMarketWebSocket:
             websocket.send_json({"type": "subscribe", "channel": "candles"})
             data = websocket.receive_json()
             assert data["type"] == "subscribed"
+            assert websocket.receive_json()["type"] == "snapshot"
 
             # Enviar unsubscribe — no se espera respuesta
             websocket.send_json({"type": "unsubscribe", "channel": "candles"})
             websocket.send_json({"type": "ping"})
-            assert websocket.receive_json() == {"type": "pong"}
+            assert websocket.receive_json()["type"] == "pong"
 
 
 # ── Validación de sintaxis de símbolo (REF-BASE master/4383372) ─────────────

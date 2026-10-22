@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
@@ -56,6 +57,12 @@ class MarketEngine:
         if not math.isfinite(freshness_margin_seconds) or freshness_margin_seconds < 0:
             raise ValueError("El margen de frescura debe ser finito y no negativo")
         self._clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
+        # Sequence numbers are local to one stream.  A restart gets a new
+        # identity, so resetting the counter cannot make an old stream appear
+        # to move backwards.
+        self.stream_id = uuid.uuid4().hex
+        self._sequence = 0
+        self.restart_count = 0
         self._freshness_margin_ms = int(freshness_margin_seconds * 1000)
         # Mantener la validación de intervalo en start(), antes de crear clientes.
         self._max_age_ms = 60_000 + self._freshness_margin_ms
@@ -150,6 +157,9 @@ class MarketEngine:
         async with self._lifecycle_lock:
             await self._stop()
             self.started.clear()
+            self.stream_id = uuid.uuid4().hex
+            self.restart_count += 1
+            self._sequence = 0
             self._state = MarketState(symbol=symbol, max_candle_age_ms=self._max_age_ms)
             self._closed.clear()
             self._stream_closed.clear()
@@ -318,10 +328,11 @@ class MarketEngine:
                     # Conservar el orden de los estados de transporte, pero no
                     # publicar contadores antiguos capturados antes de recibir barras.
                     snapshot = self._state_snapshot()
-                    snapshot.update({
-                        "connected": event["connected"],
-                        "reconnecting": event["reconnecting"],
-                    })
+                    if "connected" in event:
+                        snapshot.update({
+                            "connected": event["connected"],
+                            "reconnecting": event["reconnecting"],
+                        })
                     # No combinar un estado viejo de desconexión con aptitud actual.
                     if not snapshot["connected"] or event.get("recovering"):
                         snapshot["entries_allowed"] = False
@@ -330,6 +341,10 @@ class MarketEngine:
                         snapshot["phase"] = "disconnected" if not snapshot["connected"] else "recovering"
                     if event.get("resync_required"):
                         snapshot["resync_required"] = True
+                        snapshot["reason"] = event.get("reason", "overflow")
+                        snapshot["last_sequence"] = event.get("last_sequence", self._sequence)
+                    if "sequence" in event:
+                        snapshot["sequence"] = event["sequence"]
                     await self._notify_handlers(self._on_state_change, snapshot)
             finally:
                 queue.task_done()
@@ -348,15 +363,35 @@ class MarketEngine:
         """Maneja eventos del CandleBuilder."""
         generation = self._event_queue
         if event.event_type == BarEventType.BAR_CLOSED and event.candle:
+            sequence = self._next_sequence()
+            event.candle = {**event.candle, "sequence": sequence}
             await self._notify_handlers(self._on_bar_closed, event.candle)
             if self._event_queue is generation:
-                await self._notify_handlers(self._on_state_change, self._state_snapshot())
+                await self._notify_handlers(self._on_state_change, self._sequenced_snapshot())
 
         elif event.event_type == BarEventType.BAR_UPDATED and event.candle:
+            sequence = self._next_sequence()
+            event.candle = {**event.candle, "sequence": sequence}
             await self._notify_handlers(self._on_bar_updated, event.candle)
 
         elif event.event_type == BarEventType.GAP_DETECTED:
+            # BarEvent is intentionally defined by CandleBuilder (outside this
+            # transport slice); attach the transport sequence at dispatch time.
+            event.sequence = self._next_sequence()
+            event.stream_id = self.stream_id
+            event.resync_required = True
+            event.reason = "gap"
+            event.last_sequence = event.sequence
             await self._notify_handlers(self._on_gap, event)
+
+    def _next_sequence(self) -> int:
+        self._sequence += 1
+        return self._sequence
+
+    def _sequenced_snapshot(self) -> dict[str, Any]:
+        snapshot = self._state_snapshot()
+        snapshot["sequence"] = self._next_sequence()
+        return snapshot
 
     def _state_snapshot(self) -> dict[str, Any]:
         self._refresh_state()
@@ -376,6 +411,9 @@ class MarketEngine:
             "phase": self._state.phase,
             "max_candle_age_ms": self._max_age_ms,
             "execution_available": False,
+            "stream_id": self.stream_id,
+            "sequence": self._sequence,
+            "restart_count": self.restart_count,
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -412,13 +450,19 @@ class MarketEngine:
             while not queue.empty():
                 queue.get_nowait()
                 queue.task_done()
-            queue.put_nowait({**self._state_snapshot(), "resync_required": True})
+            queue.put_nowait({
+                "resync_required": True,
+                "reason": "overflow",
+                "last_sequence": self._sequence,
+                "sequence": self._sequence,
+            })
             logger.warning("Cola de publicación saturada; suscriptores requieren resincronización")
+            return
         queue.put_nowait(event)
 
     def _emit_state_change(self) -> None:
         if self._event_queue is not None:
-            self._enqueue(self._state_snapshot())
+            self._enqueue(self._sequenced_snapshot())
 
     async def _watch_freshness(self) -> None:
         previous = None
@@ -617,3 +661,8 @@ class MarketEngine:
     @property
     def closed_candles(self) -> list[dict[str, Any]]:
         return [dict(self._closed[start]) for start in sorted(self._closed)]
+
+    @property
+    def sequence(self) -> int:
+        """Latest transport sequence published by this engine."""
+        return self._sequence
