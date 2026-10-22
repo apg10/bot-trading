@@ -330,6 +330,23 @@ class PaperFillCandidateResult(_ExecutionDTO):
         return self.status_code == RESULT_FILL_CANDIDATE and self.fill_qty is not None
 
 
+class PaperFillEvaluationRecord(_ExecutionDTO):
+    """Durable representation of one evaluated PAPER fill decision."""
+
+    evaluation_id: str
+    order_id: str
+    account_id: str
+    paper_session_id: str
+    environment: str
+    status_code: str
+    result_json: str
+    evaluated_at_ms: int
+    fill_candidate_fill_id: Optional[str] = None
+    fill_candidate_fill_qty: Optional[str] = None
+    fill_candidate_fill_price: Optional[str] = None
+    fill_candidate_commission_json: Optional[str] = None
+
+
 # ── Internal result builder ───────────────────────────────────────────────────
 
 def _build_result(

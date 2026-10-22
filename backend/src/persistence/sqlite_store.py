@@ -96,6 +96,7 @@ from src.models.paper_contracts import (
     _exact_product,
     _exact_sum,
 )
+from src.models.paper_execution import PaperFillEvaluationRecord
 from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot, PaperRiskResult, evaluate_paper_risk
 from src.models.paper_symbol_filters import (
     MarketNotionalReference, SymbolFilterSnapshot, SymbolFilterResult,
@@ -1648,6 +1649,20 @@ class SQLiteStore:
                 fill_candidate_fill_id, fill_candidate_fill_qty,
                 fill_candidate_fill_price, fill_candidate_commission_json,
             )
+        )
+
+    async def load_paper_fill_evaluation(
+        self, evaluation_id: str
+    ) -> PaperFillEvaluationRecord | None:
+        """Load one durable ACT-P-005 evaluation record by its identity."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(evaluation_id, str) or not evaluation_id.strip():
+            raise ValueError("evaluation_id must be a non-empty string")
+        return await self._read(
+            lambda conn: self._load_paper_fill_evaluation_inner(conn, evaluation_id)
         )
 
     async def _write(
@@ -4009,6 +4024,43 @@ class SQLiteStore:
                 fill_candidate_commission_json,
             ),
         )
+
+    @staticmethod
+    async def _load_paper_fill_evaluation_inner(
+        conn: aiosqlite.Connection,
+        evaluation_id: str,
+    ) -> PaperFillEvaluationRecord | None:
+        """Load and validate one persisted fill evaluation row."""
+        cursor = await conn.execute(
+            "SELECT evaluation_id, order_id, account_id, paper_session_id, "
+            "environment, status_code, result_json, evaluated_at_ms, "
+            "fill_candidate_fill_id, fill_candidate_fill_qty, "
+            "fill_candidate_fill_price, fill_candidate_commission_json "
+            "FROM paper_fill_evaluations WHERE evaluation_id = ?",
+            (evaluation_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        record = PaperFillEvaluationRecord(
+            evaluation_id=row[0],
+            order_id=row[1],
+            account_id=row[2],
+            paper_session_id=row[3],
+            environment=row[4],
+            status_code=row[5],
+            result_json=row[6],
+            evaluated_at_ms=row[7],
+            fill_candidate_fill_id=row[8],
+            fill_candidate_fill_qty=row[9],
+            fill_candidate_fill_price=row[10],
+            fill_candidate_commission_json=row[11],
+        )
+        if record.evaluation_id != evaluation_id:
+            raise PaperFillIntegrityError(
+                "stored paper fill evaluation does not match indexed identity"
+            )
+        return record
 
     async def _cancel_paper_sell_order_inner(
         conn: aiosqlite.Connection,
