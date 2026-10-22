@@ -136,6 +136,78 @@ def validate_candles(candles: list[Candle]) -> None:
                 f"{c.timestamp_ms} <= {candles[i - 1].timestamp_ms}"
             )
 
+# --- Replay segment DTO ---
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ReplaySegment:
+    """Immutable reproducible replay segment."""
+
+    segment_id: str
+    symbol: str
+    strategy: str
+    data_source: DataSource
+    source_ref: str
+    clock_ref: str
+    cost_policy_ref: str
+    fill_policy_ref: str
+    start_ms: int
+    end_ms: int
+    candles: tuple[Candle, ...]
+
+    def __post_init__(self) -> None:
+        """Validate invariants."""
+        if not self.segment_id.strip():
+            raise ReplayError("segment_id must not be empty")
+        if not self.symbol.strip():
+            raise ReplayError("symbol must not be empty")
+        if not self.strategy.strip():
+            raise ReplayError("strategy must not be empty")
+        if self.data_source != DataSource.TEST_ONLY:
+            raise ReplayError("only TEST_ONLY data_source is allowed")
+        if not self.source_ref.strip():
+            raise ReplayError("source_ref must not be empty")
+        if not self.clock_ref.strip():
+            raise ReplayError("clock_ref must not be empty")
+        if not self.cost_policy_ref.strip():
+            raise ReplayError("cost_policy_ref must not be empty")
+        if not self.fill_policy_ref.strip():
+            raise ReplayError("fill_policy_ref must not be empty")
+        if len(self.candles) == 0:
+            raise ReplayError("candles must not be empty")
+        if self.start_ms >= self.end_ms:
+            raise ReplayError("start_ms must be < end_ms")
+
+        for i, candle in enumerate(self.candles):
+            if candle.timestamp_ms < self.start_ms or candle.timestamp_ms >= self.end_ms:
+                raise ReplayError(
+                    f"candle {i} timestamp {candle.timestamp_ms} outside window "
+                    f"[{self.start_ms}, {self.end_ms})"
+                )
+
+        for i in range(1, len(self.candles)):
+            if self.candles[i].timestamp_ms <= self.candles[i - 1].timestamp_ms:
+                raise ReplayError(f"candle {i} timestamp not strictly increasing")
+
+        validate_candles(list(self.candles))
+
+    def to_manifest(self) -> dict[str, Any]:
+        """Stable serialization with provenance."""
+        return {
+            "segment_id": self.segment_id,
+            "symbol": self.symbol,
+            "strategy": self.strategy,
+            "data_source": self.data_source.value,
+            "source_ref": self.source_ref,
+            "clock_ref": self.clock_ref,
+            "cost_policy_ref": self.cost_policy_ref,
+            "fill_policy_ref": self.fill_policy_ref,
+            "start_ms": self.start_ms,
+            "end_ms": self.end_ms,
+            "candle_count": len(self.candles),
+            "candles": [candle.to_dict() for candle in self.candles],
+        }
+
 
 def replay_decisions(
     candles: list[Candle],
@@ -215,6 +287,12 @@ def replay_decisions(
             )
 
     return decisions
+
+
+def replay_segment(segment: ReplaySegment) -> list[Decision]:
+    """Reproduce decisions from a segment using causal prefix only."""
+    candles = list(segment.candles)
+    return replay_decisions(candles, segment.symbol, segment.strategy, segment.data_source)
 
 
 def replay_deterministic(

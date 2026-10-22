@@ -11,8 +11,10 @@ from src.replay import (
     Decision,
     DecisionSide,
     ReplayError,
+    ReplaySegment,
     replay_decisions,
     replay_deterministic,
+    replay_segment,
     validate_candles,
 )
 
@@ -169,3 +171,112 @@ class TestFrozenDTOs:
         assert d_dict["side"] == "BUY"
         assert d_dict["data_source"] == "TEST_ONLY"
         assert d_dict["strategy"] == "TEST_ONLY"
+
+
+class TestReplaySegment:
+    """Tests for the reproducible replay segment DTO."""
+
+    _VALID_CANDLES = (
+        _candle(0, 100, 110, 90, 105),
+        _candle(1, 105, 112, 95, 108),
+        _candle(2, 108, 130, 100, 125),
+    )
+
+    def _make_segment(self, **overrides) -> ReplaySegment:
+        kwargs = dict(
+            segment_id="seg-test-001",
+            symbol="BTC/USDT",
+            strategy="TEST_ONLY",
+            data_source=DataSource.TEST_ONLY,
+            source_ref="ref://test-source",
+            clock_ref="ref://test-clock",
+            cost_policy_ref="ref://test-cost",
+            fill_policy_ref="ref://test-fill",
+            start_ms=_BASE_MS,
+            end_ms=_BASE_MS + 3 * _STEP_S * 1000,
+            candles=self._VALID_CANDLES,
+        )
+        kwargs.update(overrides)
+        return ReplaySegment(**kwargs)
+
+    def test_valid_segment_created(self):
+        seg = self._make_segment()
+        assert seg.segment_id == "seg-test-001"
+        assert seg.data_source == DataSource.TEST_ONLY
+        assert len(seg.candles) == 3
+
+    def test_empty_segment_id_rejected(self):
+        with pytest.raises(ReplayError, match="segment_id"):
+            self._make_segment(segment_id="")
+
+    def test_empty_symbol_rejected(self):
+        with pytest.raises(ReplayError, match="symbol"):
+            self._make_segment(symbol="")
+
+    def test_non_test_only_source_rejected(self):
+        with pytest.raises(ReplayError, match="TEST_ONLY"):
+            self._make_segment(data_source="LIVE")
+
+    def test_empty_source_ref_rejected(self):
+        with pytest.raises(ReplayError, match="source_ref"):
+            self._make_segment(source_ref="")
+
+    def test_start_gte_end_rejected(self):
+        with pytest.raises(ReplayError, match="start_ms"):
+            self._make_segment(start_ms=1000, end_ms=500)
+
+    def test_candle_outside_window_rejected(self):
+        candles = (_candle(0, 100, 110, 90, 105),)
+        with pytest.raises(ReplayError, match="outside window"):
+            self._make_segment(
+                start_ms=_BASE_MS + 1000,
+                end_ms=_BASE_MS + 5000,
+                candles=candles,
+            )
+
+    def test_non_increasing_candle_timestamps_rejected(self):
+        candles = (
+            _candle(1, 100, 110, 90, 105),
+            _candle(0, 105, 112, 95, 108),
+        )
+        with pytest.raises(ReplayError, match="not strictly increasing"):
+            self._make_segment(candles=candles)
+
+    def test_manifest_contains_provenance(self):
+        manifest = self._make_segment().to_manifest()
+
+        assert manifest["segment_id"] == "seg-test-001"
+        assert manifest["data_source"] == "TEST_ONLY"
+        assert manifest["source_ref"] == "ref://test-source"
+        assert manifest["clock_ref"] == "ref://test-clock"
+        assert manifest["cost_policy_ref"] == "ref://test-cost"
+        assert manifest["fill_policy_ref"] == "ref://test-fill"
+        assert manifest["candle_count"] == 3
+
+    def test_manifest_serializes_decimals_as_text(self):
+        candle = self._make_segment().to_manifest()["candles"][0]
+
+        assert isinstance(candle["open"], str)
+        assert isinstance(candle["close"], str)
+        assert isinstance(candle["volume"], str)
+
+    def test_reproducible_decisions(self):
+        seg = self._make_segment()
+        assert replay_segment(seg) == replay_segment(seg)
+
+    def test_truncation_does_not_change_past_decisions(self):
+        seg_full = self._make_segment()
+        decisions_full = replay_segment(seg_full)
+        truncated = self._make_segment(candles=self._VALID_CANDLES[:2])
+
+        assert replay_segment(truncated) == decisions_full[:2]
+
+    def test_frozen_candles_cannot_be_modified(self):
+        seg = self._make_segment()
+        with pytest.raises(Exception):
+            seg.candles[0].open = Decimal("999")
+
+    def test_frozen_segment_cannot_be_modified(self):
+        seg = self._make_segment()
+        with pytest.raises(Exception):
+            seg.symbol = "ETH/USDT"
