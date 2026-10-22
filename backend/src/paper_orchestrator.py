@@ -658,6 +658,9 @@ def _run_adapter_io(operation: Any) -> Any:
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     return loop.run_until_complete(operation)
 
 
@@ -668,13 +671,29 @@ def _adapter_order_value(order: Any, key: str, default: Any = None) -> Any:
     return getattr(order, key, default)
 
 
-def _adapter_orders(persistence: Any) -> list[Any]:
+def _adapter_orders(
+    persistence: Any, account_id: str, session_id: str | None = None
+) -> list[Any]:
     """Load orders through either the replay fixture or SQLiteStore API."""
     if hasattr(persistence, "load_paper_orders"):
-        return list(_run_adapter_io(persistence.load_paper_orders("acct-1")))
+        operation = persistence.load_paper_orders(account_id)
+        return list(_run_adapter_io(operation))
     if hasattr(persistence, "get_paper_orders"):
-        return list(_run_adapter_io(persistence.get_paper_orders("acct-1")))
+        operation = persistence.get_paper_orders(account_id, session_id)
+        return list(_run_adapter_io(operation))
     return []
+
+
+def _adapter_market_snapshot(snapshot: Any) -> PaperMarketExecutionSnapshot | None:
+    """Accept only the explicit durable market snapshot contract.
+
+    ``MarketSnapshot`` is the legacy UI/read model and does not contain the
+    bar, provenance, and capture identity required by the fill evaluator.  It
+    must not be silently upgraded with invented values.
+    """
+    if not isinstance(snapshot, PaperMarketExecutionSnapshot):
+        return None
+    return snapshot
 
 
 def _adapter_commission(fee_snapshot: Any, quantity: Decimal, price: Decimal) -> Commission:
@@ -708,8 +727,10 @@ def apply_signal_to_paper(
     persistence: AbstractPaperPersistence,
     filter_snapshot: FilterSnapshot,
     execution_snapshot: ExecutionSnapshot,
-    market_snapshot: MarketSnapshot,
+    market_snapshot: PaperMarketExecutionSnapshot,
     fee_snapshot: PaperFeeSnapshot,
+    risk_policy: PaperRiskPolicy | None = None,
+    market_capacity_snapshot: PaperMarketCapacitySnapshot | None = None,
 ) -> PaperResult:
     """Route one already-materialized replay signal into PAPER persistence.
 
@@ -717,7 +738,12 @@ def apply_signal_to_paper(
     particular, this adapter never invokes a strategy or derives a signal from
     candles; the replay signal is the sole decision input.
     """
-    # Validate segment/signal identity before any mutation.
+    # Validate segment/signal identity before any persistence access or other
+    # side effect.  A replay signal is already a decision; this adapter never
+    # calls a strategy and never derives a replacement decision from candles.
+    if not isinstance(signal.signal_id, str) or not signal.signal_id.strip():
+        return PaperResult(success=False, error="signal_id must be non-empty", signal=signal.side.value)
+
     if signal.segment_id != segment.segment_id:
         return PaperResult(
             success=False,
@@ -774,17 +800,6 @@ def apply_signal_to_paper(
             signal=signal.side.value,
         )
 
-    # The durable lifecycle uses the same values as EngineState.  Accept a
-    # PaperLifecycleState-shaped object too, which is useful to persistence
-    # fixtures and keeps this adapter read-only with respect to lifecycle.
-    lifecycle_value = getattr(lifecycle, "state", lifecycle)
-    if lifecycle == LifecycleState.PAUSED or lifecycle_value == LifecycleState.PAUSED:
-        return PaperResult(
-            success=False,
-            error="lifecycle is PAUSED",
-            signal=signal.side.value,
-        )
-
     # HOLD is deliberately side-effect-free.
     if signal.side == DecisionSide.HOLD:
         return PaperResult(success=True, signal="HOLD", order_id=None, fill_id=None)
@@ -798,86 +813,167 @@ def apply_signal_to_paper(
             signal="SELL",
         )
 
-    order_id = f"ord-{signal.signal_id}"
-    evaluation_id = f"eval-{signal.signal_id}"
-
-    # Idempotency is checked before registration.  Support both the compact
-    # replay persistence contract and the projected SQLiteStore read API.
-    for existing_order in _adapter_orders(persistence):
-        existing_evaluation = _adapter_order_value(existing_order, "evaluation_id")
-        if existing_evaluation is None:
-            existing_evaluation = _adapter_order_value(existing_order, "decision_id")
-        if existing_evaluation != evaluation_id:
-            continue
-        fills = _adapter_order_value(existing_order, "fills", ()) or ()
-        first_fill = fills[0] if fills else None
-        fill_id = _adapter_order_value(existing_order, "fill_id")
-        if fill_id is None and first_fill is not None:
-            fill_id = _adapter_order_value(first_fill, "fill_id")
-        if fill_id is None:
-            # The SQLite order projection intentionally excludes the separate
-            # fill journal; the fill identity is nevertheless deterministic.
-            fill_id = f"fill-{signal.signal_id}"
+    # The durable lifecycle uses the same values as EngineState.  A
+    # PaperLifecycleState-shaped object is preferred because it carries the
+    # explicit session identity needed by SQLiteStore.  Do not invent an
+    # account or session when a caller supplies only an EngineState enum.
+    lifecycle_value = getattr(lifecycle, "state", lifecycle)
+    lifecycle_value = getattr(lifecycle_value, "value", lifecycle_value)
+    if lifecycle_value != LifecycleState.RUNNING.value:
         return PaperResult(
-            success=True,
+            success=False,
+            error=f"lifecycle is {lifecycle_value}",
             signal="BUY",
-            order_id=_adapter_order_value(existing_order, "order_id", order_id),
-            fill_id=fill_id,
         )
 
-    # Existing durable PAPER DTOs need account/session.  SQLite registration
-    # requires PREPARED; compact persistence adapters may accept directly.
-    account_id = getattr(risk_snapshot, "account_id", "acct-1")
-    session_id = getattr(lifecycle, "paper_session_id", "session-1")
-    save_order = getattr(persistence, "save_paper_order", None)
-    if save_order is None:
-        save_order = getattr(persistence, "register_paper_order", None)
-    if save_order is None:
-        raise AttributeError("persistence does not support paper order registration")
-    order_status = (
-        PaperOrderStatus.ACCEPTED
-        if hasattr(persistence, "save_paper_order")
-        else PaperOrderStatus.PREPARED
-    )
-    order = PaperOrder(
-        order_id=order_id,
-        client_order_id=f"client-{signal.signal_id}",
-        paper_account_id=account_id,
-        paper_session_id=session_id,
-        environment="paper",
-        symbol=signal.symbol,
-        side=PaperOrderSide.BUY,
-        order_type=PaperOrderType.LIMIT,
-        requested_qty=quantity,
-        price=entry_price,
-        status=order_status,
-        strategy_ref=strategy_ref,
-        decision_id=evaluation_id,
-        timestamp_ms=signal.timestamp_ms,
-    )
+    account_id = getattr(risk_snapshot, "account_id", None)
+    if account_id is None:
+        account_id = getattr(persistence, "account_id", None)
+    lifecycle_account_id = getattr(lifecycle, "account_id", None)
+    if lifecycle_account_id is not None and lifecycle_account_id != account_id:
+        return PaperResult(
+            success=False,
+            error="lifecycle account does not match risk snapshot account",
+            signal="BUY",
+        )
+    session_id = getattr(lifecycle, "paper_session_id", None)
+    if session_id is None:
+        session_id = getattr(persistence, "paper_session_id", None)
+    if session_id is None:
+        session_id = getattr(persistence, "session_id", None)
+    if not isinstance(account_id, str) or not account_id.strip():
+        return PaperResult(success=False, error="explicit account identity is required", signal="BUY")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return PaperResult(success=False, error="explicit paper session identity is required", signal="BUY")
 
-    _run_adapter_io(save_order(order))
+    # Every input consumed by the durable evaluator is caller-owned state.  In
+    # particular, a legacy MarketSnapshot lacks capture/bar provenance and is
+    # rejected rather than being populated with guessed defaults.
+    durable_market = _adapter_market_snapshot(market_snapshot)
+    if (
+        risk_snapshot is None
+        or filter_snapshot is None
+        or execution_snapshot is None
+        or durable_market is None
+        or fee_snapshot is None
+    ):
+        return PaperResult(
+            success=False,
+            error="BUY requires explicit risk, filter, execution, market, capacity, and fee snapshots",
+            signal="BUY",
+        )
+    if durable_market.symbol != signal.symbol:
+        return PaperResult(success=False, error="market snapshot symbol mismatch", signal="BUY")
+    if durable_market.provenance != DataSource.TEST_ONLY.value:
+        return PaperResult(success=False, error="market snapshot provenance must be TEST_ONLY", signal="BUY")
+    # A fill may not consume a market capture from the future of the replay
+    # decision.  Equality is the normal causal case; older captures remain
+    # valid when explicitly supplied by the caller.
+    if durable_market.snapshot_timestamp_ms > signal.timestamp_ms:
+        return PaperResult(success=False, error="market snapshot is after replay signal", signal="BUY")
 
-    commission = _adapter_commission(fee_snapshot, quantity, entry_price)
-    fill = PaperFill(
-        fill_id=f"fill-{signal.signal_id}",
-        order_id=order_id,
-        qty=quantity,
-        price=entry_price,
-        commission=commission,
-        timestamp_ms=signal.timestamp_ms,
-    )
-    save_fill = getattr(persistence, "save_paper_fill", None)
-    if save_fill is None:
-        raise AttributeError("persistence does not support paper fill registration")
-    _run_adapter_io(save_fill(fill))
+    order_id = f"ord-{signal.signal_id}"
+    evaluation_id = f"eval-{signal.signal_id}"
+    try:
+        # Evaluate the caller's snapshots before registration.  SQLite repeats
+        # these gates inside its atomic acceptance transaction; this first pass
+        # guarantees rejected signals do not create an order context.
+        order = PaperOrder(
+            order_id=order_id,
+            client_order_id=f"client-{signal.signal_id}",
+            paper_account_id=account_id,
+            paper_session_id=session_id,
+            environment="paper",
+            symbol=signal.symbol,
+            side=PaperOrderSide.BUY,
+            order_type=PaperOrderType.LIMIT,
+            requested_qty=quantity,
+            price=entry_price,
+            status=PaperOrderStatus.PREPARED,
+            strategy_ref=strategy_ref,
+            decision_id=evaluation_id,
+            timestamp_ms=signal.timestamp_ms,
+        )
+        effective_risk_policy = risk_policy
+        if effective_risk_policy is None:
+            # Some persistence fixtures expose the already-open session's
+            # immutable policy context.  This is still caller-owned state; it
+            # is not a financial default.
+            effective_risk_policy = getattr(persistence, "risk_policy", None)
+        effective_capacity = market_capacity_snapshot
+        if effective_capacity is None:
+            effective_capacity = getattr(persistence, "market_capacity_snapshot", None)
+        if effective_risk_policy is None:
+            return PaperResult(success=False, error="explicit risk policy is required", signal="BUY")
+        if effective_capacity is None:
+            return PaperResult(success=False, error="explicit market capacity snapshot is required", signal="BUY")
+        risk_result = evaluate_paper_risk(order, effective_risk_policy, risk_snapshot)
+        if not risk_result.approved:
+            return PaperResult(success=False, error=f"risk rejected PAPER order: {risk_result.code}", signal="BUY")
+        filter_result = validate_symbol_filters(order, filter_snapshot)
+        if not filter_result.approved:
+            return PaperResult(success=False, error=f"symbol filters rejected PAPER order: {filter_result.code}", signal="BUY")
 
-    return PaperResult(
-        success=True,
-        signal="BUY",
-        order_id=order_id,
-        fill_id=fill.fill_id,
-    )
+        load_order = getattr(persistence, "load_paper_order", None)
+        existing_order = (
+            _run_adapter_io(load_order(order_id)) if load_order is not None else None
+        )
+        if existing_order is None:
+            for projected in _adapter_orders(persistence, account_id, session_id):
+                if _adapter_order_value(projected, "order_id") == order_id:
+                    existing_order = projected
+                    break
+
+        # A completed order is authoritative on retry.  The separate durable
+        # evaluation journal supplies the evaluator-generated deterministic fill
+        # identity; no fill is written directly by this adapter.
+        load_evaluation = getattr(persistence, "load_paper_fill_evaluation", None)
+        if existing_order is not None and _adapter_order_value(existing_order, "status") in (
+            PaperOrderStatus.FILLED,
+            PaperOrderStatus.FILLED.value,
+        ):
+            if load_evaluation is None:
+                raise RuntimeError("filled order has no evaluation reader")
+            evaluation = _run_adapter_io(load_evaluation(evaluation_id))
+            fill_id = _adapter_order_value(evaluation, "fill_candidate_fill_id")
+            if fill_id is None:
+                raise RuntimeError("filled order has no durable fill evaluation")
+            return PaperResult(success=True, signal="BUY", order_id=order_id, fill_id=fill_id)
+
+        register = getattr(persistence, "register_paper_order", None)
+        accept = getattr(persistence, "accept_paper_order", None)
+        load_reservation = getattr(persistence, "load_paper_reservation", None)
+        if register is None or accept is None or load_reservation is None:
+            raise AttributeError("persistence does not expose the durable PAPER acceptance path")
+        if existing_order is None:
+            existing_order = _run_adapter_io(register(order))
+        accepted_order = _run_adapter_io(
+            accept(order_id, effective_risk_policy, risk_snapshot, filter_snapshot)
+        )
+        reservation = _run_adapter_io(load_reservation(order_id))
+        if reservation is None:
+            raise RuntimeError("accepted BUY order has no active reservation")
+        reservation_snapshot = _reservation_snapshot(accepted_order, reservation)
+        integration = _run_adapter_io(
+            evaluate_and_apply_fill(
+                persistence,
+                evaluation_id,
+                accepted_order,
+                reservation_snapshot,
+                execution_snapshot,
+                durable_market,
+                # Capacity is explicit in the durable execution contract.  A
+                # market snapshot alone cannot be turned into capacity.
+                effective_capacity,
+                fee_snapshot,
+                evaluated_at_ms=signal.timestamp_ms,
+            )
+        )
+        if not integration.applied:
+            return PaperResult(success=False, signal="BUY", order_id=order_id, error="PAPER fill was not applied")
+        return PaperResult(success=True, signal="BUY", order_id=order_id, fill_id=integration.fill_id)
+    except Exception as exc:
+        return PaperResult(success=False, signal="BUY", order_id=order_id, error=str(exc))
 
 
 __all__ = [

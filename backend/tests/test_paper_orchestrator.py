@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.models.paper_contracts import AssetBalance
+from src.models.paper_contracts import AssetBalance, StrategyRef
 from src.models.paper_execution import (
     PaperExecutionPolicy,
     PaperFeeSnapshot,
@@ -21,6 +21,7 @@ from src.models.paper_execution import (
     PaperMarketExecutionSnapshot,
 )
 from src.models.paper_lifecycle import PaperLifecycleCommand
+from src.models.paper_lifecycle import PaperLifecycleState
 from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot
 from src.models.paper_symbol_filters import (
     LotSizeFilter,
@@ -629,32 +630,152 @@ class TestSignalEntryAdapter:
             side=DecisionSide.BUY,
             reason="test",
         )
+        self._segment = segment
         return replace(signal, **overrides)
 
-    def test_valid_buy_creates_order_and_fill(self):
+    def _args(self, db: Path, *, signal: PaperSignal | None = None, **overrides):
+        signal = self._make_signal() if signal is None else signal
+        segment = self._segment
+        store = _store(db)
+        market = PaperMarketExecutionSnapshot(
+            symbol=segment.symbol,
+            bid=Decimal("103"),
+            ask=Decimal("104"),
+            bar_open_time_ms=signal.timestamp_ms,
+            prior_bar_open_time_ms=signal.timestamp_ms - 60_000,
+            interval_ms=60_000,
+            provenance="TEST_ONLY",
+            version="v1",
+            snapshot_timestamp_ms=signal.timestamp_ms,
+        )
+        capacity = PaperMarketCapacitySnapshot(
+            source_id="TEST_ONLY",
+            source_version="v1",
+            capacity=Decimal("1"),
+            symbol=segment.symbol,
+            capture_bar_open_time_ms=signal.timestamp_ms,
+            capture_snapshot_timestamp_ms=signal.timestamp_ms,
+        )
+        lifecycle = PaperLifecycleState(
+            account_id="acct-1", paper_session_id="session-1", state="running",
+            last_command_id=None, last_updated_ms=signal.timestamp_ms,
+        )
+        values = dict(
+            signal=signal,
+            segment=segment,
+            quantity=Decimal("1"),
+            entry_price=Decimal("104"),
+            strategy_ref=StrategyRef(strategy_id=segment.strategy, strategy_version="v1"),
+            risk_snapshot=_risk_snapshot(),
+            risk_policy=_risk(),
+            lifecycle=lifecycle,
+            persistence=store,
+            filter_snapshot=_filters(),
+            execution_snapshot=PaperExecutionPolicy(
+                policy_id="TEST_ONLY-exec", policy_version="v1", latency_slippage_mode="UNMODELLED"
+            ),
+            market_snapshot=market,
+            market_capacity_snapshot=capacity,
+            fee_snapshot=_fee(),
+        )
+        values.update(overrides)
+        return store, values
+
+    def test_valid_buy_creates_order_and_fill(self, tmp_path: Path):
         """Valid BUY creates exactly one durable order/fill."""
-        pass  # Full integration requires persistence fixtures.
+        db = tmp_path / "valid.db"
+        store, args = self._args(db)
+        result = apply_signal_to_paper(**args)
+        assert result.success is True
+        order = _run(store.load_paper_order(result.order_id))
+        assert order is not None and order.status == PaperOrderStatus.FILLED
+        assert order.fills[0].fill_id == result.fill_id
+        assert _run(store.load_paper_fill(result.fill_id)) is not None
+        balance = _run(store.load_paper_balance_view("acct-1"))
+        assert balance is not None
+        assert any(item.asset == "BTC" and item.total == Decimal("1") for item in balance.balances)
+        assert _run(store.get_paper_position_lots("acct-1"))
+        _run(store.close())
 
-    def test_hold_is_side_effect_free(self):
+    def test_hold_is_side_effect_free(self, tmp_path: Path):
         """HOLD produces no durable mutation."""
-        pass  # Full integration requires persistence fixtures.
+        db = tmp_path / "hold.db"
+        signal = self._make_signal(side=DecisionSide.HOLD)
+        store, args = self._args(db, signal=signal)
+        result = apply_signal_to_paper(**args)
+        assert result == type(result)(success=True, signal="HOLD")
+        assert _run(store.get_paper_orders("acct-1")) == []
+        assert _run(store.get_paper_fills("acct-1")) == []
+        _run(store.close())
 
-    def test_sell_rejected_without_position(self):
+    def test_sell_rejected_without_position(self, tmp_path: Path):
         """SELL without position is rejected."""
-        pass  # Full integration requires persistence fixtures.
+        db = tmp_path / "sell.db"
+        signal = self._make_signal(side=DecisionSide.SELL)
+        store, args = self._args(db, signal=signal)
+        result = apply_signal_to_paper(**args)
+        assert result.success is False and result.signal == "SELL"
+        assert _run(store.get_paper_orders("acct-1")) == []
+        _run(store.close())
 
-    def test_provenance_mismatch_rejected(self):
+    def test_provenance_mismatch_rejected(self, tmp_path: Path):
         """Provenance mismatches are rejected."""
-        pass  # Full integration requires persistence fixtures.
+        db = tmp_path / "provenance.db"
+        store, args = self._args(db)
+        args["market_snapshot"] = args["market_snapshot"].model_copy(update={"provenance": "PUBLIC"})
+        result = apply_signal_to_paper(**args)
+        assert result.success is False and "provenance" in (result.error or "")
+        assert _run(store.get_paper_orders("acct-1")) == []
+        _run(store.close())
 
-    def test_segment_mismatch_rejected(self):
+    def test_segment_mismatch_rejected(self, tmp_path: Path):
         """Segment mismatches are rejected."""
-        pass  # Full integration requires persistence fixtures.
+        db = tmp_path / "segment.db"
+        store, args = self._args(db)
+        args["signal"] = replace(args["signal"], segment_id="other-segment")
+        result = apply_signal_to_paper(**args)
+        assert result.success is False and "segment_id mismatch" in (result.error or "")
+        assert _run(store.get_paper_orders("acct-1")) == []
+        _run(store.close())
 
-    def test_paused_lifecycle_blocks_buy(self):
+    def test_paused_lifecycle_blocks_buy(self, tmp_path: Path):
         """Paused lifecycle blocks BUY before registration."""
-        pass  # Full integration requires persistence fixtures.
+        db = tmp_path / "paused.db"
+        store, args = self._args(db)
+        args["lifecycle"] = args["lifecycle"].model_copy(update={"state": "paused"})
+        result = apply_signal_to_paper(**args)
+        assert result.success is False and "paused" in (result.error or "")
+        assert _run(store.get_paper_orders("acct-1")) == []
+        _run(store.close())
 
-    def test_idempotent_repeat_returns_same_result(self):
+    def test_risk_rejection_does_not_register(self, tmp_path: Path):
+        store, args = self._args(tmp_path / "risk.db", risk_policy=_risk("10"))
+        result = apply_signal_to_paper(**args)
+        assert result.success is False and "risk rejected" in (result.error or "")
+        assert _run(store.get_paper_orders("acct-1")) == []
+        _run(store.close())
+
+    def test_filter_rejection_does_not_register(self, tmp_path: Path):
+        bad_filters = _filters().model_copy(
+            update={"lot_size": LotSizeFilter(min_qty=Decimal("2"), max_qty=Decimal("10"), step_size=Decimal("1"))}
+        )
+        store, args = self._args(tmp_path / "filter.db", filter_snapshot=bad_filters)
+        result = apply_signal_to_paper(**args)
+        assert result.success is False and "filters rejected" in (result.error or "")
+        assert _run(store.get_paper_orders("acct-1")) == []
+        _run(store.close())
+
+    def test_idempotent_repeat_returns_same_result(self, tmp_path: Path):
         """Repeating the same signal returns the same result without duplicates."""
-        pass  # Full integration requires persistence fixtures.
+        db = tmp_path / "retry.db"
+        store, args = self._args(db)
+        first = apply_signal_to_paper(**args)
+        _run(store.close())
+        reopened, retry_args = self._args(db, signal=args["signal"])
+        second = apply_signal_to_paper(**retry_args)
+        assert first.success is True and second.success is True
+        assert second.order_id == first.order_id
+        assert second.fill_id == first.fill_id
+        assert len(_run(reopened.get_paper_orders("acct-1"))) == 1
+        assert len(_run(reopened.get_paper_fills("acct-1"))) == 1
+        _run(reopened.close())
