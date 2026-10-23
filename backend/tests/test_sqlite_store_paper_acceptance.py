@@ -40,7 +40,7 @@ from src.persistence.sqlite_store import (
     PaperOrderAcceptanceScopeError,
     PaperOrderAcceptanceStateError,
     SQLiteStore,
-    _SCHEMA_V16_TABLES,
+    _SCHEMA_V17_TABLES,
     _SCHEMA_V8_TABLES,
 )
 
@@ -779,6 +779,7 @@ def _make_v8_database(db: Path) -> tuple[PaperOrder, PaperAccountOpening]:
     conn.execute("DROP TABLE IF EXISTS paper_lifecycle_reconciliations")
     conn.execute("DROP TABLE IF EXISTS paper_lifecycle_states")
     conn.execute("DROP TABLE IF EXISTS paper_lifecycle_events")
+    conn.execute("DROP TABLE normalized_experiment_results")
     conn.execute("PRAGMA user_version = 8")
     conn.commit()
     conn.close()
@@ -795,12 +796,12 @@ def test_direct_v8_to_v12_migration_preserves_previous_paper_slices(
     store = SQLiteStore(db)
 
     _run(store.initialize())
-    assert _table_names(db) == _SCHEMA_V16_TABLES
+    assert _table_names(db) == _SCHEMA_V17_TABLES
     assert _run(store.load_paper_order(order.order_id)) == order
     assert _run(store.load_paper_account_opening(opening.account_id)) == opening
     assert _run(store.load_paper_reservation(order.order_id)) is None
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
     assert conn.execute("SELECT COUNT(*) FROM paper_order_acceptances").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM paper_reservations").fetchone()[0] == 0
     conn.close()

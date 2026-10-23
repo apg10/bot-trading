@@ -42,8 +42,9 @@ Schema versions:
     v13 — adds explicit PAPER lifecycle tables.
     v14 — extends lifecycle checks for STOPPED, STOP, and CLOSE.
     v15 — adds immutable lifecycle reconciliation reports and RECONCILE events.
-     v16 — adds the singleton ui_preferences payload table and its optimistic
-         concurrency revision.
+    v16 — adds the singleton ui_preferences payload table and its optimistic
+          concurrency revision.
+    v17 — adds immutable, normalized experiment-result records.
 """
 
 from __future__ import annotations
@@ -114,6 +115,7 @@ from src.models.paper_symbol_filters import (
     MarketNotionalReference, SymbolFilterSnapshot, SymbolFilterResult,
     validate_symbol_filters,
 )
+from src.models.normalized_experiment import NormalizedExperimentResult
 from src.models.strategy_config import StrategyConfig
 
 # ── AssetBalance JSON loader con precisión contractual ───────────────────────────
@@ -168,7 +170,7 @@ def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, res
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 16
+_SCHEMA_VERSION = 17
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -449,6 +451,18 @@ class ExperimentResultStateError(ValueError):
     """Invalid state for experiment result operations."""
 
 
+class NormalizedExperimentResultConflictError(ValueError):
+    """Same normalized-result identity with different immutable content."""
+
+
+class NormalizedExperimentResultStateError(ValueError):
+    """Referenced normalized-result experiment/run is missing or not complete."""
+
+
+class NormalizedExperimentResultIntegrityError(ValueError):
+    """Stored normalized-result JSON does not match its indexed identity."""
+
+
 class VariantDiscardConflictError(ValueError):
     """Same variant disposition with different content — no overwrite allowed."""
 
@@ -690,6 +704,25 @@ _SCHEMA_V13_TABLES = _SCHEMA_V12_TABLES | {
 _SCHEMA_V14_TABLES = _SCHEMA_V13_TABLES
 _SCHEMA_V15_TABLES = _SCHEMA_V14_TABLES | {"paper_lifecycle_reconciliations"}
 _SCHEMA_V16_TABLES = _SCHEMA_V15_TABLES | {"ui_preferences"}
+_SCHEMA_V17_TABLES = _SCHEMA_V16_TABLES | {"normalized_experiment_results"}
+
+_NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS normalized_experiment_results (
+        result_id TEXT PRIMARY KEY NOT NULL,
+        run_id TEXT NOT NULL UNIQUE,
+        experiment_id TEXT NOT NULL,
+        experiment_version TEXT NOT NULL,
+        variant_id TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES run_attempts(run_id),
+        FOREIGN KEY (experiment_id, experiment_version)
+            REFERENCES experiment_definitions(experiment_id, experiment_version)
+    )""",
+    """CREATE INDEX IF NOT EXISTS
+        idx_normalized_experiment_results_experiment_variant
+        ON normalized_experiment_results
+            (experiment_id, experiment_version, variant_id)""",
+)
 
 _PAPER_FILL_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS paper_fills (
@@ -1132,6 +1165,53 @@ class SQLiteStore:
             raise ValueError("run_id must be a non-empty string")
         return await self._read(
             lambda conn: self._load_experiment_result_inner(conn, run_id)
+        )
+
+    async def register_normalized_experiment_result(
+        self, result: NormalizedExperimentResult
+    ) -> NormalizedExperimentResult:
+        """Persist one immutable normalized result, idempotently.
+
+        The normalized result is deliberately stored separately from the legacy
+        ``ExperimentResult`` publication.  Its experiment and run references
+        are checked against the durable definitions and a completed run before
+        insertion.
+        """
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(result, NormalizedExperimentResult):
+            raise TypeError(
+                "result must be a NormalizedExperimentResult instance"
+            )
+        validated = NormalizedExperimentResult.model_validate(
+            result.model_dump(mode="python")
+        )
+        return await self._write(
+            lambda conn: self._register_normalized_experiment_result_inner(
+                conn, validated
+            )
+        )
+
+    async def load_normalized_experiment_result(
+        self, result_id: str
+    ) -> NormalizedExperimentResult | None:
+        """Load one normalized result by result id, or ``None``.
+
+        Any malformed payload or disagreement with the indexed identity is
+        treated as corruption and is never silently repaired.
+        """
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(result_id, str) or not result_id.strip():
+            raise ValueError("result_id must be a non-empty string")
+        return await self._read(
+            lambda conn: self._load_normalized_experiment_result_inner(
+                conn, result_id
+            )
         )
 
     async def record_variant_discard(self, record: VariantDiscardRecord) -> None:
@@ -5377,9 +5457,9 @@ class SQLiteStore:
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0 through 15 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0 through 16 or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -5415,17 +5495,30 @@ class SQLiteStore:
                     "ALTER TABLE ui_preferences "
                     "ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
                 )
+            for statement in _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS:
+                await conn.execute(statement)
 
-        # Already at v16 — just verify completeness.
+        # Already at v17 — just verify completeness.
         if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V16_TABLES <= table_names:
+            if not _SCHEMA_V17_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
-                    "schema version is 16 but required tables are missing"
+                    "schema version is 17 but required tables are missing"
                 )
             await create_ui_preferences_table()
             return
 
-        # v15 → v16: add the singleton UI preference payload table.
+        # v16 → v17: add immutable normalized experiment-result records.
+        if version == 16:
+            if not _SCHEMA_V16_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 16 but required v16 tables are missing"
+                )
+            for statement in _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS:
+                await conn.execute(statement)
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            return
+
+        # v15 → v17: add the singleton UI preference payload table and normalized results.
         if version == 15:
             if not _SCHEMA_V15_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
@@ -5435,7 +5528,7 @@ class SQLiteStore:
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v14 → v16: rebuild the event table and add UI preferences so RECONCILE is enforced by its
+        # v14 → v17: rebuild the event table and add UI preferences/normalized results so RECONCILE is enforced by its
         # CHECK constraint, preserving every historical event row atomically.
         if version == 14:
             if not _SCHEMA_V14_TABLES <= table_names:
@@ -5468,7 +5561,7 @@ class SQLiteStore:
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
-        # v13 → v16: rebuild both lifecycle tables so SQLite enforces the new
+        # v13 → v17: rebuild both lifecycle tables so SQLite enforces the new
         # STOPPED/CLOSE contracts.  This remains inside the caller's write
         # transaction; any failed DDL or copy therefore rolls back the old
         # tables, their rows, and user_version together.
@@ -5841,6 +5934,7 @@ class SQLiteStore:
             await conn.execute(statement)
         for statement in _PAPER_LIFECYCLE_DDL_STATEMENTS:
             await conn.execute(statement)
+        await create_ui_preferences_table()
         await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     # ── session helpers (unchanged from v2) ────────────────────────────────
@@ -6187,6 +6281,193 @@ class SQLiteStore:
                 "stored run payload does not match indexed run identity/state"
             )
         return run
+
+    # ── normalized experiment result helpers (v17) ────────────────────────
+
+    @staticmethod
+    async def _register_normalized_experiment_result_inner(
+        conn: aiosqlite.Connection,
+        result: NormalizedExperimentResult,
+    ) -> NormalizedExperimentResult:
+        """Register an immutable normalized result without changing legacy data."""
+        try:
+            definition = await SQLiteStore._load_experiment_inner(
+                conn, result.experiment_ref
+            )
+        except Exception as exc:
+            raise NormalizedExperimentResultStateError(
+                "referenced experiment cannot be loaded"
+            ) from exc
+        if definition is None:
+            raise NormalizedExperimentResultStateError(
+                f"experiment {result.experiment_ref} not found"
+            )
+        if not any(
+            variant.variant_id == result.variant_id for variant in definition.variants
+        ):
+            raise NormalizedExperimentResultConflictError(
+                "normalized result variant does not belong to its experiment"
+            )
+
+        try:
+            run = await SQLiteStore._load_run_attempt_inner(conn, result.run_id)
+        except Exception as exc:
+            raise NormalizedExperimentResultStateError(
+                f"run {result.run_id} cannot be loaded"
+            ) from exc
+        if run is None:
+            raise NormalizedExperimentResultStateError(
+                f"run {result.run_id} not found"
+            )
+        if run.status != "completed":
+            raise NormalizedExperimentResultStateError(
+                f"run {result.run_id} status is '{run.status}'; must be 'completed'"
+            )
+        if run.experiment_ref != result.experiment_ref:
+            raise NormalizedExperimentResultConflictError(
+                "normalized result experiment does not match its run"
+            )
+        if run.variant_id != result.variant_id:
+            raise NormalizedExperimentResultConflictError(
+                "normalized result variant does not match its run"
+            )
+
+        result_json = result.model_dump_json()
+
+        # A result_id collision is checked before the run uniqueness check so
+        # neither collision can ever cause an overwrite.
+        cursor = await conn.execute(
+            "SELECT result_id, run_id, experiment_id, experiment_version, "
+            "variant_id, result_json "
+            "FROM normalized_experiment_results WHERE result_id = ?",
+            (result.result_id,),
+        )
+        existing_by_id = await cursor.fetchone()
+        if existing_by_id is not None:
+            (
+                stored_result_id,
+                stored_run_id,
+                stored_experiment_id,
+                stored_experiment_version,
+                stored_variant_id,
+                stored_json,
+            ) = existing_by_id
+            try:
+                stored = NormalizedExperimentResult.model_validate_json(stored_json)
+            except Exception as exc:
+                raise NormalizedExperimentResultIntegrityError(
+                    f"normalized result {result.result_id} has corrupt JSON"
+                ) from exc
+            if (
+                stored.result_id != stored_result_id
+                or stored.run_id != stored_run_id
+                or stored.experiment_ref.experiment_id != stored_experiment_id
+                or stored.experiment_ref.experiment_version != stored_experiment_version
+                or stored.variant_id != stored_variant_id
+            ):
+                raise NormalizedExperimentResultIntegrityError(
+                    "stored normalized result payload does not match indexed identity"
+                )
+            if stored_json == result_json:
+                return result
+            raise NormalizedExperimentResultConflictError(
+                f"normalized result {result.result_id} already exists with different content; "
+                "no overwrite allowed"
+            )
+
+        cursor = await conn.execute(
+            "SELECT result_id FROM normalized_experiment_results WHERE run_id = ?",
+            (result.run_id,),
+        )
+        existing_by_run = await cursor.fetchone()
+        if existing_by_run is not None:
+            raise NormalizedExperimentResultConflictError(
+                f"run {result.run_id} already has normalized result "
+                f"{existing_by_run[0]}; at most one normalized result per run"
+            )
+
+        await conn.execute(
+            "INSERT INTO normalized_experiment_results "
+            "(result_id, run_id, experiment_id, experiment_version, variant_id, result_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                result.result_id,
+                result.run_id,
+                result.experiment_ref.experiment_id,
+                result.experiment_ref.experiment_version,
+                result.variant_id,
+                result_json,
+            ),
+        )
+        return result
+
+    @staticmethod
+    async def _load_normalized_experiment_result_inner(
+        conn: aiosqlite.Connection, result_id: str
+    ) -> NormalizedExperimentResult | None:
+        cursor = await conn.execute(
+            "SELECT result_id, run_id, experiment_id, experiment_version, "
+            "variant_id, result_json "
+            "FROM normalized_experiment_results WHERE result_id = ?",
+            (result_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        (
+            stored_result_id,
+            stored_run_id,
+            stored_experiment_id,
+            stored_experiment_version,
+            stored_variant_id,
+            result_json,
+        ) = row
+        try:
+            result = NormalizedExperimentResult.model_validate_json(result_json)
+        except Exception as exc:
+            raise NormalizedExperimentResultIntegrityError(
+                f"normalized result {result_id} has corrupt JSON"
+            ) from exc
+
+        if (
+            result.result_id != stored_result_id
+            or result.run_id != stored_run_id
+            or result.experiment_ref.experiment_id != stored_experiment_id
+            or result.experiment_ref.experiment_version != stored_experiment_version
+            or result.variant_id != stored_variant_id
+        ):
+            raise NormalizedExperimentResultIntegrityError(
+                "stored normalized result payload does not match indexed identity"
+            )
+
+        try:
+            definition = await SQLiteStore._load_experiment_inner(
+                conn,
+                result.experiment_ref,
+            )
+            run = await SQLiteStore._load_run_attempt_inner(conn, result.run_id)
+        except Exception as exc:
+            raise NormalizedExperimentResultIntegrityError(
+                "normalized result references corrupt experiment or run data"
+            ) from exc
+        if definition is None or run is None:
+            raise NormalizedExperimentResultIntegrityError(
+                "normalized result references a missing experiment or run"
+            )
+        if (
+            run.status != "completed"
+            or run.experiment_ref != result.experiment_ref
+            or run.variant_id != result.variant_id
+            or not any(
+                variant.variant_id == result.variant_id
+                for variant in definition.variants
+            )
+        ):
+            raise NormalizedExperimentResultIntegrityError(
+                "normalized result does not match its completed run and experiment"
+            )
+        return result
 
     # ── experiment result helpers (v4) ─────────────────────────────────────
 
