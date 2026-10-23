@@ -18,6 +18,7 @@ from src.models.paper_contracts import (
     PaperOrderSide,
     PaperOrderStatus,
     PaperOrderType,
+    PaperPositionView,
     StrategyRef,
 )
 from src.models.paper_execution import (
@@ -48,6 +49,8 @@ from src.replay import DataSource, DecisionSide, PaperSignal, ReplaySegment
 RiskSnapshot = PaperRiskSnapshot
 FilterSnapshot = SymbolFilterSnapshot
 ExecutionSnapshot = PaperExecutionPolicy
+# The durable position projection is the repository's PaperPosition contract.
+PaperPosition = PaperPositionView
 
 
 class AbstractPaperPersistence(Protocol):
@@ -976,14 +979,337 @@ def apply_signal_to_paper(
         return PaperResult(success=False, signal="BUY", order_id=order_id, error=str(exc))
 
 
+def apply_exit_signal_to_paper(
+    signal: PaperSignal,
+    segment: ReplaySegment,
+    position: PaperPosition,
+    bid_price: Decimal,
+    capacity_snapshot: PaperMarketCapacitySnapshot,
+    fee_snapshot: PaperFeeSnapshot,
+    risk_snapshot: RiskSnapshot,
+    lifecycle: LifecycleState,
+    persistence: AbstractPaperPersistence,
+) -> PaperResult:
+    """Exit one durable TEST_ONLY PAPER lot using a replayed SELL signal.
+
+    Unlike the legacy cycle adapter, this entry point does not derive a signal
+    from candles.  The signal, its candle, and the caller-supplied capacity
+    snapshot are the complete causal input to the exit.
+    """
+    if not isinstance(signal.signal_id, str) or not signal.signal_id.strip():
+        return PaperResult(success=False, error="signal_id must be non-empty", signal="SELL")
+
+    if signal.side != DecisionSide.SELL:
+        return PaperResult(success=False, error="exit signal must be SELL", signal="SELL")
+
+    if signal.segment_id != segment.segment_id:
+        return PaperResult(
+            success=False,
+            error=f"segment_id mismatch: {signal.segment_id} != {segment.segment_id}",
+            signal="SELL",
+        )
+    if signal.symbol != segment.symbol:
+        return PaperResult(
+            success=False,
+            error=f"symbol mismatch: {signal.symbol} != {segment.symbol}",
+            signal="SELL",
+        )
+    if signal.strategy != segment.strategy:
+        return PaperResult(
+            success=False,
+            error=f"strategy mismatch: {signal.strategy} != {segment.strategy}",
+            signal="SELL",
+        )
+    if (
+        signal.data_source != DataSource.TEST_ONLY
+        or segment.data_source != DataSource.TEST_ONLY
+        or signal.data_source != segment.data_source
+    ):
+        return PaperResult(
+            success=False,
+            error="only TEST_ONLY data_source is allowed",
+            signal="SELL",
+        )
+
+    if signal.candle_index < 0 or signal.candle_index >= len(segment.candles):
+        return PaperResult(
+            success=False,
+            error=f"candle_index out of range: {signal.candle_index}",
+            signal="SELL",
+        )
+    candle = segment.candles[signal.candle_index]
+    if signal.timestamp_ms != candle.timestamp_ms:
+        return PaperResult(
+            success=False,
+            error=f"timestamp mismatch: {signal.timestamp_ms} != {candle.timestamp_ms}",
+            signal="SELL",
+        )
+    if signal.timestamp_ms < segment.start_ms or signal.timestamp_ms >= segment.end_ms:
+        return PaperResult(
+            success=False,
+            error="signal timestamp outside replay segment",
+            signal="SELL",
+        )
+
+    lifecycle_value = getattr(lifecycle, "state", lifecycle)
+    lifecycle_value = getattr(lifecycle_value, "value", lifecycle_value)
+    if lifecycle_value == LifecycleState.STOPPED.value:
+        return PaperResult(success=False, error="lifecycle is STOPPED", signal="SELL")
+
+    try:
+        if bid_price <= 0:
+            return PaperResult(
+                success=False, error=f"invalid bid price: {bid_price}", signal="SELL"
+            )
+    except (TypeError, ValueError):
+        return PaperResult(
+            success=False, error=f"invalid bid price: {bid_price}", signal="SELL"
+        )
+
+    # Capacity is the explicit causal market capture for this adapter.  It is
+    # deliberately not inferred from the candle or from a live quote.
+    if capacity_snapshot is None:
+        return PaperResult(success=False, error="capacity snapshot is required", signal="SELL")
+    if capacity_snapshot.source_id != DataSource.TEST_ONLY.value:
+        return PaperResult(
+            success=False,
+            error="capacity snapshot provenance must be TEST_ONLY",
+            signal="SELL",
+        )
+    if capacity_snapshot.symbol != signal.symbol:
+        return PaperResult(success=False, error="capacity snapshot symbol mismatch", signal="SELL")
+    if (
+        capacity_snapshot.capture_bar_open_time_ms > signal.timestamp_ms
+        or capacity_snapshot.capture_snapshot_timestamp_ms > signal.timestamp_ms
+    ):
+        return PaperResult(
+            success=False,
+            error="market snapshot is after replay signal",
+            signal="SELL",
+        )
+
+    # Check the deterministic identity before requiring the currently open
+    # lot.  A completed exit remains retryable after a process restart, even if
+    # the position projection has already consumed its lot.
+    account_id = (
+        getattr(position, "account_id", None)
+        or getattr(lifecycle, "account_id", None)
+        or getattr(risk_snapshot, "account_id", None)
+        or getattr(persistence, "account_id", None)
+        or "acct-1"
+    )
+    session_id = (
+        getattr(position, "paper_session_id", None)
+        or getattr(position, "session_id", None)
+        or getattr(lifecycle, "paper_session_id", None)
+        or getattr(persistence, "paper_session_id", None)
+        or getattr(persistence, "session_id", None)
+        or "session-1"
+    )
+    order_id = f"ord-exit-{signal.signal_id}"
+    evaluation_id = f"eval-exit-{signal.signal_id}"
+
+    def _filled_result(existing: Any) -> PaperResult | None:
+        existing_eval = _adapter_order_value(existing, "evaluation_id")
+        existing_decision = _adapter_order_value(existing, "decision_id")
+        status = _adapter_order_value(existing, "status")
+        status_value = getattr(status, "value", status)
+        fills = _adapter_order_value(existing, "fills", ()) or ()
+        if existing_eval != evaluation_id and existing_decision != evaluation_id:
+            # A durable SQLite read projection stores the evaluation identity
+            # as decision_id; a lightweight replay fixture commonly stores it
+            # as evaluation_id.
+            if _adapter_order_value(existing, "order_id") != order_id:
+                return None
+        if status_value not in (PaperOrderStatus.FILLED, PaperOrderStatus.FILLED.value):
+            return None
+        first_fill = next(iter(fills), None)
+        fill_id = _adapter_order_value(first_fill, "fill_id")
+        if fill_id is None:
+            fill_id = _adapter_order_value(existing, "fill_id")
+        return PaperResult(
+            success=True, signal="SELL", order_id=order_id, fill_id=fill_id, error=None
+        )
+
+    try:
+        load_order = getattr(persistence, "load_paper_order", None)
+        existing = _run_adapter_io(load_order(order_id)) if load_order is not None else None
+        if existing is not None:
+            retry = _filled_result(existing)
+            if retry is not None:
+                return retry
+        for projected in _adapter_orders(persistence, account_id, session_id):
+            retry = _filled_result(projected)
+            if retry is not None:
+                return retry
+        load_fills = getattr(persistence, "load_paper_fills", None)
+        if load_fills is None:
+            load_fills = getattr(persistence, "get_paper_fills", None)
+        if load_fills is not None:
+            try:
+                persisted_fills = _run_adapter_io(load_fills(account_id, session_id))
+            except TypeError:
+                persisted_fills = _run_adapter_io(load_fills(account_id))
+            for persisted_fill in persisted_fills:
+                if _adapter_order_value(persisted_fill, "fill_id") == f"fill-exit-{signal.signal_id}":
+                    return PaperResult(
+                        success=True,
+                        signal="SELL",
+                        order_id=order_id,
+                        fill_id=f"fill-exit-{signal.signal_id}",
+                        error=None,
+                    )
+    except Exception as exc:
+        return PaperResult(success=False, signal="SELL", order_id=order_id, error=str(exc))
+
+    lots = getattr(position, "lots", None)
+    if lots is None and isinstance(position, dict):
+        lots = position.get("lots", ())
+    lots = list(lots or ())
+    if not lots:
+        return PaperResult(success=False, error="no open lots to exit", signal="SELL")
+    if len(lots) > 1:
+        return PaperResult(
+            success=False,
+            error=f"ambiguous position: {len(lots)} open lots",
+            signal="SELL",
+        )
+
+    lot = lots[0]
+
+    def _lot_value(key: str, default: Any = None) -> Any:
+        if isinstance(lot, dict):
+            return lot.get(key, default)
+        return getattr(lot, key, default)
+
+    quantity = _lot_value("qty", _lot_value("quantity"))
+    if quantity is None or quantity <= 0:
+        return PaperResult(success=False, error="open lot quantity must be positive", signal="SELL")
+    lot_position_id = _lot_value("position_id", _lot_value("order_id", _lot_value("entry_order_id")))
+    if not isinstance(lot_position_id, str) or not lot_position_id.strip():
+        return PaperResult(success=False, error="open lot identity is required", signal="SELL")
+    strategy_ref = _lot_value("strategy_ref")
+    if strategy_ref is None:
+        strategy_ref = StrategyRef(strategy_id=segment.strategy, strategy_version="v1")
+
+    if fee_snapshot is None or fee_snapshot.quantity != quantity:
+        return PaperResult(success=False, error="fee snapshot quantity mismatch", signal="SELL")
+    if quantity > capacity_snapshot.capacity:
+        return PaperResult(success=False, error="market capacity is insufficient", signal="SELL")
+
+    interval_ms = (
+        candle.timestamp_ms - segment.candles[signal.candle_index - 1].timestamp_ms
+        if signal.candle_index > 0
+        else 1
+    )
+    if interval_ms <= 0:
+        interval_ms = 1
+    market_snapshot = PaperMarketExecutionSnapshot(
+        symbol=signal.symbol,
+        bid=bid_price,
+        ask=bid_price,
+        bar_open_time_ms=capacity_snapshot.capture_bar_open_time_ms,
+        prior_bar_open_time_ms=capacity_snapshot.capture_bar_open_time_ms - interval_ms,
+        interval_ms=interval_ms,
+        provenance=DataSource.TEST_ONLY.value,
+        version=capacity_snapshot.source_version,
+        snapshot_timestamp_ms=capacity_snapshot.capture_snapshot_timestamp_ms,
+    )
+    execution_snapshot = PaperExecutionPolicy(
+        policy_id="TEST_ONLY-exit", policy_version="v1", latency_slippage_mode="UNMODELLED"
+    )
+    allocation = LotAllocation(
+        position_id=lot_position_id,
+        account_id=account_id,
+        symbol=signal.symbol,
+        strategy_ref=strategy_ref,
+        qty=quantity,
+    )
+    exit_order = PaperOrder(
+        order_id=order_id,
+        client_order_id=f"client-{order_id}",
+        paper_account_id=account_id,
+        paper_session_id=session_id,
+        environment="paper",
+        symbol=signal.symbol,
+        side=PaperOrderSide.SELL,
+        order_type=PaperOrderType.LIMIT,
+        requested_qty=quantity,
+        price=bid_price,
+        strategy_ref=strategy_ref,
+        decision_id=evaluation_id,
+        status=PaperOrderStatus.PREPARED,
+        timestamp_ms=signal.timestamp_ms,
+        lot_allocations=(allocation,),
+    )
+
+    try:
+        register = getattr(persistence, "register_paper_order", None)
+        accept = getattr(persistence, "accept_paper_order", None)
+        load_reservation = getattr(persistence, "load_paper_reservation", None)
+        if register is not None and accept is not None and load_reservation is not None:
+            durable_order = existing or _run_adapter_io(register(exit_order))
+            accepted_order = _run_adapter_io(accept(durable_order.order_id))
+            reservation = _run_adapter_io(load_reservation(accepted_order.order_id))
+            if reservation is None:
+                raise RuntimeError("accepted SELL order has no active reservation")
+            reservation_snapshot = _reservation_snapshot(accepted_order, reservation)
+            integration = _run_adapter_io(
+                evaluate_and_apply_fill(
+                    persistence,
+                    evaluation_id,
+                    accepted_order,
+                    reservation_snapshot,
+                    execution_snapshot,
+                    market_snapshot,
+                    capacity_snapshot,
+                    fee_snapshot,
+                    evaluated_at_ms=signal.timestamp_ms,
+                )
+            )
+            return PaperResult(
+                success=integration.applied,
+                signal="SELL",
+                order_id=accepted_order.order_id,
+                fill_id=integration.fill_id,
+                error=None if integration.applied else "PAPER SELL fill was not applied",
+            )
+
+        # Keep the adapter usable with the small replay persistence fixture.
+        # SQLiteStore takes the durable acceptance path above; this fallback is
+        # intentionally limited to fixtures exposing the two explicit save APIs.
+        save_order = getattr(persistence, "save_paper_order", None)
+        save_fill = getattr(persistence, "save_paper_fill", None)
+        if save_order is None or save_fill is None:
+            raise AttributeError("persistence does not expose the durable PAPER exit path")
+        _run_adapter_io(
+            save_order(exit_order.model_copy(update={"status": PaperOrderStatus.ACCEPTED}))
+        )
+        fill = PaperFill(
+            fill_id=f"fill-exit-{signal.signal_id}",
+            order_id=order_id,
+            qty=quantity,
+            price=bid_price,
+            commission=fee_snapshot.commission,
+            timestamp_ms=signal.timestamp_ms,
+            lot_allocations=(allocation,),
+        )
+        _run_adapter_io(save_fill(fill))
+        return PaperResult(success=True, signal="SELL", order_id=order_id, fill_id=fill.fill_id)
+    except Exception as exc:
+        return PaperResult(success=False, signal="SELL", order_id=order_id, error=str(exc))
+
+
 __all__ = [
     "AbstractPaperPersistence",
     "ExecutionSnapshot",
     "FilterSnapshot",
     "LifecycleState",
     "OrchestratorResult",
+    "PaperPosition",
     "PaperResult",
     "RiskSnapshot",
+    "apply_exit_signal_to_paper",
     "apply_signal_to_paper",
     "run_paper_cycle",
     "run_paper_cycle_sell",

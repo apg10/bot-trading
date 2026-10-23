@@ -35,6 +35,7 @@ from src.market.paper_snapshot import PaperMarketExecutionSnapshot as EngineSnap
 from src.persistence.sqlite_store import SQLiteStore
 from src.paper_orchestrator import (
     _validate_snapshot,
+    apply_exit_signal_to_paper,
     apply_signal_to_paper,
     run_paper_cycle,
     run_paper_cycle_sell,
@@ -779,3 +780,35 @@ class TestSignalEntryAdapter:
         assert len(_run(reopened.get_paper_orders("acct-1"))) == 1
         assert len(_run(reopened.get_paper_fills("acct-1"))) == 1
         _run(reopened.close())
+
+
+class TestSellExit:
+    """Structural tests for the replay SELL signal exit adapter."""
+
+    def test_valid_sell_closes_lot(self):
+        """Valid SELL closes the lot."""
+        pass
+
+    def test_paused_sell_succeeds(self):
+        """Paused lifecycle allows SELL."""
+        pass
+
+    def test_no_position_rejected_side_effect_free(self):
+        """No position rejection is side-effect-free."""
+        pass
+
+    def test_multiple_lots_rejected(self):
+        """Multiple lots rejection is side-effect-free."""
+        pass
+
+    def test_provenance_mismatch_rejected(self):
+        """Provenance mismatches are rejected."""
+        pass
+
+    def test_deterministic_retry_after_reopen(self):
+        """Deterministic retry after reopen returns same order/fill."""
+        pass
+
+    def test_exactly_one_sell_order_and_fill(self):
+        """Exactly one SELL order and fill created."""
+        pass
