@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import {
   getComparison,
   getCapitalCurve,
@@ -14,7 +16,7 @@ import {
   type NormalizedExperimentResult,
   type OperationInspectorReport,
 } from "../src/api/laboratory"
-import { LaboratoryCapitalCurve, LaboratoryComparisonResult, LaboratoryCostBreakdown, LaboratoryInspector } from "../src/components/LaboratoryView"
+import { LaboratoryCapitalCurve, LaboratoryComparisonResult, LaboratoryCostBreakdown, LaboratoryInspector, LaboratoryView } from "../src/components/LaboratoryView"
 
 const result = (variantId: string, status: "available" | "undefined" | "insufficient_data", value: string | null): NormalizedExperimentResult => ({
   schema_version: "normalized_experiment_result.v1",
@@ -201,6 +203,8 @@ describe("laboratory comparison rendering", () => {
     expect(html).toContain("0.00000000000000000001")
     expect(html).toContain("undefined")
     expect(html).toContain("insufficient_data")
+    expect(html).toContain("reason-insufficient_data")
+    expect(html).toContain(">Estado<")
     expect(html).toContain("Disponibles")
     expect(html).not.toMatch(/winner|ranking|recommendation|progress|%/i)
   })
@@ -212,12 +216,25 @@ describe("laboratory comparison rendering", () => {
     }
     expect(renderToStaticMarkup(createElement(LaboratoryComparisonResult, { report: emptyAggregateReport }))).toContain("—")
   })
+
+  it("uses semantic column headers and keeps no-observation status text visible", () => {
+    const html = renderToStaticMarkup(createElement(LaboratoryComparisonResult, {
+      report: {
+        ...report,
+        aggregates: [{ ...report.aggregates[0], available_count: 0, undefined_count: 0, insufficient_data_count: 3, mean: null, minimum: null, maximum: null }],
+      },
+    }))
+    expect(html).toContain('scope="col"')
+    expect(html).toContain(">insufficient_data<")
+    expect(html).toContain("—")
+  })
 })
 
 describe("laboratory capital and cost rendering", () => {
   it("renders the capital curve SVG with deterministic point positions and drawdown", () => {
     const html = renderToStaticMarkup(createElement(LaboratoryCapitalCurve, { report: curveReport }))
     expect(html).toContain('aria-label="Capital curve"')
+    expect(html).toContain("<title>Curva de capital cash en USDT</title>")
     expect(html).toContain('cx="10"')
     expect(html).toContain('cx="160"')
     expect(html).toContain('cx="310"')
@@ -248,6 +265,58 @@ describe("laboratory capital and cost rendering", () => {
       createElement(LaboratoryCostBreakdown, { report: insufficientCosts }),
     ))
     expect(html).toContain("insufficient_data: no applied fills are available")
+    expect(html).toContain("—")
     expect(html).not.toContain("slippage>0<")
+  })
+
+  it("shows an explicit insufficient state when the inspector has no audit observations", () => {
+    const html = renderToStaticMarkup(createElement(LaboratoryInspector, {
+      report: { ...inspectorReport, status: "available", decisions: [], candles: [], orders: [], fills: [], reason: null },
+    }))
+    expect(html).toContain("insufficient_data: No hay decisiones auditadas.")
+    expect(html).toContain("—")
+  })
+})
+
+function renderLaboratoryAtWidth(width: number): string {
+  return renderToStaticMarkup(createElement(
+    "section",
+    { className: "view-panel", style: { width: `${width}px` }, "aria-label": `Laboratorio a ${width}px` },
+    createElement(LaboratoryView),
+  ))
+}
+
+const layoutCss = readFileSync(fileURLToPath(new URL("../src/styles/layout.css", import.meta.url)), "utf8")
+const tokensCss = readFileSync(fileURLToPath(new URL("../src/styles/tokens.css", import.meta.url)), "utf8")
+
+describe("laboratory responsive layout", () => {
+  it("renders the LaboratoryView in a 320px mobile shell", () => {
+    const html = renderLaboratoryAtWidth(320)
+    expect(html).toContain('style="width:320px"')
+    expect(html).toContain('class="view-panel"')
+    expect(html).toContain('class="laboratory-view"')
+    expect(html).toContain('class="laboratory-query-form"')
+    expect(layoutCss).toContain(".view-panel")
+    expect(layoutCss).toContain("@media (max-width: 768px)")
+    expect(layoutCss).toContain("@media (max-width: 480px)")
+  })
+
+  it("renders the LaboratoryView in a 768px tablet shell with responsive classes", () => {
+    const html = renderLaboratoryAtWidth(768)
+    expect(html).toContain('style="width:768px"')
+    expect(html).toContain('class="view-panel"')
+    expect(html).toContain('class="laboratory-view"')
+    expect(html).toContain('class="laboratory-query-form"')
+  })
+})
+
+describe("laboratory accessibility", () => {
+  it("labels the query form controls and keeps keyboard focus styling delegated to the shell", () => {
+    const html = renderToStaticMarkup(createElement(LaboratoryView))
+    expect(html).toContain('aria-label="Consulta de comparación del laboratorio"')
+    expect(html).toContain('aria-label="Experiment ID"')
+    expect(html).toContain('aria-label="Consultar comparación"')
+    expect(html).toContain('class="laboratory-view"')
+    expect(tokensCss).toContain(":focus-visible")
   })
 })

@@ -5,6 +5,7 @@ import {
   getCostBreakdown,
   getInspector,
   type CapitalCurveReport,
+  type CostValue,
   type CostBreakdownReport,
   type ExperimentComparisonReport,
   type NormalizedExperimentResult,
@@ -42,15 +43,29 @@ export function aggregateValue(value: string | null, availableCount: number): st
   return availableCount === 0 || value === null ? "—" : value
 }
 
+function statusMessage(status: string, reason: string | null): string {
+  return `${status}${reason ? `: ${reason}` : ""}`
+}
+
+function costValueDisplay(value: CostValue | null): string {
+  if (!value) return "unknown"
+  return value.amount ?? value.value ?? statusMessage(value.status, value.reason)
+}
+
 export function LaboratoryCapitalCurve({ report }: { report: CapitalCurveReport }) {
+  const hasObservations = report.points.length > 0
   return (
     <section className="card" aria-label="Curva de capital y drawdown">
       <div className="card-title">Capital cash · {report.quote_asset}</div>
-      {report.status !== "available" ? (
-        <p role="status">{report.status}{report.reason ? `: ${report.reason}` : ""}</p>
+      {report.status !== "available" || !hasObservations ? (
+        <>
+          <p role="status">{report.status !== "available" ? statusMessage(report.status, report.reason) : "insufficient_data: No hay observaciones de capital."}</p>
+          <p aria-label="Curva de capital sin observaciones">—</p>
+        </>
       ) : (
         <>
           <svg aria-label="Capital curve" role="img" viewBox="0 0 320 70" width="100%" height="70">
+            <title>{`Curva de capital cash en ${report.quote_asset}`}</title>
             <polyline
               fill="none" stroke="currentColor" strokeWidth="2"
               points={report.points.map((_point, index) => `${index * (report.points.length > 1 ? 300 / (report.points.length - 1) : 0) + 10},25`).join(" ")}
@@ -61,12 +76,15 @@ export function LaboratoryCapitalCurve({ report }: { report: CapitalCurveReport 
             ))}
           </svg>
           <div className="card-detail">Saldo inicial: {report.initial_balance}</div>
-          <table>
-            <thead><tr><th>Fill</th><th>Saldo cash</th><th>Peak</th><th>Drawdown</th></tr></thead>
-            <tbody>{report.points.map(point => (
-              <tr key={point.fill_id}><th scope="row">{point.fill_id}</th><td>{point.balance}</td><td>{point.peak_balance}</td><td>{point.drawdown}</td></tr>
-            ))}</tbody>
-          </table>
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <caption>Observaciones de la curva de capital</caption>
+              <thead><tr><th scope="col">Fill</th><th scope="col">Saldo cash</th><th scope="col">Peak</th><th scope="col">Drawdown</th></tr></thead>
+              <tbody>{report.points.map(point => (
+                <tr key={point.fill_id}><th scope="row">{point.fill_id}</th><td>{point.balance}</td><td>{point.peak_balance}</td><td>{point.drawdown}</td></tr>
+              ))}</tbody>
+            </table>
+          </div>
         </>
       )}
     </section>
@@ -75,19 +93,23 @@ export function LaboratoryCapitalCurve({ report }: { report: CapitalCurveReport 
 
 export function LaboratoryCostBreakdown({ report }: { report: CostBreakdownReport }) {
   return (
-    <section className="card" aria-label="Cost breakdown">
+      <section className="card" aria-label="Cost breakdown">
       <div className="card-title">Costes por fill · {report.quote_asset}</div>
-      {report.status !== "available" && <p role="status">{report.status}{report.reason ? `: ${report.reason}` : ""}</p>}
+      {report.status !== "available" && <p role="status">{statusMessage(report.status, report.reason)}</p>}
+      {report.fills.length === 0 && (
+        <p aria-label="Costes sin observaciones">—</p>
+      )}
       {report.fills.length > 0 && (
         <div style={{ overflowX: "auto" }}>
           <table>
-            <thead><tr><th>Fill</th><th>Side</th><th>Qty</th><th>Price</th><th>Commission</th><th>Slippage</th><th>Total</th></tr></thead>
+            <caption>Desglose de costes por fill</caption>
+            <thead><tr><th scope="col">Fill</th><th scope="col">Side</th><th scope="col">Qty</th><th scope="col">Price</th><th scope="col">Commission</th><th scope="col">Slippage</th><th scope="col">Total</th></tr></thead>
             <tbody>{report.fills.map(fill => (
               <tr key={fill.fill_id}>
                 <th scope="row">{fill.fill_id}</th><td>{fill.side}</td><td>{fill.qty}</td><td>{fill.price}</td>
-                <td>{fill.commission?.amount ?? fill.commission?.value ?? "unknown"}</td>
-                <td>{fill.slippage.amount ?? fill.slippage.value ?? <span title={fill.slippage.reason ?? undefined}>{fill.slippage.status}</span>}</td>
-                <td>{fill.total_cost?.amount ?? fill.total_cost?.value ?? "unknown"}</td>
+                <td>{costValueDisplay(fill.commission)}</td>
+                <td>{costValueDisplay(fill.slippage)}</td>
+                <td>{costValueDisplay(fill.total_cost)}</td>
               </tr>
             ))}</tbody>
           </table>
@@ -98,17 +120,20 @@ export function LaboratoryCostBreakdown({ report }: { report: CostBreakdownRepor
 }
 
 export function LaboratoryInspector({ report }: { report: OperationInspectorReport }) {
+  const hasAuditData = report.decisions.length > 0
   return (
     <section className="card" aria-label="Operation inspector">
       <div className="card-title">Inspector de operaciones · {report.account_id}/{report.session_id}</div>
-      {report.status !== "available" ? (
-        <p role="status">{report.status}{report.reason ? `: ${report.reason}` : ""}</p>
-      ) : report.decisions.length === 0 ? (
-        <p role="status">No hay decisiones auditadas.</p>
+      {report.status !== "available" || !hasAuditData ? (
+        <>
+          <p role="status">{report.status !== "available" ? statusMessage(report.status, report.reason) : "insufficient_data: No hay decisiones auditadas."}</p>
+          <p aria-label="Cadena causal sin datos de auditoría">—</p>
+        </>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table>
-            <thead><tr><th>Decision</th><th>Timestamp</th><th>Candle</th><th>OHLCV</th><th>Reason</th><th>Order</th><th>Fill</th></tr></thead>
+            <caption>Cadena causal de decisiones, órdenes y fills</caption>
+            <thead><tr><th scope="col">Decision</th><th scope="col">Timestamp</th><th scope="col">Candle</th><th scope="col">OHLCV</th><th scope="col">Reason</th><th scope="col">Order</th><th scope="col">Fill</th></tr></thead>
             <tbody>{report.decisions.map(decision => (
               <tr key={decision.decision_id}>
                 <th scope="row">{decision.side} · {decision.decision_id}</th>
@@ -136,8 +161,9 @@ function VariantCard({ result }: { result: NormalizedExperimentResult }) {
         {result.metrics.map(metric => (
           <div key={metric.metric_id} style={{ display: "flex", justifyContent: "space-between", gap: "var(--space-sm)", padding: "3px 0" }}>
             <span>{metric.metric_id}{metric.unit ? ` (${metric.unit})` : ""}</span>
-            <span aria-label={`${metric.metric_id} ${metric.status}`}>
+            <span aria-label={`${metric.metric_id} ${metric.status}${metric.reason ? `: ${metric.reason}` : ""}`}>
               {metric.status === "available" ? metricState(metric) : metric.status}
+              {metric.status !== "available" && metric.reason ? `: ${metric.reason}` : ""}
             </span>
           </div>
         ))}
@@ -147,6 +173,9 @@ function VariantCard({ result }: { result: NormalizedExperimentResult }) {
 }
 
 function AggregateRow({ aggregate }: { aggregate: NormalizedMetricAggregate }) {
+  const status = aggregate.available_count === 0
+    ? (aggregate.insufficient_data_count > 0 ? "insufficient_data" : "undefined")
+    : "available"
   return (
     <tr>
       <th scope="row">{aggregate.metric_id}{aggregate.unit ? ` (${aggregate.unit})` : ""}</th>
@@ -156,6 +185,7 @@ function AggregateRow({ aggregate }: { aggregate: NormalizedMetricAggregate }) {
       <td>{aggregate.available_count}</td>
       <td>{aggregate.undefined_count}</td>
       <td>{aggregate.insufficient_data_count}</td>
+      <td>{status}</td>
     </tr>
   )
 }
@@ -189,13 +219,16 @@ export function LaboratoryComparisonResult({ report }: { report: ExperimentCompa
 
       <h2 style={{ fontSize: "var(--font-size-lg)", margin: "var(--space-lg) 0 var(--space-sm)" }}>Agregados deterministas</h2>
       {report.aggregates.length === 0 ? (
-        <p role="status">No hay agregados disponibles.</p>
+        <>
+          <p role="status">insufficient_data: No hay agregados disponibles.</p>
+          <p aria-label="Agregados sin observaciones">—</p>
+        </>
       ) : (
         <div className="card" style={{ overflowX: "auto" }}>
           <table>
             <thead><tr>
-              <th>Métrica</th><th>Media</th><th>Mínimo</th><th>Máximo</th>
-              <th>Disponibles</th><th>undefined</th><th>insufficient_data</th>
+              <th scope="col">Métrica</th><th scope="col">Media</th><th scope="col">Mínimo</th><th scope="col">Máximo</th>
+              <th scope="col">Disponibles</th><th scope="col">undefined</th><th scope="col">insufficient_data</th><th scope="col">Estado</th>
             </tr></thead>
             <tbody>{report.aggregates.map(aggregate => <AggregateRow key={aggregate.metric_id} aggregate={aggregate} />)}</tbody>
           </table>
@@ -253,13 +286,13 @@ export function LaboratoryView() {
     }
   }
 
-      const update = (key: keyof FormValues) => (event: ChangeEvent<HTMLInputElement>) => {
+  const update = (key: keyof FormValues) => (event: ChangeEvent<HTMLInputElement>) => {
     setForm(current => ({ ...current, [key]: event.target.value }))
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, overflow: "hidden" }}>
-      <form onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-sm)", alignItems: "end", padding: "var(--space-lg)", borderBottom: "1px solid var(--color-border)" }}>
+    <div className="laboratory-view" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, overflow: "hidden" }}>
+      <form className="laboratory-query-form" aria-label="Consulta de comparación del laboratorio" onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-sm)", alignItems: "end", padding: "var(--space-lg)", borderBottom: "1px solid var(--color-border)" }}>
         {([
           ["experimentId", "Experiment ID"],
           ["experimentVersion", "Experiment version"],
@@ -274,7 +307,7 @@ export function LaboratoryView() {
             <input id={key} name={key} aria-label={label} value={form[key]} onChange={update(key)} disabled={loading} />
           </label>
         ))}
-        <button type="submit" disabled={loading}>
+        <button type="submit" aria-label="Consultar comparación" disabled={loading}>
           {loading ? "Cargando…" : "Consultar comparación"}
         </button>
       </form>
@@ -283,8 +316,10 @@ export function LaboratoryView() {
         {error && <p role="alert" style={{ color: "var(--color-negative)" }}>{error}</p>}
       </div>
       {report ? <>
-        <LaboratoryComparisonResult report={report} />
-        {(capitalCurve || costBreakdown) && <div style={{ display: "grid", gap: "var(--space-sm)", padding: "0 var(--space-lg) var(--space-lg)" }}>
+        <div className="laboratory-results">
+          <LaboratoryComparisonResult report={report} />
+        </div>
+        {(capitalCurve || costBreakdown || inspector) && <div className="laboratory-projection-grid" style={{ display: "grid", gap: "var(--space-sm)", padding: "0 var(--space-lg) var(--space-lg)" }}>
            {capitalCurve && <LaboratoryCapitalCurve report={capitalCurve} />}
            {costBreakdown && <LaboratoryCostBreakdown report={costBreakdown} />}
            {inspector && <LaboratoryInspector report={inspector} />}
