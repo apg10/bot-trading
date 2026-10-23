@@ -130,11 +130,23 @@ def _decimal(value: Any) -> Decimal:
 
 
 def _fill(value: PaperFill | Mapping[str, Any]) -> PaperFill:
-    return value if isinstance(value, PaperFill) else PaperFill.model_validate(value)
+    if isinstance(value, PaperFill):
+        return value
+    # SQLite read projections intentionally carry journal metadata alongside
+    # the immutable DTO (``kind``, account/session and application markers).
+    # Validate only the DTO fields while retaining the raw mapping below for
+    # the explicit ``applied`` marker.
+    return PaperFill.model_validate(
+        {name: value[name] for name in PaperFill.model_fields if name in value}
+    )
 
 
 def _order(value: PaperOrder | Mapping[str, Any]) -> PaperOrder:
-    return value if isinstance(value, PaperOrder) else PaperOrder.model_validate(value)
+    if isinstance(value, PaperOrder):
+        return value
+    return PaperOrder.model_validate(
+        {name: value[name] for name in PaperOrder.model_fields if name in value}
+    )
 
 
 def _order_values(

@@ -84,7 +84,7 @@ export function LaboratoryCostBreakdown({ report }: { report: CostBreakdownRepor
               <tr key={fill.fill_id}>
                 <th scope="row">{fill.fill_id}</th><td>{fill.side}</td><td>{fill.qty}</td><td>{fill.price}</td>
                 <td>{fill.commission?.amount ?? fill.commission?.value ?? "unknown"}</td>
-                <td>{fill.slippage.amount ?? fill.slippage.value ?? fill.slippage.reason ?? fill.slippage.status}</td>
+                <td>{fill.slippage.amount ?? fill.slippage.value ?? <span title={fill.slippage.reason}>{fill.slippage.status}</span>}</td>
                 <td>{fill.total_cost?.amount ?? fill.total_cost?.value ?? "unknown"}</td>
               </tr>
             ))}</tbody>

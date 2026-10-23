@@ -3,12 +3,16 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import {
   getComparison,
+  getCapitalCurve,
+  getCostBreakdown,
   getNormalizedResult,
   LaboratoryApiError,
+  type CapitalCurveReport,
+  type CostBreakdownReport,
   type ExperimentComparisonReport,
   type NormalizedExperimentResult,
 } from "../src/api/laboratory"
-import { LaboratoryComparisonResult } from "../src/components/LaboratoryView"
+import { LaboratoryCapitalCurve, LaboratoryComparisonResult, LaboratoryCostBreakdown } from "../src/components/LaboratoryView"
 
 const result = (variantId: string, status: "available" | "undefined" | "insufficient_data", value: string | null): NormalizedExperimentResult => ({
   schema_version: "normalized_experiment_result.v1",
@@ -45,6 +49,47 @@ const report: ExperimentComparisonReport = {
     metric_id: "return", unit: "percent", available_count: 1, undefined_count: 1,
     insufficient_data_count: 1, mean: "0.00000000000000000001", minimum: "0.00000000000000000001", maximum: "0.00000000000000000001",
   }],
+}
+
+const curveReport: CapitalCurveReport = {
+  schema_version: "capital_curve_report.v1",
+  account_id: "account/one",
+  session_id: "session/one",
+  quote_asset: "USDT",
+  balance_kind: "cash",
+  status: "available",
+  initial_balance: "100.00000000000000000001",
+  reason: null,
+  points: [
+    { timestamp_ms: 1, fill_id: "fill-a", balance: "89.90000000000000000001", peak_balance: "100.00000000000000000001", drawdown: "10.10000000000000000000" },
+    { timestamp_ms: 2, fill_id: "fill-b", balance: "108.90000000000000000001", peak_balance: "108.90000000000000000001", drawdown: "0" },
+    { timestamp_ms: 3, fill_id: "fill-c", balance: "108.80000000000000000001", peak_balance: "108.90000000000000000001", drawdown: "0.10000000000000000000" },
+  ],
+}
+
+const costReport: CostBreakdownReport = {
+  schema_version: "cost_breakdown_report.v1",
+  account_id: "account/one",
+  session_id: "session/one",
+  quote_asset: "USDT",
+  status: "available",
+  reason: null,
+  fills: [
+    {
+      fill_id: "fill-a", order_id: "order-a", timestamp_ms: 1, side: "BUY",
+      qty: "0.12345678901234567890", price: "10.00000000000000000001", notional: "1.23456789012345678901",
+      commission: { amount: "0.01000000000000000001", status: "available", reason: null },
+      slippage: { amount: "0.02000000000000000002", status: "available", reason: null },
+      total_cost: { amount: "0.03000000000000000003", status: "available", reason: null }, cost_model: "MODELLED",
+    },
+    {
+      fill_id: "fill-b", order_id: "order-b", timestamp_ms: 2, side: "SELL",
+      qty: "1.00", price: "20.00", notional: "20.00",
+      commission: null,
+      slippage: { amount: null, status: "insufficient_data", reason: "reference price is unavailable" },
+      total_cost: null, cost_model: "UNKNOWN",
+    },
+  ],
 }
 
 function response(body: unknown, status = 200): Response {
@@ -95,6 +140,18 @@ describe("laboratory read client", () => {
     expect(httpError.message).not.toContain(secret)
     await expect(getComparison("exp", "v1", "cmp", "v1")).rejects.toThrow("Invalid laboratory response")
   })
+
+  it("keeps capital and cost decimals as strings at the API boundary", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response(curveReport))
+      .mockResolvedValueOnce(response(costReport))
+    const curve = await getCapitalCurve("account/one", "session/one")
+    const costs = await getCostBreakdown("account/one", "session/one")
+    expect(typeof curve.points[0]?.balance).toBe("string")
+    expect(curve.points[0]?.balance).toBe("89.90000000000000000001")
+    expect(typeof costs.fills[0]?.qty).toBe("string")
+    expect(costs.fills[0]?.qty).toBe("0.12345678901234567890")
+  })
 })
 
 describe("laboratory comparison rendering", () => {
@@ -113,5 +170,43 @@ describe("laboratory comparison rendering", () => {
       aggregates: [{ ...report.aggregates[0], available_count: 0, undefined_count: 2, insufficient_data_count: 1, mean: null, minimum: null, maximum: null }],
     }
     expect(renderToStaticMarkup(createElement(LaboratoryComparisonResult, { report: emptyAggregateReport }))).toContain("—")
+  })
+})
+
+describe("laboratory capital and cost rendering", () => {
+  it("renders the capital curve SVG with deterministic point positions and drawdown", () => {
+    const html = renderToStaticMarkup(createElement(LaboratoryCapitalCurve, { report: curveReport }))
+    expect(html).toContain('aria-label="Capital curve"')
+    expect(html).toContain('cx="10"')
+    expect(html).toContain('cx="160"')
+    expect(html).toContain('cx="310"')
+    expect(html).toContain('data-balance="89.90000000000000000001"')
+    expect(html).toContain("10.10000000000000000000")
+    expect(html).toContain("Drawdown")
+  })
+
+  it("renders commission, slippage, and total per fill without coercing decimals", () => {
+    const html = renderToStaticMarkup(createElement(LaboratoryCostBreakdown, { report: costReport }))
+    expect(html).toContain("Commission")
+    expect(html).toContain("Slippage")
+    expect(html).toContain("Total")
+    expect(html).toContain("0.01000000000000000001")
+    expect(html).toContain("0.02000000000000000002")
+    expect(html).toContain("0.03000000000000000003")
+    expect(html).toContain("insufficient_data")
+    expect(html).toContain("reference price is unavailable")
+    expect(html).toContain("0.12345678901234567890")
+    expect(html).not.toContain("0.12345678901234568")
+  })
+
+  it("displays insufficient projection states rather than converting them to zero", () => {
+    const insufficientCurve: CapitalCurveReport = { ...curveReport, status: "insufficient_data", points: [], reason: "no applied fills are available" }
+    const insufficientCosts: CostBreakdownReport = { ...costReport, status: "insufficient_data", fills: [], reason: "no applied fills are available" }
+    const html = renderToStaticMarkup(createElement("div", null,
+      createElement(LaboratoryCapitalCurve, { report: insufficientCurve }),
+      createElement(LaboratoryCostBreakdown, { report: insufficientCosts }),
+    ))
+    expect(html).toContain("insufficient_data: no applied fills are available")
+    expect(html).not.toContain("slippage>0<")
   })
 })

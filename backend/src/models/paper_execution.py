@@ -26,7 +26,11 @@ from src.models.paper_contracts import (
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _required_decimal(value: object) -> Decimal:
-    if isinstance(value, bool) or not isinstance(value, Decimal):
+    if isinstance(value, bool):
+        raise ValueError("value must be an explicit Decimal")
+    if isinstance(value, str):
+        value = Decimal(value)
+    if not isinstance(value, Decimal):
         raise ValueError("value must be an explicit Decimal")
     if not value.is_finite():
         raise ValueError("value must be finite")
