@@ -44,7 +44,8 @@ Schema versions:
     v15 — adds immutable lifecycle reconciliation reports and RECONCILE events.
     v16 — adds the singleton ui_preferences payload table and its optimistic
           concurrency revision.
-    v17 — adds immutable, normalized experiment-result records.
+     v17 — adds immutable, normalized experiment-result records.
+     v18 — adds immutable causal replay decisions and candle snapshots.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Sequence
+from datetime import datetime
 from decimal import (
     Clamped,
     Context,
@@ -73,6 +75,7 @@ import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from src.models.dataset_ref import DatasetRef
+from src.models.audit_contract import CausalDecision, CandleSnapshot
 from src.models.experiment_contracts import (
     ExperimentDefinition,
     ExperimentRef,
@@ -175,7 +178,7 @@ def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, res
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 17
+_SCHEMA_VERSION = 18
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -710,6 +713,7 @@ _SCHEMA_V14_TABLES = _SCHEMA_V13_TABLES
 _SCHEMA_V15_TABLES = _SCHEMA_V14_TABLES | {"paper_lifecycle_reconciliations"}
 _SCHEMA_V16_TABLES = _SCHEMA_V15_TABLES | {"ui_preferences"}
 _SCHEMA_V17_TABLES = _SCHEMA_V16_TABLES | {"normalized_experiment_results"}
+_SCHEMA_V18_TABLES = _SCHEMA_V17_TABLES | {"audit_decisions"}
 
 _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS normalized_experiment_results (
@@ -727,6 +731,24 @@ _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS = (
         idx_normalized_experiment_results_experiment_variant
         ON normalized_experiment_results
             (experiment_id, experiment_version, variant_id)""",
+)
+
+_AUDIT_DECISION_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS audit_decisions (
+        account_id TEXT NOT NULL,
+        paper_session_id TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        decision_json TEXT NOT NULL,
+        candle_json TEXT NOT NULL,
+        PRIMARY KEY (account_id, paper_session_id, decision_id)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_audit_decisions_account
+        ON audit_decisions (account_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_audit_decisions_session
+        ON audit_decisions (paper_session_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_audit_decisions_timestamp
+        ON audit_decisions (timestamp)""",
 )
 
 _PAPER_FILL_DDL_STATEMENTS = (
@@ -1505,6 +1527,53 @@ class SQLiteStore:
             raise RuntimeError("store must be initialized before use")
         return await self._read(
             lambda conn: self._get_paper_fills_inner(conn, account_id, session_id)
+        )
+
+    async def register_causal_decision(
+        self, decision_json: str, candle_json: str, decision_id: str
+    ) -> None:
+        """Persist one replay decision and its exact candle input idempotently."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(decision_json, str) or not decision_json.strip():
+            raise ValueError("decision_json must be a non-empty JSON string")
+        if not isinstance(candle_json, str) or not candle_json.strip():
+            raise ValueError("candle_json must be a non-empty JSON string")
+        if not isinstance(decision_id, str) or not decision_id.strip():
+            raise ValueError("decision_id must be a non-empty string")
+        decision = CausalDecision.model_validate_json(decision_json)
+        candle = CandleSnapshot.model_validate_json(candle_json)
+        if decision.decision_id != decision_id or candle.decision_id != decision_id:
+            raise ValueError("decision_id does not match causal audit payload")
+        if (
+            decision.account_id != candle.account_id
+            or decision.paper_session_id != candle.paper_session_id
+            or decision.symbol != candle.symbol
+            or decision.timestamp != candle.timestamp
+            or decision.candle_index != candle.candle_index
+        ):
+            raise ValueError("causal audit decision and candle identities differ")
+        await self._write(
+            lambda conn: self._register_causal_decision_inner(
+                conn, decision_json, candle_json, decision
+            )
+        )
+
+    async def load_audit_decisions(
+        self, account_id: str, paper_session_id: str
+    ) -> list[tuple[CausalDecision, CandleSnapshot]]:
+        """Load causal decision/candle pairs isolated to one account/session."""
+        self._validate_paper_read_context(account_id, paper_session_id)
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        return await self._read(
+            lambda conn: self._load_audit_decisions_inner(
+                conn, account_id, paper_session_id
+            )
         )
 
     async def get_paper_lifecycle_snapshot(
@@ -2405,6 +2474,58 @@ class SQLiteStore:
                 "stored exclusion payload does not match indexed identity"
             )
         return record
+
+    # ── causal replay audit helpers (v18) ──────────────────────────────────
+
+    @staticmethod
+    async def _register_causal_decision_inner(
+        conn: aiosqlite.Connection,
+        decision_json: str,
+        candle_json: str,
+        decision: CausalDecision,
+    ) -> None:
+        await conn.execute(
+            "INSERT OR IGNORE INTO audit_decisions "
+            "(account_id, paper_session_id, decision_id, timestamp, decision_json, candle_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                decision.account_id,
+                decision.paper_session_id,
+                decision.decision_id,
+                decision.timestamp.isoformat() if isinstance(decision.timestamp, datetime) else decision.timestamp,
+                decision_json,
+                candle_json,
+            ),
+        )
+
+    @staticmethod
+    async def _load_audit_decisions_inner(
+        conn: aiosqlite.Connection, account_id: str, paper_session_id: str
+    ) -> list[tuple[CausalDecision, CandleSnapshot]]:
+        cursor = await conn.execute(
+            "SELECT account_id, paper_session_id, decision_id, decision_json, candle_json "
+            "FROM audit_decisions WHERE account_id = ? AND paper_session_id = ? "
+            "ORDER BY timestamp, decision_id",
+            (account_id, paper_session_id),
+        )
+        result: list[tuple[CausalDecision, CandleSnapshot]] = []
+        for indexed_account, indexed_session, indexed_id, decision_json, candle_json in await cursor.fetchall():
+            decision = CausalDecision.model_validate_json(decision_json)
+            candle = CandleSnapshot.model_validate_json(candle_json)
+            if (
+                decision.account_id != indexed_account
+                or decision.paper_session_id != indexed_session
+                or decision.decision_id != indexed_id
+                or candle.account_id != indexed_account
+                or candle.paper_session_id != indexed_session
+                or candle.decision_id != indexed_id
+                or candle.symbol != decision.symbol
+                or candle.timestamp != decision.timestamp
+                or candle.candle_index != decision.candle_index
+            ):
+                raise StoreCorruptionError("causal audit payload does not match indexed identity")
+            result.append((decision, candle))
+        return result
 
     # ── paper fill helpers (v6) ────────────────────────────────────────────
 
@@ -5562,9 +5683,9 @@ class SQLiteStore:
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0 through 16 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0 through 17 or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -5602,14 +5723,27 @@ class SQLiteStore:
                 )
             for statement in _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS:
                 await conn.execute(statement)
+            for statement in _AUDIT_DECISION_DDL_STATEMENTS:
+                await conn.execute(statement)
 
-        # Already at v17 — just verify completeness.
+        # Already at v18 — just verify completeness.
         if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V17_TABLES <= table_names:
+            if not _SCHEMA_V18_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
-                    "schema version is 17 but required tables are missing"
+                    "schema version is 18 but required tables are missing"
                 )
             await create_ui_preferences_table()
+            return
+
+        # v17 → v18: add immutable causal decision and candle JSON records.
+        if version == 17:
+            if not _SCHEMA_V17_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 17 but required v17 tables are missing"
+                )
+            for statement in _AUDIT_DECISION_DDL_STATEMENTS:
+                await conn.execute(statement)
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
         # v16 → v17: add immutable normalized experiment-result records.
@@ -5619,6 +5753,8 @@ class SQLiteStore:
                     "schema version is 16 but required v16 tables are missing"
                 )
             for statement in _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS:
+                await conn.execute(statement)
+            for statement in _AUDIT_DECISION_DDL_STATEMENTS:
                 await conn.execute(statement)
             await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return

@@ -19,6 +19,7 @@ from src.models.experiment_contracts import (
     PeriodWindow,
     RunAttempt,
 )
+from src.models.audit_contract import CandleSnapshot, CausalDecision
 from src.models.normalized_experiment import NormalizedExperimentResult, NormalizedMetric
 from src.models.paper_contracts import (
     AssetBalance,
@@ -247,6 +248,111 @@ def _metrics_evaluation(fill_id: str, order_id: str) -> PaperFillEvaluationRecor
         evaluated_at_ms=1,
         fill_candidate_fill_id=fill_id,
     )
+
+
+def _audit_pair(account_id: str = "acct", session_id: str = "session"):
+    decision = CausalDecision(
+        account_id=account_id, paper_session_id=session_id, decision_id="decision-1",
+        signal_id="signal-1", segment_id="segment-1", symbol="BTC/USDT",
+        strategy="TEST_ONLY", timestamp=1, candle_index=0, side="BUY", reason="test",
+    )
+    candle = CandleSnapshot(
+        account_id=account_id, paper_session_id=session_id, decision_id="decision-1",
+        symbol="BTC/USDT", timestamp=1, candle_index=0, open=Decimal("9"),
+        high=Decimal("11"), low=Decimal("8"), close=Decimal("10"), volume=Decimal("2"),
+    )
+    return decision, candle
+
+
+def test_inspector_success(monkeypatch, tmp_path: Path) -> None:
+    order = _metrics_order("order-1").model_copy(update={"decision_id": "decision-1"})
+    fill = _metrics_fill("fill-1", "order-1")
+    store = _metrics_store(monkeypatch, tmp_path, orders=(order,), fills=(fill,))
+    decision, candle = _audit_pair()
+    async def audits(_account: str, _session: str):
+        return [(decision, candle)]
+    async def lifecycle(_account: str, _session: str):
+        return {"state": "running"}
+    monkeypatch.setattr(store, "load_audit_decisions", audits)
+    monkeypatch.setattr(store, "get_paper_lifecycle_snapshot", lifecycle)
+    try:
+        with _client(store) as client:
+            response = client.get("/api/laboratory/inspector/acct/session")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "available"
+        assert data["decisions"][0]["candle"]["decision_id"] == "decision-1"
+        assert data["decisions"][0]["orders"][0]["order_id"] == "order-1"
+        assert data["decisions"][0]["fills"][0]["fill_id"] == "fill-1"
+    finally:
+        _run(store.close())
+
+
+def test_inspector_404_account_not_found(monkeypatch, tmp_path: Path) -> None:
+    store = _metrics_store(monkeypatch, tmp_path)
+    try:
+        with _client(store) as client:
+            response = client.get("/api/laboratory/inspector/missing/session")
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "LABORATORY_ACCOUNT_NOT_FOUND"
+    finally:
+        _run(store.close())
+
+
+def test_inspector_404_session_not_found(monkeypatch, tmp_path: Path) -> None:
+    store = _metrics_store(monkeypatch, tmp_path)
+    async def no_lifecycle(_account: str, _session: str):
+        return None
+    async def no_audits(_account: str, _session: str):
+        return []
+    monkeypatch.setattr(store, "get_paper_lifecycle_snapshot", no_lifecycle)
+    monkeypatch.setattr(store, "load_audit_decisions", no_audits)
+    try:
+        with _client(store) as client:
+            response = client.get("/api/laboratory/inspector/acct/missing")
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "LABORATORY_SESSION_NOT_FOUND"
+    finally:
+        _run(store.close())
+
+
+def test_inspector_insufficient_data(monkeypatch, tmp_path: Path) -> None:
+    store = _metrics_store(monkeypatch, tmp_path)
+    async def no_audits(_account: str, _session: str):
+        return []
+    async def lifecycle(_account: str, _session: str):
+        return {"state": "running"}
+    monkeypatch.setattr(store, "load_audit_decisions", no_audits)
+    monkeypatch.setattr(store, "get_paper_lifecycle_snapshot", lifecycle)
+    try:
+        with _client(store) as client:
+            response = client.get("/api/laboratory/inspector/acct/session")
+        assert response.status_code == 200
+        assert response.json()["status"] == "insufficient_data"
+        assert response.json()["reason"]
+    finally:
+        _run(store.close())
+
+
+def test_inspector_session_isolation(monkeypatch, tmp_path: Path) -> None:
+    store = _metrics_store(monkeypatch, tmp_path)
+    decision_a, candle_a = _audit_pair(session_id="session-a")
+    decision_b, candle_b = _audit_pair(session_id="session-b")
+    async def audits(_account: str, session: str):
+        return [(decision_a, candle_a)] if session == "session-a" else [(decision_b, candle_b)]
+    async def lifecycle(_account: str, _session: str):
+        return {"state": "running"}
+    monkeypatch.setattr(store, "load_audit_decisions", audits)
+    monkeypatch.setattr(store, "get_paper_lifecycle_snapshot", lifecycle)
+    try:
+        with _client(store) as client:
+            a = client.get("/api/laboratory/inspector/acct/session-a").json()
+            b = client.get("/api/laboratory/inspector/acct/session-b").json()
+        assert [row["decision_id"] for row in a["decisions"]] == ["decision-1"]
+        assert [row["paper_session_id"] for row in a["decisions"]] == ["session-a"]
+        assert [row["paper_session_id"] for row in b["decisions"]] == ["session-b"]
+    finally:
+        _run(store.close())
 
 
 def test_single_result_preserves_decimal_unit_and_opaque_fields(tmp_path: Path) -> None:

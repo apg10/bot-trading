@@ -121,6 +121,50 @@ export interface CostBreakdownReport {
   readonly reason: string | null
 }
 
+export interface InspectorCandle {
+  readonly account_id: string
+  readonly paper_session_id: string
+  readonly decision_id: string
+  readonly symbol: string
+  readonly timestamp: number | string
+  readonly candle_index: number
+  readonly open: string
+  readonly high: string
+  readonly low: string
+  readonly close: string
+  readonly volume: string
+}
+
+export interface InspectorDecision {
+  readonly account_id: string
+  readonly paper_session_id: string
+  readonly decision_id: string
+  readonly signal_id: string
+  readonly segment_id: string
+  readonly symbol: string
+  readonly strategy: string
+  readonly is_test_only: true
+  readonly timestamp: number | string
+  readonly candle_index: number
+  readonly side: string
+  readonly reason: string
+  readonly candle: InspectorCandle
+  readonly orders: readonly Record<string, unknown>[]
+  readonly fills: readonly Record<string, unknown>[]
+}
+
+export interface OperationInspectorReport {
+  readonly schema_version: "operation_inspector.v1"
+  readonly account_id: string
+  readonly session_id: string
+  readonly status: LaboratoryProjectionStatus
+  readonly decisions: readonly InspectorDecision[]
+  readonly candles: readonly InspectorCandle[]
+  readonly orders: readonly Record<string, unknown>[]
+  readonly fills: readonly Record<string, unknown>[]
+  readonly reason: string | null
+}
+
 export type LaboratoryErrorCode = "http" | "unavailable" | "invalid_response"
 
 /** Public errors are bounded and never contain an HTTP response body. */
@@ -249,6 +293,40 @@ function costBreakdown(value: unknown): value is CostBreakdownReport {
     && (value.reason === null || nonEmptyString(value.reason))
 }
 
+function inspectorCandle(value: unknown): value is InspectorCandle {
+  return isRecord(value) && nonEmptyString(value.account_id)
+    && nonEmptyString(value.paper_session_id) && nonEmptyString(value.decision_id)
+    && nonEmptyString(value.symbol) && ((integer(value.timestamp) && value.timestamp >= 0) || nonEmptyString(value.timestamp))
+    && integer(value.candle_index) && value.candle_index >= 0
+    && nonEmptyString(value.open) && nonEmptyString(value.high)
+    && nonEmptyString(value.low) && nonEmptyString(value.close)
+    && nonEmptyString(value.volume)
+}
+
+function inspectorDecision(value: unknown): value is InspectorDecision {
+  return isRecord(value) && nonEmptyString(value.account_id)
+    && nonEmptyString(value.paper_session_id) && nonEmptyString(value.decision_id)
+    && nonEmptyString(value.signal_id) && nonEmptyString(value.segment_id)
+    && nonEmptyString(value.symbol) && nonEmptyString(value.strategy)
+    && value.is_test_only === true
+    && ((integer(value.timestamp) && value.timestamp >= 0) || nonEmptyString(value.timestamp))
+    && integer(value.candle_index) && value.candle_index >= 0
+    && nonEmptyString(value.side) && typeof value.reason === "string"
+    && inspectorCandle(value.candle) && Array.isArray(value.orders)
+    && value.orders.every(isRecord) && Array.isArray(value.fills)
+    && value.fills.every(isRecord)
+}
+
+function operationInspector(value: unknown): value is OperationInspectorReport {
+  return isRecord(value) && value.schema_version === "operation_inspector.v1"
+    && nonEmptyString(value.account_id) && nonEmptyString(value.session_id)
+    && projectionStatus(value.status) && Array.isArray(value.decisions)
+    && value.decisions.every(inspectorDecision) && Array.isArray(value.candles)
+    && value.candles.every(inspectorCandle) && Array.isArray(value.orders)
+    && value.orders.every(isRecord) && Array.isArray(value.fills)
+    && value.fills.every(isRecord) && (value.reason === null || nonEmptyString(value.reason))
+}
+
 function aggregate(value: unknown): value is NormalizedMetricAggregate {
   if (!isRecord(value) || !nonEmptyString(value.metric_id)
     || (value.unit !== null && !nonEmptyString(value.unit))
@@ -359,5 +437,15 @@ export async function getCostBreakdown(
     + `?quote_asset=${encodeURIComponent(quoteAsset)}`
   const value = await request(path)
   if (!costBreakdown(value)) invalidResponse()
+  return value
+}
+
+export async function getInspector(
+  accountId: string,
+  sessionId: string,
+): Promise<OperationInspectorReport> {
+  const path = `/api/laboratory/inspector/${encodeURIComponent(accountId)}/${encodeURIComponent(sessionId)}`
+  const value = await request(path)
+  if (!operationInspector(value)) invalidResponse()
   return value
 }

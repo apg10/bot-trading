@@ -3,12 +3,14 @@ import {
   getCapitalCurve,
   getComparison,
   getCostBreakdown,
+  getInspector,
   type CapitalCurveReport,
   type CostBreakdownReport,
   type ExperimentComparisonReport,
   type NormalizedExperimentResult,
   type NormalizedMetric,
   type NormalizedMetricAggregate,
+  type OperationInspectorReport,
 } from "../api/laboratory"
 
 type FormValues = {
@@ -84,8 +86,38 @@ export function LaboratoryCostBreakdown({ report }: { report: CostBreakdownRepor
               <tr key={fill.fill_id}>
                 <th scope="row">{fill.fill_id}</th><td>{fill.side}</td><td>{fill.qty}</td><td>{fill.price}</td>
                 <td>{fill.commission?.amount ?? fill.commission?.value ?? "unknown"}</td>
-                <td>{fill.slippage.amount ?? fill.slippage.value ?? <span title={fill.slippage.reason}>{fill.slippage.status}</span>}</td>
+                <td>{fill.slippage.amount ?? fill.slippage.value ?? <span title={fill.slippage.reason ?? undefined}>{fill.slippage.status}</span>}</td>
                 <td>{fill.total_cost?.amount ?? fill.total_cost?.value ?? "unknown"}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+export function LaboratoryInspector({ report }: { report: OperationInspectorReport }) {
+  return (
+    <section className="card" aria-label="Operation inspector">
+      <div className="card-title">Inspector de operaciones · {report.account_id}/{report.session_id}</div>
+      {report.status !== "available" ? (
+        <p role="status">{report.status}{report.reason ? `: ${report.reason}` : ""}</p>
+      ) : report.decisions.length === 0 ? (
+        <p role="status">No hay decisiones auditadas.</p>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table>
+            <thead><tr><th>Decision</th><th>Timestamp</th><th>Candle</th><th>OHLCV</th><th>Reason</th><th>Order</th><th>Fill</th></tr></thead>
+            <tbody>{report.decisions.map(decision => (
+              <tr key={decision.decision_id}>
+                <th scope="row">{decision.side} · {decision.decision_id}</th>
+                <td>{decision.timestamp}</td>
+                <td>{decision.candle_index}</td>
+                <td>{decision.candle.open} / {decision.candle.high} / {decision.candle.low} / {decision.candle.close} / {decision.candle.volume}</td>
+                <td>{decision.reason}</td>
+                <td>{decision.orders.length === 0 ? "insufficient_data" : decision.orders.map(order => String(order.order_id ?? "unknown")).join(", ")}</td>
+                <td>{decision.fills.length === 0 ? "insufficient_data" : decision.fills.map(fill => String(fill.fill_id ?? "unknown")).join(", ")}</td>
               </tr>
             ))}</tbody>
           </table>
@@ -180,6 +212,7 @@ export function LaboratoryView() {
   const [error, setError] = useState<string | null>(null)
   const [capitalCurve, setCapitalCurve] = useState<CapitalCurveReport | null>(null)
   const [costBreakdown, setCostBreakdown] = useState<CostBreakdownReport | null>(null)
+  const [inspector, setInspector] = useState<OperationInspectorReport | null>(null)
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -192,20 +225,23 @@ export function LaboratoryView() {
     setError(null)
     setCapitalCurve(null)
     setCostBreakdown(null)
+    setInspector(null)
     try {
       const comparison = getComparison(
         form.experimentId, form.experimentVersion, form.comparisonId, form.comparisonVersion,
       )
       const hasMetricsContext = form.accountId.trim() !== "" && form.sessionId.trim() !== ""
       if (hasMetricsContext) {
-        const [next, curve, costs] = await Promise.all([
+        const [next, curve, costs, nextInspector] = await Promise.all([
           comparison,
           getCapitalCurve(form.accountId, form.sessionId, form.quoteAsset || "USDT"),
           getCostBreakdown(form.accountId, form.sessionId, form.quoteAsset || "USDT"),
+          getInspector(form.accountId, form.sessionId),
         ])
         setReport(next)
         setCapitalCurve(curve)
         setCostBreakdown(costs)
+        setInspector(nextInspector)
       } else {
         setReport(await comparison)
       }
@@ -249,9 +285,10 @@ export function LaboratoryView() {
       {report ? <>
         <LaboratoryComparisonResult report={report} />
         {(capitalCurve || costBreakdown) && <div style={{ display: "grid", gap: "var(--space-sm)", padding: "0 var(--space-lg) var(--space-lg)" }}>
-          {capitalCurve && <LaboratoryCapitalCurve report={capitalCurve} />}
-          {costBreakdown && <LaboratoryCostBreakdown report={costBreakdown} />}
-        </div>}
+           {capitalCurve && <LaboratoryCapitalCurve report={capitalCurve} />}
+           {costBreakdown && <LaboratoryCostBreakdown report={costBreakdown} />}
+           {inspector && <LaboratoryInspector report={inspector} />}
+         </div>}
       </> : !loading && !error ? (
         <p role="status" style={{ padding: "var(--space-lg)", color: "var(--color-text-muted)" }}>
           Sin resultados. Introduce los identificadores para consultar una comparación.

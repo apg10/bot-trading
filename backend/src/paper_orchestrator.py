@@ -21,6 +21,7 @@ from src.models.paper_contracts import (
     PaperPositionView,
     StrategyRef,
 )
+from src.models.audit_contract import CausalDecision, CandleSnapshot
 from src.models.paper_execution import (
     PaperExecutionPolicy,
     PaperFeeSnapshot,
@@ -716,6 +717,48 @@ def _adapter_commission(fee_snapshot: Any, quantity: Decimal, price: Decimal) ->
     )
 
 
+def _persist_replay_audit(
+    persistence: Any,
+    signal: PaperSignal,
+    candle,
+    account_id: str,
+    session_id: str,
+) -> None:
+    """Write the causal record before any order, fill, or balance mutation."""
+    register = getattr(persistence, "register_causal_decision", None)
+    if register is None:
+        return
+    decision = CausalDecision(
+        account_id=account_id,
+        paper_session_id=session_id,
+        decision_id=signal.signal_id,
+        signal_id=signal.signal_id,
+        segment_id=signal.segment_id,
+        symbol=signal.symbol,
+        strategy=signal.strategy,
+        timestamp=signal.timestamp_ms,
+        candle_index=signal.candle_index,
+        side=signal.side.value,
+        reason=signal.reason,
+    )
+    snapshot = CandleSnapshot(
+        account_id=account_id,
+        paper_session_id=session_id,
+        decision_id=signal.signal_id,
+        symbol=signal.symbol,
+        timestamp=candle.timestamp_ms,
+        candle_index=signal.candle_index,
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
+    )
+    _run_adapter_io(
+        register(decision.model_dump_json(), snapshot.model_dump_json(), signal.signal_id)
+    )
+
+
 # --- Signal entry adapter ---
 
 
@@ -803,7 +846,33 @@ def apply_signal_to_paper(
             signal=signal.side.value,
         )
 
-    # HOLD is deliberately side-effect-free.
+    # Resolve explicit identity before evaluating the side.  Even HOLDs and
+    # financially rejected signals are audit observations, not inferred trades.
+    account_id = getattr(risk_snapshot, "account_id", None)
+    if account_id is None:
+        account_id = getattr(persistence, "account_id", None)
+    lifecycle_account_id = getattr(lifecycle, "account_id", None)
+    if lifecycle_account_id is not None and lifecycle_account_id != account_id:
+        return PaperResult(
+            success=False,
+            error="lifecycle account does not match risk snapshot account",
+            signal=signal.side.value,
+        )
+    session_id = getattr(lifecycle, "paper_session_id", None)
+    if session_id is None:
+        session_id = getattr(persistence, "paper_session_id", None)
+    if session_id is None:
+        session_id = getattr(persistence, "session_id", None)
+    if not isinstance(account_id, str) or not account_id.strip():
+        return PaperResult(success=False, error="explicit account identity is required", signal=signal.side.value)
+    if not isinstance(session_id, str) or not session_id.strip():
+        return PaperResult(success=False, error="explicit paper session identity is required", signal=signal.side.value)
+    try:
+        _persist_replay_audit(persistence, signal, candle, account_id, session_id)
+    except Exception as exc:
+        return PaperResult(success=False, signal=signal.side.value, error=str(exc))
+
+    # HOLD is deliberately financial-side-effect-free, but remains auditable.
     if signal.side == DecisionSide.HOLD:
         return PaperResult(success=True, signal="HOLD", order_id=None, fill_id=None)
 
@@ -828,26 +897,6 @@ def apply_signal_to_paper(
             error=f"lifecycle is {lifecycle_value}",
             signal="BUY",
         )
-
-    account_id = getattr(risk_snapshot, "account_id", None)
-    if account_id is None:
-        account_id = getattr(persistence, "account_id", None)
-    lifecycle_account_id = getattr(lifecycle, "account_id", None)
-    if lifecycle_account_id is not None and lifecycle_account_id != account_id:
-        return PaperResult(
-            success=False,
-            error="lifecycle account does not match risk snapshot account",
-            signal="BUY",
-        )
-    session_id = getattr(lifecycle, "paper_session_id", None)
-    if session_id is None:
-        session_id = getattr(persistence, "paper_session_id", None)
-    if session_id is None:
-        session_id = getattr(persistence, "session_id", None)
-    if not isinstance(account_id, str) or not account_id.strip():
-        return PaperResult(success=False, error="explicit account identity is required", signal="BUY")
-    if not isinstance(session_id, str) or not session_id.strip():
-        return PaperResult(success=False, error="explicit paper session identity is required", signal="BUY")
 
     # Every input consumed by the durable evaluator is caller-owned state.  In
     # particular, a legacy MarketSnapshot lacks capture/bar provenance and is
@@ -894,7 +943,7 @@ def apply_signal_to_paper(
             price=entry_price,
             status=PaperOrderStatus.PREPARED,
             strategy_ref=strategy_ref,
-            decision_id=evaluation_id,
+            decision_id=signal.signal_id,
             timestamp_ms=signal.timestamp_ms,
         )
         effective_risk_policy = risk_policy
@@ -1051,6 +1100,31 @@ def apply_exit_signal_to_paper(
             signal="SELL",
         )
 
+    # Capture the causal observation before lifecycle, market, position, or
+    # financial gates can reject the SELL.  Replays must retain abstentions and
+    # rejected decisions as well as completed operations.
+    account_id = (
+        getattr(position, "account_id", None)
+        or getattr(lifecycle, "account_id", None)
+        or getattr(risk_snapshot, "account_id", None)
+        or getattr(persistence, "account_id", None)
+    )
+    session_id = (
+        getattr(position, "paper_session_id", None)
+        or getattr(position, "session_id", None)
+        or getattr(lifecycle, "paper_session_id", None)
+        or getattr(persistence, "paper_session_id", None)
+        or getattr(persistence, "session_id", None)
+    )
+    if not isinstance(account_id, str) or not account_id.strip():
+        return PaperResult(success=False, error="explicit account identity is required", signal="SELL")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return PaperResult(success=False, error="explicit paper session identity is required", signal="SELL")
+    try:
+        _persist_replay_audit(persistence, signal, candle, account_id, session_id)
+    except Exception as exc:
+        return PaperResult(success=False, signal="SELL", error=str(exc))
+
     lifecycle_value = getattr(lifecycle, "state", lifecycle)
     lifecycle_value = getattr(lifecycle_value, "value", lifecycle_value)
     if lifecycle_value == LifecycleState.STOPPED.value:
@@ -1091,21 +1165,6 @@ def apply_exit_signal_to_paper(
     # Check the deterministic identity before requiring the currently open
     # lot.  A completed exit remains retryable after a process restart, even if
     # the position projection has already consumed its lot.
-    account_id = (
-        getattr(position, "account_id", None)
-        or getattr(lifecycle, "account_id", None)
-        or getattr(risk_snapshot, "account_id", None)
-        or getattr(persistence, "account_id", None)
-        or "acct-1"
-    )
-    session_id = (
-        getattr(position, "paper_session_id", None)
-        or getattr(position, "session_id", None)
-        or getattr(lifecycle, "paper_session_id", None)
-        or getattr(persistence, "paper_session_id", None)
-        or getattr(persistence, "session_id", None)
-        or "session-1"
-    )
     order_id = f"ord-exit-{signal.signal_id}"
     evaluation_id = f"eval-exit-{signal.signal_id}"
 
@@ -1115,10 +1174,9 @@ def apply_exit_signal_to_paper(
         status = _adapter_order_value(existing, "status")
         status_value = getattr(status, "value", status)
         fills = _adapter_order_value(existing, "fills", ()) or ()
-        if existing_eval != evaluation_id and existing_decision != evaluation_id:
-            # A durable SQLite read projection stores the evaluation identity
-            # as decision_id; a lightweight replay fixture commonly stores it
-            # as evaluation_id.
+        if existing_eval != evaluation_id and existing_decision != signal.signal_id:
+            # SQLite stores the causal signal identity as decision_id; a
+            # lightweight replay fixture may expose evaluation_id separately.
             if _adapter_order_value(existing, "order_id") != order_id:
                 return None
         if status_value not in (PaperOrderStatus.FILLED, PaperOrderStatus.FILLED.value):
@@ -1245,7 +1303,7 @@ def apply_exit_signal_to_paper(
         requested_qty=quantity,
         price=bid_price,
         strategy_ref=strategy_ref,
-        decision_id=evaluation_id,
+        decision_id=signal.signal_id,
         status=PaperOrderStatus.PREPARED,
         timestamp_ms=signal.timestamp_ms,
         lot_allocations=(allocation,),

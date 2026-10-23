@@ -5,14 +5,16 @@ import {
   getComparison,
   getCapitalCurve,
   getCostBreakdown,
+  getInspector,
   getNormalizedResult,
   LaboratoryApiError,
   type CapitalCurveReport,
   type CostBreakdownReport,
   type ExperimentComparisonReport,
   type NormalizedExperimentResult,
+  type OperationInspectorReport,
 } from "../src/api/laboratory"
-import { LaboratoryCapitalCurve, LaboratoryComparisonResult, LaboratoryCostBreakdown } from "../src/components/LaboratoryView"
+import { LaboratoryCapitalCurve, LaboratoryComparisonResult, LaboratoryCostBreakdown, LaboratoryInspector } from "../src/components/LaboratoryView"
 
 const result = (variantId: string, status: "available" | "undefined" | "insufficient_data", value: string | null): NormalizedExperimentResult => ({
   schema_version: "normalized_experiment_result.v1",
@@ -92,6 +94,19 @@ const costReport: CostBreakdownReport = {
   ],
 }
 
+const inspectorReport: OperationInspectorReport = {
+  schema_version: "operation_inspector.v1", account_id: "account/one", session_id: "session/one",
+  status: "available", reason: null,
+  decisions: [{
+    account_id: "account/one", paper_session_id: "session/one", decision_id: "decision-1",
+    signal_id: "signal-1", segment_id: "segment-1", symbol: "BTC/USDT", strategy: "TEST_ONLY",
+    is_test_only: true, timestamp: 1, candle_index: 0, side: "BUY", reason: "band crossed",
+    candle: { account_id: "account/one", paper_session_id: "session/one", decision_id: "decision-1", symbol: "BTC/USDT", timestamp: 1, candle_index: 0, open: "9", high: "11", low: "8", close: "10", volume: "2" },
+    orders: [{ order_id: "order-1" }], fills: [{ fill_id: "fill-1" }],
+  }],
+  candles: [], orders: [{ order_id: "order-1" }], fills: [{ fill_id: "fill-1" }],
+}
+
 function response(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response
 }
@@ -151,6 +166,32 @@ describe("laboratory read client", () => {
     expect(curve.points[0]?.balance).toBe("89.90000000000000000001")
     expect(typeof costs.fills[0]?.qty).toBe("string")
     expect(costs.fills[0]?.qty).toBe("0.12345678901234567890")
+  })
+
+  it("exposes the inspector client method with encoded GET path", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response(inspectorReport))
+    const loaded = await getInspector("account/one", "session/one")
+    expect(loaded.decisions[0]?.decision_id).toBe("decision-1")
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("http://frontend.test/api/laboratory/inspector/account%2Fone/session%2Fone")
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe("GET")
+  })
+})
+
+describe("laboratory operation inspector rendering", () => {
+  it("renders the decision to order to fill causal chain", () => {
+    const html = renderToStaticMarkup(createElement(LaboratoryInspector, { report: inspectorReport }))
+    expect(html).toContain("decision-1")
+    expect(html).toContain("order-1")
+    expect(html).toContain("fill-1")
+    expect(html).toContain("band crossed")
+  })
+
+  it("renders insufficient_data for an empty historical session", () => {
+    const html = renderToStaticMarkup(createElement(LaboratoryInspector, {
+      report: { ...inspectorReport, status: "insufficient_data", decisions: [], candles: [], orders: [], fills: [], reason: "causal audit data is not available" },
+    }))
+    expect(html).toContain("insufficient_data")
+    expect(html).toContain("causal audit data is not available")
   })
 })
 

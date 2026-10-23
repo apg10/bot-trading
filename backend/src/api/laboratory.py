@@ -254,3 +254,86 @@ async def get_cost_breakdown(
             detail={"code": "LABORATORY_INSUFFICIENT_DATA", "reason": report.reason, "available": False},
         )
     return report.model_dump(mode="json")
+
+
+@router.get("/inspector/{account_id}/{session_id}")
+async def get_operation_inspector(
+    account_id: str, session_id: str, request: Request
+) -> dict:
+    """Return the persisted causal decision → order → fill projection.
+
+    Historical PAPER rows without the v18 audit journal are intentionally
+    reported as insufficient data; this endpoint never reconstructs decisions
+    from orders or fills.
+    """
+    store = _store_for(request)
+    try:
+        if not account_id.strip() or await store.load_paper_account_opening(account_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "LABORATORY_ACCOUNT_NOT_FOUND", "account_id": account_id, "available": False},
+            )
+        if not session_id.strip():
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "LABORATORY_SESSION_NOT_FOUND", "account_id": account_id, "session_id": session_id, "available": False},
+            )
+        audits = await store.load_audit_decisions(account_id, session_id)
+        orders = await store.get_paper_orders(account_id, session_id)
+        fills = await store.get_paper_fills(account_id, session_id)
+        lifecycle = await store.get_paper_lifecycle_snapshot(account_id, session_id)
+    except HTTPException:
+        raise
+    except (StoreClosedError, RuntimeError) as exc:
+        raise _store_unavailable(exc) from exc
+    except (StoreCorruptionError, ValueError) as exc:
+        raise _corruption(exc) from exc
+
+    if not audits and not orders and not fills and lifecycle is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LABORATORY_SESSION_NOT_FOUND", "account_id": account_id, "session_id": session_id, "available": False},
+        )
+
+    order_by_decision: dict[str, list[dict]] = {}
+    for order in orders:
+        decision_id = order.get("decision_id")
+        if isinstance(decision_id, str):
+            order_by_decision.setdefault(decision_id, []).append(order)
+    fills_by_order: dict[str, list[dict]] = {}
+    for fill in fills:
+        order_id = fill.get("order_id")
+        if isinstance(order_id, str):
+            fills_by_order.setdefault(order_id, []).append(fill)
+
+    decisions: list[dict] = []
+    candles: list[dict] = []
+    for decision, candle in audits:
+        decision_payload = decision.model_dump(mode="json")
+        candle_payload = candle.model_dump(mode="json")
+        linked_orders = order_by_decision.get(decision.decision_id, [])
+        linked_fills = [
+            fill
+            for order in linked_orders
+            for fill in fills_by_order.get(order.get("order_id"), [])
+        ]
+        decisions.append({
+            **decision_payload,
+            "candle": candle_payload,
+            "orders": linked_orders,
+            "fills": linked_fills,
+        })
+        candles.append(candle_payload)
+
+    status = "available" if audits else "insufficient_data"
+    return {
+        "schema_version": "operation_inspector.v1",
+        "account_id": account_id,
+        "session_id": session_id,
+        "status": status,
+        "decisions": decisions,
+        "candles": candles,
+        "orders": orders,
+        "fills": fills,
+        "reason": None if audits else "causal audit data is not available for this historical session",
+    }
