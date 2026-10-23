@@ -115,7 +115,12 @@ from src.models.paper_symbol_filters import (
     MarketNotionalReference, SymbolFilterSnapshot, SymbolFilterResult,
     validate_symbol_filters,
 )
-from src.models.normalized_experiment import NormalizedExperimentResult
+from src.models.normalized_experiment import (
+    ExperimentComparison,
+    ExperimentComparisonReport,
+    NormalizedExperimentResult,
+    NormalizedMetricAggregate,
+)
 from src.models.strategy_config import StrategyConfig
 
 # ── AssetBalance JSON loader con precisión contractual ───────────────────────────
@@ -1212,6 +1217,46 @@ class SQLiteStore:
             lambda conn: self._load_normalized_experiment_result_inner(
                 conn, result_id
             )
+        )
+
+    async def load_experiment_comparison(
+        self,
+        experiment_ref: ExperimentRef,
+        comparison_id: str,
+        comparison_version: str,
+    ) -> ExperimentComparisonReport | None:
+        """Load and aggregate all normalized results for one experiment.
+
+        This is a read-only snapshot operation.  Every selected result goes
+        through the same integrity validation as the single-result loader;
+        rows from other experiment references are never considered.
+        """
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(experiment_ref, ExperimentRef):
+            raise TypeError("experiment_ref must be an ExperimentRef instance")
+        if not isinstance(comparison_id, str) or not comparison_id.strip():
+            raise ValueError("comparison_id must be a non-empty string")
+        if not isinstance(comparison_version, str) or not comparison_version.strip():
+            raise ValueError("comparison_version must be a non-empty string")
+        ref = ExperimentRef.model_validate(experiment_ref.model_dump(mode="python"))
+        return await self._read(
+            lambda conn: self._load_experiment_comparison_inner(
+                conn, ref, comparison_id, comparison_version
+            )
+        )
+
+    async def load_normalized_experiment_comparison(
+        self,
+        experiment_ref: ExperimentRef,
+        comparison_id: str,
+        comparison_version: str,
+    ) -> ExperimentComparisonReport | None:
+        """Explicitly named alias for :meth:`load_experiment_comparison`."""
+        return await self.load_experiment_comparison(
+            experiment_ref, comparison_id, comparison_version
         )
 
     async def record_variant_discard(self, record: VariantDiscardRecord) -> None:
@@ -6468,6 +6513,115 @@ class SQLiteStore:
                 "normalized result does not match its completed run and experiment"
             )
         return result
+
+    @staticmethod
+    async def _load_experiment_comparison_inner(
+        conn: aiosqlite.Connection,
+        experiment_ref: ExperimentRef,
+        comparison_id: str,
+        comparison_version: str,
+    ) -> ExperimentComparisonReport | None:
+        """Build a comparison from one exact indexed experiment reference."""
+        cursor = await conn.execute(
+            "SELECT result_id FROM normalized_experiment_results "
+            "WHERE experiment_id = ? AND experiment_version = ? "
+            "ORDER BY variant_id ASC, result_id ASC",
+            (experiment_ref.experiment_id, experiment_ref.experiment_version),
+        )
+        result_rows = await cursor.fetchall()
+        if not result_rows:
+            return None
+
+        # Load the definition independently of the result payload.  The
+        # persisted definition is the sole source of the hypothesis.
+        definition = await SQLiteStore._load_experiment_inner(conn, experiment_ref)
+        if definition is None:
+            raise NormalizedExperimentResultStateError(
+                f"experiment {experiment_ref} not found"
+            )
+
+        results: list[NormalizedExperimentResult] = []
+        for (result_id,) in result_rows:
+            result = await SQLiteStore._load_normalized_experiment_result_inner(
+                conn, result_id
+            )
+            if result is None:  # The snapshot should make this impossible.
+                raise NormalizedExperimentResultIntegrityError(
+                    f"normalized result {result_id} disappeared during comparison load"
+                )
+            results.append(result)
+
+        if len(results) < 3:
+            raise NormalizedExperimentResultStateError(
+                "comparison requires at least three normalized results"
+            )
+
+        comparison = ExperimentComparison(
+            comparison_id=comparison_id,
+            comparison_version=comparison_version,
+            hypothesis=definition.hypothesis,
+            normalized_results=tuple(results),
+        )
+
+        first_metrics = comparison.normalized_results[0].metrics
+        aggregates: list[NormalizedMetricAggregate] = []
+        for metric in first_metrics:
+            observed = [
+                candidate_metric.value
+                for result in comparison.normalized_results
+                for candidate_metric in result.metrics
+                if candidate_metric.metric_id == metric.metric_id
+                and candidate_metric.status == "available"
+            ]
+            undefined_count = sum(
+                candidate_metric.status == "undefined"
+                for result in comparison.normalized_results
+                for candidate_metric in result.metrics
+                if candidate_metric.metric_id == metric.metric_id
+            )
+            insufficient_data_count = sum(
+                candidate_metric.status == "insufficient_data"
+                for result in comparison.normalized_results
+                for candidate_metric in result.metrics
+                if candidate_metric.metric_id == metric.metric_id
+            )
+            if observed:
+                # Do not let a caller's ambient Decimal context change a
+                # comparison report.  Finite decimal means remain exact; a
+                # recurring quotient is represented at this fixed precision.
+                with localcontext() as decimal_context:
+                    source_precision = max(
+                        len(value.as_tuple().digits) for value in observed
+                    )
+                    decimal_context.prec = max(
+                        decimal_context.prec,
+                        28,
+                        source_precision + len(str(len(observed))) + 28,
+                    )
+                    decimal_context.traps[Inexact] = False
+                    total = sum(observed, Decimal("0"))
+                    mean = total / Decimal(len(observed))
+                minimum = min(observed)
+                maximum = max(observed)
+            else:
+                mean = minimum = maximum = None
+            aggregates.append(
+                NormalizedMetricAggregate(
+                    metric_id=metric.metric_id,
+                    unit=metric.unit,
+                    available_count=len(observed),
+                    undefined_count=undefined_count,
+                    insufficient_data_count=insufficient_data_count,
+                    mean=mean,
+                    minimum=minimum,
+                    maximum=maximum,
+                )
+            )
+
+        return ExperimentComparisonReport(
+            comparison=comparison,
+            aggregates=tuple(aggregates),
+        )
 
     # ── experiment result helpers (v4) ─────────────────────────────────────
 

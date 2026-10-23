@@ -305,3 +305,63 @@ def test_run_uniqueness_enforced(tmp_path: Path) -> None:
     )
     with pytest.raises(NormalizedExperimentResultConflictError):
         _run(store.register_normalized_experiment_result(second))
+
+
+def test_load_experiment_comparison_aggregates_sorted_abc_results(tmp_path: Path) -> None:
+    store, _ = _setup_store_with_completed_run(tmp_path)
+    for variant in ("B", "C"):
+        pending = RunAttempt(
+            run_id=f"run-{variant}",
+            experiment_ref=ExperimentRef(experiment_id="exp-1", experiment_version="v1"),
+            variant_id=variant,
+            status="pending",
+            seed=None,
+        )
+        _run(store.create_run_attempt(pending))
+        completed = _make_completed_run(run_id=f"run-{variant}", variant_id=variant)
+        conn = sqlite3.connect(str(tmp_path / "test.db"))
+        conn.execute(
+            "UPDATE run_attempts SET status=?, run_json=? WHERE run_id=?",
+            (completed.status, completed.model_dump_json(), completed.run_id),
+        )
+        conn.commit()
+        conn.close()
+
+    for variant, value in (("A", "1"), ("B", "3"), ("C", "5")):
+        result = _make_result(variant_id=variant, result_id=f"res-{variant}").model_copy(
+            update={
+                "metrics": (
+                    NormalizedMetric(
+                        metric_id="z-score",
+                        unit="ratio",
+                        status="available",
+                        value=Decimal("2"),
+                    ),
+                    NormalizedMetric(
+                        metric_id="a-score",
+                        unit="ratio",
+                        status="available",
+                        value=Decimal(value),
+                    ),
+                )
+            }
+        )
+        _run(store.register_normalized_experiment_result(result))
+
+    report = _run(
+        store.load_normalized_experiment_comparison(
+            ExperimentRef(experiment_id="exp-1", experiment_version="v1"),
+            "comparison-1",
+            "v1",
+        )
+    )
+    assert report is not None
+    assert [result.variant_id for result in report.results] == ["A", "B", "C"]
+    assert [aggregate.metric_id for aggregate in report.aggregates] == [
+        "a-score",
+        "z-score",
+    ]
+    aggregate = report.aggregates[0]
+    assert aggregate.mean == Decimal("3")
+    assert aggregate.minimum == Decimal("1")
+    assert aggregate.maximum == Decimal("5")

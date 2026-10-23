@@ -11,8 +11,10 @@ from pydantic import ValidationError
 from src.models.experiment_contracts import ExperimentRef, PeriodWindow
 from src.models.normalized_experiment import (
     ExperimentComparison,
+    ExperimentComparisonReport,
     NormalizedExperimentResult,
     NormalizedMetric,
+    NormalizedMetricAggregate,
 )
 from src.models.paper_contracts import StrategyRef
 from src.models.strategy_config import IndicatorInstance, ParameterEntry, StrategyConfig
@@ -95,6 +97,36 @@ def test_valid_abc_manifest_sorts_metrics_and_is_stable() -> None:
     dumped = comparison.model_dump_json()
     assert dumped == comparison.model_dump_json()
     assert json.loads(dumped)["comparison_version"] == "v1"
+
+
+def test_metric_aggregates_are_frozen_sorted_and_explicit_about_no_values() -> None:
+    comparison = _comparison(_result("A"), _result("B"), _result("C"))
+    report = ExperimentComparisonReport(
+        comparison=comparison,
+        aggregates=(
+            NormalizedMetricAggregate(
+                metric_id="z-score",
+                unit="ratio",
+                available_count=3,
+                mean=Decimal("2"),
+                minimum=Decimal("2"),
+                maximum=Decimal("2"),
+            ),
+            NormalizedMetricAggregate(
+                metric_id="a-score",
+                unit="ratio",
+                undefined_count=3,
+            ),
+        ),
+    )
+    assert [aggregate.metric_id for aggregate in report.aggregates] == [
+        "a-score",
+        "z-score",
+    ]
+    assert report.aggregates[0].mean is None
+    assert report.aggregates[1].mean == Decimal("2")
+    with pytest.raises(ValidationError):
+        report.aggregates[0].mean = Decimal("1")
 
 
 def test_comparison_requires_three_distinct_variants() -> None:

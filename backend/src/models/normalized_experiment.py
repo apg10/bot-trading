@@ -1,7 +1,8 @@
 """Immutable, normalized experiment-result and comparison contracts.
 
 This module deliberately contains only DTOs and relationship validation.  It
-does not persist, replay, calculate metrics, or select a comparison winner.
+does not persist, replay, calculate source metrics, or select a comparison
+winner.
 """
 
 from __future__ import annotations
@@ -166,8 +167,143 @@ class ExperimentComparison(BaseModel):
         return self
 
 
+class NormalizedMetricAggregate(BaseModel):
+    """Deterministic aggregate for one metric across comparison variants.
+
+    Availability is represented explicitly: only ``available`` observations
+    contribute to the numeric aggregate, while the other two states remain
+    visible in their respective counters.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    metric_id: NonEmpty
+    unit: NonEmpty | None = None
+    available_count: StrictInt = Field(
+        default=0, ge=0, validation_alias=AliasChoices("available_count", "available")
+    )
+    undefined_count: StrictInt = Field(
+        default=0, ge=0, validation_alias=AliasChoices("undefined_count", "undefined")
+    )
+    insufficient_data_count: StrictInt = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("insufficient_data_count", "insufficient_data"),
+    )
+    mean: Decimal | None = None
+    minimum: Decimal | None = None
+    maximum: Decimal | None = None
+
+    @field_validator("mean", "minimum", "maximum")
+    @classmethod
+    def _finite_aggregate(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and not value.is_finite():
+            raise ValueError("metric aggregate must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_numeric_presence(self) -> "NormalizedMetricAggregate":
+        values = (self.mean, self.minimum, self.maximum)
+        if self.available_count == 0:
+            if any(value is not None for value in values):
+                raise ValueError("aggregate with no available values must be empty")
+        elif any(value is None for value in values):
+            raise ValueError("aggregate with available values requires mean/minimum/maximum")
+        return self
+
+    @property
+    def available(self) -> int:
+        return self.available_count
+
+    @property
+    def undefined(self) -> int:
+        return self.undefined_count
+
+    @property
+    def insufficient_data(self) -> int:
+        return self.insufficient_data_count
+
+
+class ExperimentComparisonReport(BaseModel):
+    """A validated comparison manifest together with sorted metric aggregates."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    comparison: ExperimentComparison = Field(
+        validation_alias=AliasChoices("comparison", "experiment_comparison")
+    )
+    aggregates: tuple[NormalizedMetricAggregate, ...] = Field(
+        validation_alias=AliasChoices("aggregates", "metric_aggregates")
+    )
+
+    @property
+    def metric_aggregates(self) -> tuple[NormalizedMetricAggregate, ...]:
+        """Compatibility/readability alias for callers naming the collection."""
+        return self.aggregates
+
+    @property
+    def experiment_comparison(self) -> ExperimentComparison:
+        """The comparison manifest carried by this report."""
+        return self.comparison
+
+    @property
+    def normalized_results(self) -> tuple[NormalizedExperimentResult, ...]:
+        return self.comparison.normalized_results
+
+    @property
+    def results(self) -> tuple[NormalizedExperimentResult, ...]:
+        return self.comparison.results
+
+    @property
+    def schema_version(self) -> str:
+        return self.comparison.schema_version
+
+    @property
+    def comparison_id(self) -> str:
+        return self.comparison.comparison_id
+
+    @property
+    def comparison_version(self) -> str:
+        return self.comparison.comparison_version
+
+    @property
+    def hypothesis(self) -> str:
+        return self.comparison.hypothesis
+
+    @model_validator(mode="after")
+    def _validate_aggregates(self) -> "ExperimentComparisonReport":
+        metric_ids = tuple(aggregate.metric_id for aggregate in self.aggregates)
+        if len(metric_ids) != len(set(metric_ids)):
+            raise ValueError("aggregates must not contain duplicate metric_id")
+        comparison_metrics = {
+            metric.metric_id: metric.unit
+            for metric in self.comparison.normalized_results[0].metrics
+        }
+        if set(metric_ids) != set(comparison_metrics):
+            raise ValueError("aggregates must match comparison metric IDs")
+        for aggregate in self.aggregates:
+            if comparison_metrics[aggregate.metric_id] != aggregate.unit:
+                raise ValueError("aggregate unit must match comparison metric unit")
+        object.__setattr__(self, "aggregates", tuple(sorted(self.aggregates, key=lambda a: a.metric_id)))
+        return self
+
+
+# Short aliases retain a natural name for callers while keeping the explicit
+# normalized-result type available for schema/documentation consumers.
+MetricAggregate = NormalizedMetricAggregate
+MetricAggregation = NormalizedMetricAggregate
+ComparisonReport = ExperimentComparisonReport
+NormalizedExperimentComparison = ExperimentComparisonReport
+
+
 __all__ = [
     "ExperimentComparison",
+    "ExperimentComparisonReport",
+    "ComparisonReport",
+    "NormalizedExperimentComparison",
+    "MetricAggregate",
+    "MetricAggregation",
+    "NormalizedMetricAggregate",
     "NormalizedExperimentResult",
     "NormalizedMetric",
 ]
