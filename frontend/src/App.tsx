@@ -1,5 +1,5 @@
 // Terminal de desarrollo: shell con navegación honesta.
-// Vistas Laboratorio y Bot muestran indisponibilidad explícita sin datos simulados.
+// La vista Bot mantiene indisponibilidad explícita; Laboratorio consulta datos reales.
 // El hook useMarketData solo se activa en la vista Terminal.
 
 import { useMarketData } from './hooks/useMarketData'
@@ -7,6 +7,7 @@ import { ENGINE_INTERVALS, reconfigure, getCapabilities, type EngineContext, typ
 import { ChartPanel } from './components/ChartPanel'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { BottomBar } from './components/BottomBar'
+import { LaboratoryView } from './components/LaboratoryView'
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { loadPreferences, saveDebounced } from './preferences'
@@ -141,7 +142,7 @@ function NavBar({ activeView, onChange }: {
   )
 }
 
-// ── Componente: Vista "No disponible" ────────────────────────────────────────
+// ── Componente: Vista "No disponible" (Bot y futuras vistas) ─────────────────
 
 function UnavailableView({ viewId }: { viewId: ViewId }) {
   const labels: Record<ViewId, string> = {
@@ -432,7 +433,7 @@ export default function App() {
           tabIndex={0}
           hidden={activeView !== 'laboratorio'}
         >
-          {activeView === 'laboratorio' && <UnavailableView viewId="laboratorio" />}
+          {activeView === 'laboratorio' && <LaboratoryView />}
         </section>
         <section
           className="view-panel"
