@@ -27,11 +27,17 @@ class SessionContext:
     entry_price: Decimal
     exit_price: Decimal
     strategy_ref: dict[str, str]
-    risk_snapshot: dict[str, Any]
-    capacity_snapshot: dict[str, Any]
-    fee_snapshot: dict[str, Any]
+    # These are deliberately required, rather than being looked up from a
+    # persistence adapter.  A replay is a historical operation and must use
+    # the exact immutable inputs with which it was evaluated.
+    risk_policy: Any
+    risk_snapshot: Any
+    filter_snapshot: Any
+    execution_snapshot: Any
+    market_snapshot: Any
+    capacity_snapshot: Any
+    fee_snapshot: Any
     lifecycle_state: str
-    market_snapshot: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -92,22 +98,28 @@ def _strategy_ref(value: Any, segment: ReplaySegment) -> Any:
 
 def _position_for_exit(persistence: Any, account_id: str, session_id: str) -> Any:
     """Load the durable open lot projection without inventing a financial value."""
+    def resolve(value: Any) -> Any:
+        import asyncio
+        import inspect
+
+        if not inspect.isawaitable(value):
+            return value
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(value)
+
     for method_name in ("load_paper_position", "get_paper_position"):
         method = getattr(persistence, method_name, None)
         if method is not None:
-            position = method(account_id, session_id)
             # Persistence adapters in this repository are synchronous at this
             # boundary, while SQLiteStore's readers are awaitables.
-            import inspect
-            import asyncio
-
-            if inspect.isawaitable(position):
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                position = loop.run_until_complete(position)
+            position = resolve(method(account_id, session_id))
             if position is not None:
                 return position
 
@@ -115,17 +127,7 @@ def _position_for_exit(persistence: Any, account_id: str, session_id: str) -> An
     if lots_reader is None:
         lots_reader = getattr(persistence, "load_paper_position_lots", None)
     if lots_reader is not None:
-        lots = lots_reader(account_id)
-        import inspect
-        import asyncio
-
-        if inspect.isawaitable(lots):
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            lots = loop.run_until_complete(lots)
+        lots = resolve(lots_reader(account_id))
         # apply_exit_signal_to_paper only needs identity and lots; using a
         # small projection also keeps this coordinator independent of storage.
         from types import SimpleNamespace
@@ -133,6 +135,186 @@ def _position_for_exit(persistence: Any, account_id: str, session_id: str) -> An
         return SimpleNamespace(account_id=account_id, paper_session_id=session_id, lots=list(lots or ()))
 
     return getattr(persistence, "position", None)
+
+
+def _durable_context_errors(
+    ctx: Any, segment: ReplaySegment, signals: list[PaperSignal]
+) -> list[str]:
+    """Validate the complete durable input before the first write.
+
+    The low-level adapters also validate their inputs, but doing this here is
+    important: a later bad snapshot must not leave an earlier BUY from the
+    same replay persisted.  In particular, none of the values below may be
+    recovered from ``persistence`` or inferred from a candle.
+    """
+    # An observational replay has no durable execution boundary.  It must not
+    # be forced to manufacture financial inputs merely to count a HOLD.
+    operation_times = [signal.timestamp_ms for signal in signals if signal.side != DecisionSide.HOLD]
+    if not operation_times:
+        return []
+
+    try:
+        from src.models.paper_execution import (
+            PaperExecutionPolicy,
+            PaperFeeSnapshot,
+            PaperMarketCapacitySnapshot,
+            PaperMarketExecutionSnapshot,
+        )
+        from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot
+        from src.models.paper_symbol_filters import SymbolFilterSnapshot
+    except ImportError as exc:  # pragma: no cover - package installation error
+        return [f"durable PAPER contracts unavailable: {exc}"]
+
+    required = (
+        "risk_policy",
+        "risk_snapshot",
+        "filter_snapshot",
+        "execution_snapshot",
+        "market_snapshot",
+        "capacity_snapshot",
+        "fee_snapshot",
+    )
+    missing = [name for name in required if _value(ctx, name) is None]
+    if missing:
+        return ["missing explicit durable snapshots: " + ", ".join(missing)]
+    strategy_ref = _value(ctx, "strategy_ref")
+    if strategy_ref is None:
+        return ["explicit strategy provenance is required"]
+    if isinstance(strategy_ref, Mapping):
+        if not strategy_ref.get("source_id", strategy_ref.get("strategy_id")):
+            return ["strategy provenance source_id is required"]
+        if not strategy_ref.get("source_version", strategy_ref.get("strategy_version")):
+            return ["strategy provenance source_version is required"]
+
+    expected_types = {
+        "risk_policy": PaperRiskPolicy,
+        "risk_snapshot": PaperRiskSnapshot,
+        "filter_snapshot": SymbolFilterSnapshot,
+        "execution_snapshot": PaperExecutionPolicy,
+        "market_snapshot": PaperMarketExecutionSnapshot,
+        "capacity_snapshot": PaperMarketCapacitySnapshot,
+        "fee_snapshot": PaperFeeSnapshot,
+    }
+    errors: list[str] = []
+    values: dict[str, Any] = {}
+    for name, expected in expected_types.items():
+        value = _value(ctx, name)
+        values[name] = value
+        if not isinstance(value, expected):
+            errors.append(f"{name} must be an explicit {expected.__name__}")
+    if errors:
+        return errors
+
+    account_id = _value(ctx, "account_id")
+    quantity = _value(ctx, "quantity")
+    if not isinstance(account_id, str) or not account_id.strip():
+        errors.append("explicit account identity is required")
+    if not isinstance(_value(ctx, "session_id"), str) or not _value(ctx, "session_id").strip():
+        errors.append("explicit paper session identity is required")
+    if not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity <= 0:
+        errors.append("quantity must be a positive Decimal")
+
+    lifecycle = _value(ctx, "lifecycle_state")
+    # Accept plain strings, Pydantic models (.state), and legacy enums (.value).
+    lifecycle_value = getattr(lifecycle, "state", None)
+    if lifecycle_value is None:
+        lifecycle_value = getattr(lifecycle, "value", lifecycle)
+    if str(lifecycle_value).lower() not in {"running", "paused", "stopped"}:
+        errors.append("lifecycle must be RUNNING, PAUSED, or STOPPED")
+
+    risk_policy = values["risk_policy"]
+    risk = values["risk_snapshot"]
+    filters = values["filter_snapshot"]
+    market = values["market_snapshot"]
+    capacity = values["capacity_snapshot"]
+    fee = values["fee_snapshot"]
+    if risk_policy.account_id != account_id:
+        errors.append("risk policy account does not match session account")
+    if risk.account_id != account_id:
+        errors.append("risk snapshot account does not match session account")
+    if risk.market_symbol != segment.symbol:
+        errors.append("risk snapshot symbol mismatch")
+    if filters.symbol != segment.symbol:
+        errors.append("filter snapshot symbol mismatch")
+    if market.symbol != segment.symbol:
+        errors.append("market snapshot symbol mismatch")
+    if capacity.symbol != segment.symbol:
+        errors.append("capacity snapshot symbol mismatch")
+    if market.provenance != DataSource.TEST_ONLY.value:
+        errors.append("market snapshot provenance must be TEST_ONLY")
+    if capacity.source_id != DataSource.TEST_ONLY.value:
+        errors.append("capacity snapshot provenance must be TEST_ONLY")
+    if filters.source_id != DataSource.TEST_ONLY.value:
+        errors.append("filter snapshot provenance must be TEST_ONLY")
+    if fee.quantity != quantity:
+        errors.append("fee snapshot quantity mismatch")
+    # Capacity is not a guess derived from a quote: it must be bound to the
+    # exact market capture consumed by the fill evaluator.
+    if capacity.capture_bar_open_time_ms != market.bar_open_time_ms:
+        errors.append("capacity snapshot bar does not match market snapshot")
+    if capacity.capture_snapshot_timestamp_ms != market.snapshot_timestamp_ms:
+        errors.append("capacity snapshot timestamp does not match market snapshot")
+
+    first_operation = min(operation_times)
+    timestamp_values = (
+        ("market snapshot", market.snapshot_timestamp_ms),
+        ("market bar", market.bar_open_time_ms),
+        ("capacity snapshot", capacity.capture_snapshot_timestamp_ms),
+        ("capacity bar", capacity.capture_bar_open_time_ms),
+        ("filter snapshot", filters.capture_timestamp_ms),
+        ("risk market snapshot", risk.market_timestamp_ms),
+        ("risk equity snapshot", risk.equity_timestamp_ms),
+        ("risk exposure snapshot", risk.exposure_timestamp_ms),
+    )
+    for name, timestamp in timestamp_values:
+        if timestamp > first_operation:
+            errors.append(f"{name} is after replay operation")
+    return errors
+
+
+def _validate_signal_sequence(signals: list[PaperSignal]) -> str | None:
+    """Reject non-causal position transitions before durable mutation."""
+    open_position = False
+    for signal in signals:
+        if signal.side == DecisionSide.HOLD:
+            continue
+        if signal.side == DecisionSide.BUY:
+            if open_position:
+                return f"invalid replay sequence: BUY while position is open at index {signal.candle_index}"
+            open_position = True
+        elif signal.side == DecisionSide.SELL:
+            if not open_position:
+                return f"invalid replay sequence: SELL without a causal BUY at index {signal.candle_index}"
+            open_position = False
+    if open_position:
+        return "invalid replay sequence: replay ends with an open BUY position"
+    return None
+
+
+def _validate_signal_provenance(
+    signals: list[PaperSignal], segment: ReplaySegment
+) -> str | None:
+    """Ensure every durable operation retains its replay identity."""
+    seen_ids: set[str] = set()
+    if len(signals) != len(segment.candles):
+        return "invalid replay sequence: signal count does not match candles"
+    for index, signal in enumerate(signals):
+        if not isinstance(signal.signal_id, str) or not signal.signal_id.strip():
+            return f"signal identity missing at index {index}"
+        if signal.signal_id in seen_ids:
+            return f"duplicate signal identity at index {index}: {signal.signal_id}"
+        seen_ids.add(signal.signal_id)
+        if signal.segment_id != segment.segment_id:
+            return f"signal segment provenance mismatch at index {index}"
+        if signal.symbol != segment.symbol or signal.strategy != segment.strategy:
+            return f"signal strategy provenance mismatch at index {index}"
+        if signal.data_source != segment.data_source:
+            return f"signal data provenance mismatch at index {index}"
+        if signal.candle_index != index:
+            return f"signal candle identity mismatch at index {index}"
+        if signal.timestamp_ms != segment.candles[index].timestamp_ms:
+            return f"signal timestamp provenance mismatch at index {index}"
+    return None
 
 
 def _result(
@@ -188,21 +370,29 @@ def run_replay_session(
             entry_price=Decimal("0"),
             exit_price=Decimal("0"),
             strategy_ref={"source_id": segment.strategy, "source_version": "v1"},
-            risk_snapshot={} if old_risk is None else old_risk,
-            capacity_snapshot={} if old_capacity is None else old_capacity,
-            fee_snapshot={} if old_fee is None else old_fee,
+            risk_policy=None,
+            risk_snapshot=old_risk,
+            filter_snapshot=None,
+            execution_snapshot=None,
+            market_snapshot=None,
+            capacity_snapshot=old_capacity,
+            fee_snapshot=old_fee,
             lifecycle_state="running" if old_lifecycle is None else str(old_lifecycle),
-            market_snapshot={},
         )
         persistence = old_persistence
 
     if segment.data_source != DataSource.TEST_ONLY:
         return _result(segment, failure_count=1, errors=["only TEST_ONLY data_source is allowed"])
 
-    lifecycle = _value(ctx, "lifecycle_state", "running")
-    lifecycle_value = getattr(lifecycle, "value", lifecycle)
+    lifecycle = _value(ctx, "lifecycle_state")
+    # Accept plain strings, Pydantic models (.state), and legacy enums (.value).
+    lifecycle_value = getattr(lifecycle, "state", None)
+    if lifecycle_value is None:
+        lifecycle_value = getattr(lifecycle, "value", lifecycle)
     if str(lifecycle_value).lower() == "stopped":
         return _result(segment, failure_count=1, errors=["lifecycle is STOPPED"])
+    if lifecycle is None:
+        return _result(segment, failure_count=1, errors=["explicit lifecycle state is required"])
 
     total_candles = len(segment.candles)
 
@@ -222,6 +412,59 @@ def run_replay_session(
     except ReplayError as exc:
         return _result(segment, failure_count=1, errors=[str(exc)])
 
+    sequence_error = _validate_signal_sequence(signals)
+    if sequence_error is not None:
+        return _result(
+            segment,
+            signal_count=len(signals),
+            failure_count=1,
+            errors=[sequence_error],
+        )
+    provenance_error = _validate_signal_provenance(signals, segment)
+    if provenance_error is not None:
+        return _result(
+            segment,
+            signal_count=len(signals),
+            failure_count=1,
+            errors=[provenance_error],
+        )
+
+    # A durable session must be completely admissible before its first adapter
+    # call.  The non-durable compatibility mode intentionally remains useful
+    # for structural replay tests and does not claim to persist anything.
+    if persistence is not None:
+        context_errors = _durable_context_errors(ctx, segment, signals)
+        if context_errors:
+            return _result(
+                segment,
+                signal_count=len(signals),
+                failure_count=1,
+                errors=context_errors,
+            )
+        # An exit must never choose an arbitrary lot.  Check the durable
+        # projection before any BUY/SELL adapter can register an order.
+        try:
+            existing_position = _position_for_exit(
+                persistence, str(_value(ctx, "account_id")), str(_value(ctx, "session_id"))
+            )
+        except Exception as exc:
+            return _result(
+                segment,
+                signal_count=len(signals),
+                failure_count=1,
+                errors=[f"position projection unavailable: {exc}"],
+            )
+        existing_lots = getattr(existing_position, "lots", None)
+        if existing_lots is None and isinstance(existing_position, Mapping):
+            existing_lots = existing_position.get("lots")
+        if existing_lots is not None and len(list(existing_lots)) > 1:
+            return _result(
+                segment,
+                signal_count=len(signals),
+                failure_count=1,
+                errors=["ambiguous position: multiple open lots"],
+            )
+
     errors: list[str] = []
     buy_count = sell_count = hold_count = success_count = failure_count = 0
 
@@ -232,6 +475,9 @@ def run_replay_session(
     account_id = _value(ctx, "account_id")
     session_id = _value(ctx, "session_id")
     risk_snapshot = _value(ctx, "risk_snapshot")
+    risk_policy = _value(ctx, "risk_policy")
+    filter_snapshot = _value(ctx, "filter_snapshot")
+    execution_snapshot = _value(ctx, "execution_snapshot")
     capacity_snapshot = _value(ctx, "capacity_snapshot")
     fee_snapshot = _value(ctx, "fee_snapshot")
     market_snapshot = _value(ctx, "market_snapshot")
@@ -265,29 +511,11 @@ def run_replay_session(
                     risk_snapshot=risk_snapshot,
                     lifecycle=lifecycle,
                     persistence=persistence,
-                    filter_snapshot=_value(
-                        ctx,
-                        "filter_snapshot",
-                        getattr(
-                            persistence,
-                            "filter_snapshot",
-                            getattr(persistence, "symbol_filter_snapshot", None),
-                        ),
-                    ),
-                    execution_snapshot=_value(
-                        ctx,
-                        "execution_snapshot",
-                        getattr(
-                            persistence,
-                            "execution_snapshot",
-                            getattr(persistence, "exec_policy_snapshot", None),
-                        ),
-                    ),
+                    filter_snapshot=filter_snapshot,
+                    execution_snapshot=execution_snapshot,
                     market_snapshot=market_snapshot,
                     fee_snapshot=fee_snapshot,
-                    risk_policy=_value(
-                        ctx, "risk_policy", getattr(persistence, "risk_policy", None)
-                    ),
+                    risk_policy=risk_policy,
                     market_capacity_snapshot=capacity_snapshot,
                 )
                 if _paper_result_value(result, "success", False):
@@ -308,7 +536,7 @@ def run_replay_session(
             try:
                 bid_price = _value(market_snapshot, "bid")
                 if bid_price is None:
-                    bid_price = _value(ctx, "exit_price")
+                    raise ValueError("explicit market snapshot bid is required")
                 position = _position_for_exit(persistence, str(account_id), str(session_id))
                 result = apply_exit_signal_to_paper(
                     signal=signal,

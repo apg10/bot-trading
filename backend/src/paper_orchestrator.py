@@ -1182,7 +1182,15 @@ def apply_exit_signal_to_paper(
             return lot.get(key, default)
         return getattr(lot, key, default)
 
-    quantity = _lot_value("qty", _lot_value("quantity"))
+    quantity_raw = _lot_value("qty", _lot_value("quantity"))
+    # Quantity may arrive as a string from SQLite projections; normalize to Decimal.
+    if isinstance(quantity_raw, str):
+        try:
+            quantity = Decimal(quantity_raw)
+        except Exception:
+            quantity = None
+    else:
+        quantity = quantity_raw
     if quantity is None or quantity <= 0:
         return PaperResult(success=False, error="open lot quantity must be positive", signal="SELL")
     lot_position_id = _lot_value("position_id", _lot_value("order_id", _lot_value("entry_order_id")))
