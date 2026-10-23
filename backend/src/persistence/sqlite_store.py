@@ -46,6 +46,7 @@ Schema versions:
           concurrency revision.
      v17 — adds immutable, normalized experiment-result records.
      v18 — adds immutable causal replay decisions and candle snapshots.
+      v20 — adds immutable N02 advisory audit records.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from src.models.dataset_ref import DatasetRef
-from src.models.audit_contract import CausalDecision, CandleSnapshot
+from src.models.audit_contract import CausalDecision, CandleSnapshot, N02AuditRecord
 from src.models.experiment_contracts import (
     ExperimentDefinition,
     ExperimentRef,
@@ -178,7 +179,7 @@ def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, res
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 18
+_SCHEMA_VERSION = 20
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -487,6 +488,14 @@ class PaperFillIntegrityError(ValueError):
     """Stored fill JSON does not match its indexed identity or payload."""
 
 
+class N02AuditRecordConflictError(ValueError):
+    """Same N02 result_id with different immutable content."""
+
+
+class N02AuditRecordIntegrityError(ValueError):
+    """Stored N02 audit JSON does not match its indexed identity."""
+
+
 class PaperAccountOpeningConflictError(ValueError):
     """Account already has a different immutable opening snapshot."""
 
@@ -714,6 +723,8 @@ _SCHEMA_V15_TABLES = _SCHEMA_V14_TABLES | {"paper_lifecycle_reconciliations"}
 _SCHEMA_V16_TABLES = _SCHEMA_V15_TABLES | {"ui_preferences"}
 _SCHEMA_V17_TABLES = _SCHEMA_V16_TABLES | {"normalized_experiment_results"}
 _SCHEMA_V18_TABLES = _SCHEMA_V17_TABLES | {"audit_decisions"}
+_SCHEMA_V19_TABLES = _SCHEMA_V18_TABLES
+_SCHEMA_V20_TABLES = _SCHEMA_V19_TABLES | {"n02_audit_records"}
 
 _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS normalized_experiment_results (
@@ -749,6 +760,19 @@ _AUDIT_DECISION_DDL_STATEMENTS = (
         ON audit_decisions (paper_session_id)""",
     """CREATE INDEX IF NOT EXISTS idx_audit_decisions_timestamp
         ON audit_decisions (timestamp)""",
+)
+
+_N02_AUDIT_RECORD_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS n02_audit_records (
+        result_id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        captured_at_ms INTEGER NOT NULL CHECK (captured_at_ms >= 0),
+        record_json TEXT NOT NULL
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_n02_audit_records_snapshot
+        ON n02_audit_records (snapshot_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_n02_audit_records_captured
+        ON n02_audit_records (captured_at_ms)""",
 )
 
 _PAPER_FILL_DDL_STATEMENTS = (
@@ -1575,6 +1599,45 @@ class SQLiteStore:
                 conn, account_id, paper_session_id
             )
         )
+
+    async def save_n02_audit_record(self, record: N02AuditRecord) -> None:
+        """Persist one immutable N02 result, idempotently by ``result_id``."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(record, N02AuditRecord):
+            raise TypeError("record must be an N02AuditRecord instance")
+        # Validate serialization explicitly at this boundary.  This also keeps
+        # the indexed columns derived from the same validated model as JSON.
+        record_json = record.model_dump_json()
+        try:
+            json.loads(record_json)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - pydantic emits JSON
+            raise ValueError("record_json must contain valid JSON") from exc
+        await self._write(
+            lambda conn: self._save_n02_audit_record_inner(conn, record, record_json)
+        )
+
+    async def load_n02_audit_record(self, result_id: str) -> N02AuditRecord | None:
+        """Load one N02 result, raising if its durable JSON is corrupt."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(result_id, str) or not result_id.strip():
+            raise ValueError("result_id must be a non-empty string")
+        return await self._read(self._load_n02_audit_record_inner, result_id)
+
+    async def load_n02_audit_records(self, snapshot_id: str) -> list[N02AuditRecord]:
+        """Load N02 results for a snapshot in deterministic capture order."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+            raise ValueError("snapshot_id must be a non-empty string")
+        return await self._read(self._load_n02_audit_records_inner, snapshot_id)
 
     async def get_paper_lifecycle_snapshot(
         self, account_id: str, session_id: str
@@ -2526,6 +2589,107 @@ class SQLiteStore:
                 raise StoreCorruptionError("causal audit payload does not match indexed identity")
             result.append((decision, candle))
         return result
+
+    @staticmethod
+    async def _save_n02_audit_record_inner(
+        conn: aiosqlite.Connection,
+        record: N02AuditRecord,
+        record_json: str,
+    ) -> None:
+        cursor = await conn.execute(
+            "SELECT snapshot_id, captured_at_ms, record_json "
+            "FROM n02_audit_records WHERE result_id = ?",
+            (record.result_id,),
+        )
+        existing = await cursor.fetchone()
+        if existing is not None:
+            try:
+                existing_record = N02AuditRecord.model_validate_json(existing[2])
+            except Exception as exc:
+                raise N02AuditRecordIntegrityError(
+                    f"stored N02 audit record {record.result_id} is corrupt"
+                ) from exc
+            if (
+                existing_record == record
+                and existing[0] == record.snapshot_id
+                and existing[1] == record.captured_at_ms
+            ):
+                return
+            raise N02AuditRecordConflictError(
+                f"N02 audit record {record.result_id} already exists with different content"
+            )
+
+        payload = json.loads(record_json)
+        if (
+            payload.get("result_id") != record.result_id
+            or payload.get("snapshot_id") != record.snapshot_id
+            or payload.get("captured_at_ms") != record.captured_at_ms
+        ):
+            # Keep the indexed columns derived from, and checked against, the
+            # exact serialized record that is written.
+            raise ValueError("N02 indexed columns do not match record fields")
+        await conn.execute(
+            "INSERT INTO n02_audit_records "
+            "(result_id, snapshot_id, captured_at_ms, record_json) VALUES (?, ?, ?, ?)",
+            (record.result_id, record.snapshot_id, record.captured_at_ms, record_json),
+        )
+
+    @staticmethod
+    async def _load_n02_audit_record_inner(
+        conn: aiosqlite.Connection, result_id: str
+    ) -> N02AuditRecord | None:
+        cursor = await conn.execute(
+            "SELECT result_id, snapshot_id, captured_at_ms, record_json "
+            "FROM n02_audit_records WHERE result_id = ?",
+            (result_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            record = N02AuditRecord.model_validate_json(row[3])
+        except Exception as exc:
+            raise N02AuditRecordIntegrityError(
+                f"stored N02 audit record {result_id} is corrupt"
+            ) from exc
+        if (
+            record.result_id != row[0]
+            or record.snapshot_id != row[1]
+            or record.captured_at_ms != row[2]
+        ):
+            raise N02AuditRecordIntegrityError(
+                f"stored N02 audit record {result_id} does not match indexed identity"
+            )
+        return record
+
+    @staticmethod
+    async def _load_n02_audit_records_inner(
+        conn: aiosqlite.Connection, snapshot_id: str
+    ) -> list[N02AuditRecord]:
+        cursor = await conn.execute(
+            "SELECT result_id, snapshot_id, captured_at_ms, record_json "
+            "FROM n02_audit_records WHERE snapshot_id = ? "
+            "ORDER BY captured_at_ms, result_id",
+            (snapshot_id,),
+        )
+        records: list[N02AuditRecord] = []
+        for row in await cursor.fetchall():
+            try:
+                record = N02AuditRecord.model_validate_json(row[3])
+            except Exception as exc:
+                raise N02AuditRecordIntegrityError(
+                    f"stored N02 audit record {row[0]} is corrupt"
+                ) from exc
+            if (
+                record.result_id != row[0]
+                or record.snapshot_id != row[1]
+                or record.captured_at_ms != row[2]
+            ):
+                raise N02AuditRecordIntegrityError(
+                    f"stored N02 audit record {row[0]} does not match indexed identity"
+                )
+            records.append(record)
+        return records
 
     # ── paper fill helpers (v6) ────────────────────────────────────────────
 
@@ -5683,13 +5847,21 @@ class SQLiteStore:
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0 through 17 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0 through 18 or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         table_names = {row[0] for row in await cursor.fetchall()}
+
+        # Create the N02 table before validating the historical schema so every
+        # accepted pre-v20 migration path remains atomic.
+        if version < _SCHEMA_VERSION:
+            # Create tables incrementally per migration path.
+            for statement in _N02_AUDIT_RECORD_DDL_STATEMENTS:
+                await conn.execute(statement)
+            table_names.add("n02_audit_records")
 
         async def create_ui_preferences_table() -> None:
             for statement in _UI_PREFERENCES_DDL_STATEMENTS:
@@ -5726,13 +5898,22 @@ class SQLiteStore:
             for statement in _AUDIT_DECISION_DDL_STATEMENTS:
                 await conn.execute(statement)
 
-        # Already at v18 — just verify completeness.
+        # Already at v20 — just verify completeness.
         if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V18_TABLES <= table_names:
+            if not _SCHEMA_V20_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
-                    "schema version is 18 but required tables are missing"
+                    "schema version is 20 but required tables are missing"
                 )
             await create_ui_preferences_table()
+            return
+
+        # v18 → v20: add immutable N02 advisory audit records.
+        if version == 18:
+            if not _SCHEMA_V18_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 18 but required v18 tables are missing"
+                )
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
         # v17 → v18: add immutable causal decision and candle JSON records.

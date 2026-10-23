@@ -278,7 +278,7 @@ def test_schema_bumps_to_17(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 17
+    assert version == 20
 
 
 def test_run_uniqueness_enforced(tmp_path: Path) -> None:

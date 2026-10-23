@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from src.models.audit_contract import CandleSnapshot, CausalDecision
+from src.models.audit_contract import CandleSnapshot, CausalDecision, N02AuditRecord
 
 
 # ── CausalDecision ──────────────────────────────────────────────────────────────
@@ -110,3 +110,96 @@ def test_candle_serialization():
     assert isinstance(raw["open"], str)
     restored = CandleSnapshot(**raw)
     assert restored == c
+
+
+# ── N02AuditRecord ──────────────────────────────────────────────────────────────
+
+
+def _n02_record(**overrides):
+    base = {
+        "snapshot_id": "snapshot-1",
+        "result_id": "result-1",
+        "model_name": "n02",
+        "model_version": "2026.01",
+        "prompt_version": "prompt-1",
+        "prompt_hash": "a" * 64,
+        "safe_params": {"symbol": "BTC/USDT", "interval": "1m"},
+        "success": True,
+        "response_json": '{"decision":"BUY"}',
+        "error_code": None,
+        "timing_ms": 42,
+        "valid_until_ms": 1700000005000,
+        "captured_at_ms": 1700000000000,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_n02_audit_record_success_roundtrip():
+    record = N02AuditRecord(**_n02_record())
+    restored = N02AuditRecord.model_validate_json(record.model_dump_json())
+    assert restored == record
+
+
+def test_n02_audit_record_failure_roundtrip():
+    record = N02AuditRecord(
+        **_n02_record(success=False, response_json=None, error_code="N02_TIMEOUT")
+    )
+    restored = N02AuditRecord.model_validate_json(record.model_dump_json())
+    assert restored == record
+
+
+def test_n02_audit_record_success_error_exclusive():
+    with pytest.raises(ValidationError):
+        N02AuditRecord(**_n02_record(error_code="N02_FAILED"))
+
+
+def test_n02_audit_record_immutable():
+    record = N02AuditRecord(**_n02_record())
+    with pytest.raises(TypeError, match="cannot assign to field"):
+        record.result_id = "result-2"
+
+
+def test_n02_audit_record_extra_forbidden():
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        N02AuditRecord(**_n02_record(extra_field="not allowed"))
+
+
+def test_n02_audit_record_no_raw_prompt():
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        N02AuditRecord(**_n02_record(prompt="raw prompt text"))
+
+
+def test_n02_audit_record_unsafe_param_key_rejected():
+    with pytest.raises(ValidationError, match="unsafe param key: temperature"):
+        N02AuditRecord(**_n02_record(safe_params={"temperature": "0"}))
+
+
+def test_n02_audit_record_safe_params_immutable():
+    """After construction, safe_params accepts only the allowlisted keys and
+    the record cannot be mutated in any field.
+    """
+    record = N02AuditRecord(**_n02_record())
+    with pytest.raises(TypeError, match="cannot assign to field"):
+        record.safe_params = {"symbol": "ETH/USDT"}
+
+
+def test_n02_audit_record_secret_value_filtered():
+    with pytest.raises(ValidationError, match="unsafe param key: api_key"):
+        N02AuditRecord(**_n02_record(safe_params={"api_key": "secret-value"}))
+
+
+def test_n02_audit_record_safe_params_is_frozenset():
+    """safe_params is stored as frozenset-of-tuples; direct mutation raises."""
+    record = N02AuditRecord(**_n02_record())
+    assert isinstance(record.safe_params, frozenset)
+    with pytest.raises(AttributeError):
+        record.safe_params.add(("symbol", "ETH/USDT"))
+
+
+def test_n02_audit_record_safe_params_serializes_to_dict():
+    """JSON round-trip produces a dict-compatible representation."""
+    record = N02AuditRecord(**_n02_record())
+    json_str = record.model_dump_json()
+    restored = N02AuditRecord.model_validate_json(json_str)
+    assert restored.safe_params == record.safe_params

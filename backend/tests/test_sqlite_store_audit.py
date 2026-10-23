@@ -230,4 +230,4 @@ def test_migration_v17_to_v18(tmp_path):
         await conn.close()
         return version
     version = _run(get_version())
-    assert version == 18
+    assert version == 20

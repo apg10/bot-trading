@@ -32,9 +32,11 @@ from src.models.paper_execution import (
 from src.models.paper_risk import PaperRiskPolicy, PaperRiskSnapshot, evaluate_paper_risk
 from src.models.paper_symbol_filters import SymbolFilterSnapshot, validate_symbol_filters
 from src.models.state import Candle, EngineState as LifecycleState, MarketSnapshot
+from src.ai.paper_advisory import AdvisoryAuditEnvelope, AdvisoryResult, evaluate_advisory
 from src.market.engine import MarketEngine
 from src.market.paper_snapshot import (
     PaperMarketExecutionSnapshot as EnginePaperMarketExecutionSnapshot,
+    bar_identity,
 )
 from src.persistence.sqlite_store import SQLiteStore
 from src.strategies.test_only_keltner import (
@@ -259,6 +261,39 @@ def _test_only_capacity(
         return None
 
 
+def _advisory_bar_identity(
+    engine_snapshot: EnginePaperMarketExecutionSnapshot | None,
+    market_snapshot: PaperMarketExecutionSnapshot,
+) -> str:
+    """Return the stable bar identity used to bind an advisory to a quote."""
+    if engine_snapshot is not None:
+        return engine_snapshot.bar_identity
+
+    # TEST_ONLY snapshots do not carry the engine's string identity.  Rebuild
+    # the same canonical identity from their explicit bar and interval fields.
+    interval_names = {
+        1_000: "1s",
+        60_000: "1m",
+        180_000: "3m",
+        300_000: "5m",
+        900_000: "15m",
+        1_800_000: "30m",
+        3_600_000: "1h",
+        7_200_000: "2h",
+        14_400_000: "4h",
+        21_600_000: "6h",
+        28_800_000: "8h",
+        43_200_000: "12h",
+        86_400_000: "1d",
+        259_200_000: "3d",
+        604_800_000: "1w",
+    }
+    interval = interval_names.get(market_snapshot.interval_ms)
+    if interval is None:
+        raise ValueError("market snapshot interval has no canonical bar identity")
+    return bar_identity(interval, market_snapshot.bar_open_time_ms)
+
+
 async def run_paper_cycle(
     store: SQLiteStore,
     *,
@@ -276,6 +311,7 @@ async def run_paper_cycle(
     candles: Sequence[Candle] = TEST_ONLY_OHLCV_FIXTURE[:7],
     evaluated_at_ms: int = 0,
     engine: MarketEngine | None = None,
+    advisory_input: AdvisoryResult | AdvisoryAuditEnvelope | None = None,
 ) -> OrchestratorResult:
     """Run one bounded TEST_ONLY BUY cycle through the PAPER infrastructure.
 
@@ -348,6 +384,7 @@ async def run_paper_cycle(
         # must fail closed before registration or any durable mutation.
         effective_market_snapshot = market_exec_snapshot
         effective_capacity_snapshot = market_capacity_snapshot
+        engine_snapshot = None
         if engine is not None:
             try:
                 engine_snapshot = await engine.get_paper_snapshot()
@@ -382,6 +419,43 @@ async def run_paper_cycle(
                 filter_result=filter_result.code,
                 error="PAPER BUY requires explicit market, capacity, and fee snapshots",
             )
+
+        try:
+            current_bar_identity = _advisory_bar_identity(
+                engine_snapshot, effective_market_snapshot
+            )
+        except (TypeError, ValueError):
+            return OrchestratorResult(
+                success=False,
+                signal="BUY",
+                risk_result=risk_result.code,
+                filter_result=filter_result.code,
+                error="PAPER BUY market snapshot has no canonical bar identity",
+            )
+        advisory = (
+            advisory_input.advisory
+            if isinstance(advisory_input, AdvisoryAuditEnvelope)
+            else advisory_input
+        )
+        advisory_permitted, advisory_reason = evaluate_advisory(
+            advisory, current_bar_identity, evaluated_at_ms
+        )
+        if advisory_input is not None and not advisory_permitted:
+            if isinstance(advisory_input, AdvisoryAuditEnvelope):
+                await store.save_n02_audit_record(advisory_input.audit_record)
+            return OrchestratorResult(
+                success=False,
+                signal="BUY",
+                risk_result=risk_result.code,
+                filter_result=filter_result.code,
+                error=advisory_reason,
+            )
+
+        if isinstance(advisory_input, AdvisoryAuditEnvelope):
+            # Persist the immutable N02 observation before registering or
+            # accepting an order.  Rejected advisories take the same path
+            # above, but never reach order registration.
+            await store.save_n02_audit_record(advisory_input.audit_record)
 
         if durable_order is None:
             durable_order = await store.register_paper_order(order)

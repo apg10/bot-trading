@@ -19,7 +19,7 @@ from src.persistence.sqlite_store import (
     SQLiteStore,
     _SCHEMA_V9_TABLES,
     _SCHEMA_V10_TABLES,
-    _SCHEMA_V17_TABLES,
+    _SCHEMA_V20_TABLES,
 )
 
 # ── Fake MarketEngine that mimics the real interface without external calls ─────
@@ -86,7 +86,7 @@ def test_lifespan_store_initialized_with_user_version_10(
         conn = sqlite3.connect(str(db_path))
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 17
+        assert version == 20
 
 
 # ── 2. Normal shutdown: store closed and reference removed ──────────────────────
@@ -293,7 +293,7 @@ def test_reopen_preserves_data_no_duplicate_migration(
     # Verify the schema remains at current v12 after re-open.
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 17
+    assert version == 20
 
     # Tables should exist exactly once
     tables = {
@@ -301,7 +301,7 @@ def test_reopen_preserves_data_no_duplicate_migration(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    assert tables == _SCHEMA_V17_TABLES
+    assert tables == _SCHEMA_V20_TABLES
     conn.close()
 
     _run(store.close())
@@ -353,6 +353,7 @@ def _seed_v13_lifecycle_tables(db_path: Path) -> None:
     _run(store.initialize())
     _run(store.close())
     conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE IF EXISTS audit_decisions")
     conn.executescript(
         """
         DROP TABLE paper_lifecycle_events;
@@ -397,6 +398,7 @@ def _seed_v14_lifecycle_tables(db_path: Path) -> None:
     _run(store.initialize())
     _run(store.close())
     conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE IF EXISTS audit_decisions")
     conn.execute("DROP TABLE paper_lifecycle_reconciliations")
     conn.execute("ALTER TABLE paper_lifecycle_events RENAME TO paper_lifecycle_events_old")
     conn.execute(
@@ -435,6 +437,7 @@ def _seed_v15_lifecycle_tables(db_path: Path) -> None:
     _run(store.initialize())
     _run(store.close())
     conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE IF EXISTS audit_decisions")
     conn.execute("DROP TABLE ui_preferences")
     conn.execute("PRAGMA user_version = 15")
     conn.commit()
@@ -453,8 +456,8 @@ def test_v15_to_v16_migration_adds_ui_preferences_table(tmp_path: Path) -> None:
         row[0]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
-    assert tables == _SCHEMA_V17_TABLES
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+    assert tables == _SCHEMA_V20_TABLES
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
     assert conn.execute(
         "SELECT sql FROM sqlite_master WHERE name='ui_preferences'"
     ).fetchone()[0] is not None
@@ -472,9 +475,9 @@ def test_v14_to_v16_migration_adds_reconciliation_table_and_rebuilds_event_check
         for row in sqlite3.connect(str(db)).execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
-    } == _SCHEMA_V17_TABLES
+    } == _SCHEMA_V20_TABLES
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
     event_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE name='paper_lifecycle_events'"
     ).fetchone()[0]
@@ -538,7 +541,7 @@ def test_v13_to_v14_migration_rebuilds_lifecycle_checks_and_preserves_rows(tmp_p
     store = sqlite_store_module.SQLiteStore(db)
     _run(store.initialize())
     conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
     assert conn.execute(
         "SELECT account_id, paper_session_id, state, last_command_id, last_updated_ms "
         "FROM paper_lifecycle_states"
@@ -627,7 +630,7 @@ def test_multiple_lifespan_cycles_safe(tmp_path: Path, monkeypatch: pytest.Monke
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version == 17
+    assert version == 20
 
 
 # ── 10. Store is not accessible outside lifespan ───────────────────────────────
