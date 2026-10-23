@@ -142,6 +142,42 @@ class TestMarketCandles:
         data = resp.json()
         assert len(data["candles"]) <= 10
 
+    def test_candles_limit_and_page_size_are_mutually_exclusive(self, client: TestClient):
+        response = client.get("/api/market/candles", params={"limit": 5, "page_size": 10})
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("page_size, expected", [(1, 1), (500, 500)])
+    def test_candles_page_size_boundaries(self, client: TestClient, page_size: int, expected: int):
+        response = client.get("/api/market/candles", params={"page_size": page_size})
+        assert response.status_code == 200
+        assert len(response.json()["candles"]) == expected
+
+    def test_candles_page_size_over_maximum_is_rejected(self, client: TestClient):
+        response = client.get("/api/market/candles", params={"page_size": 501})
+        assert response.status_code == 422
+
+    def test_candles_keyset_cursor_has_no_duplicates_or_gaps(self, client: TestClient):
+        first = client.get("/api/market/candles", params={"page_size": 3}).json()
+        cursor = first["next_cursor"]
+        second = client.get(
+            "/api/market/candles", params={"page_size": 3, "cursor": cursor}
+        ).json()
+        first_times = [candle["open_time"] for candle in first["candles"]]
+        second_times = [candle["open_time"] for candle in second["candles"]]
+        assert set(first_times).isdisjoint(second_times)
+        assert second_times == sorted(second_times)
+        assert second_times[0] > first_times[-1]
+
+    def test_candles_keyset_empty_result_has_no_cursor(self, client: TestClient):
+        response = client.get(
+            "/api/market/candles",
+            params={"start_time": 1, "end_time": 2, "page_size": 100},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["candles"] == []
+        assert "next_cursor" not in data
+
     def test_candles_has_versioned_transport_identity_and_complete(self, client: TestClient):
         data = client.get("/api/market/candles?limit=2").json()
         assert data["schema_version"] == market_api.MARKET_TRANSPORT_VERSION

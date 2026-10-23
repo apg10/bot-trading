@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager, suppress
 from enum import StrEnum
 from typing import Any, AsyncGenerator
@@ -23,6 +24,7 @@ from .capabilities import router as capabilities_router
 from .paper import router as paper_router
 from .preferences import router as preferences_router
 from .laboratory import router as laboratory_router
+from .research_gateway import ResearchGatewayMiddleware
 
 
 # ── Enum de acciones válidas ───────────────────────────────────────────────────
@@ -132,6 +134,14 @@ app.include_router(capabilities_router)
 app.include_router(paper_router)
 app.include_router(preferences_router)
 app.include_router(laboratory_router)
+
+# The gateway is a deployment-boundary control, not a global application
+# policy.  It is installed only when the operator explicitly approves that
+# boundary; the default preserves the existing application's composition.
+if os.getenv("RESEARCH_GATEWAY_DEPLOYMENT_APPROVED", "").strip().lower() in {
+    "1", "true", "yes"
+}:
+    app.add_middleware(ResearchGatewayMiddleware, tool_id="research_gateway")
 
 
 @app.get("/health")

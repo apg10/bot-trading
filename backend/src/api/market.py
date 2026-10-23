@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from typing import Any, AsyncGenerator, Literal
@@ -75,6 +76,9 @@ class CandleHistoryResponse(BaseModel):
     data_source: Literal["TEST_ONLY", "market_engine"]
     candles: list[CandleData]
     complete: bool
+    # Omitted when there is no following page, preserving the existing wire
+    # shape for non-paginated/legacy ``limit`` callers.
+    next_cursor: str | None = None
 
 
 # ── Router ────────────────────────────────────────────────────────────────────
@@ -145,6 +149,36 @@ def _validate_range(start_time: int | None, end_time: int | None, interval_ms: i
         raise HTTPException(status_code=422, detail="start_time must be before end_time")
 
 
+def _encode_candle_cursor(candle: dict[str, Any], *, symbol: str, interval: str) -> str:
+    payload = {
+        "open_time": candle["open_time"],
+        "close_time": candle["close_time"],
+        "symbol": symbol,
+        "interval": interval,
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_candle_cursor(cursor: str, *, symbol: str, interval: str) -> tuple[int, int]:
+    if not isinstance(cursor, str) or not cursor:
+        raise HTTPException(status_code=422, detail="cursor is invalid")
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        open_time = payload["open_time"]
+        close_time = payload["close_time"]
+        if payload["symbol"] != symbol or payload["interval"] != interval:
+            raise ValueError
+        if isinstance(open_time, bool) or not isinstance(open_time, int):
+            raise ValueError
+        if isinstance(close_time, bool) or not isinstance(close_time, int):
+            raise ValueError
+        return open_time, close_time
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
+        raise HTTPException(status_code=422, detail="cursor is invalid") from exc
+
+
 def _range_complete(
     candles: list[dict[str, Any]], start_time: int | None, end_time: int | None,
     interval_ms: int, engine: Any,
@@ -186,14 +220,27 @@ async def get_market_status(symbol: str = "BTC/USDT") -> MarketStatusResponse:
                                  **{k: v for k, v in _engine_metadata(engine).items() if k != "symbol"})
 
 
-@router.get("/candles", response_model=CandleHistoryResponse)
+@router.get(
+    "/candles",
+    response_model=CandleHistoryResponse,
+    response_model_exclude_none=True,
+)
 async def get_candles(
     symbol: str = "BTC/USDT",
     limit: int = Query(100, ge=1, le=500),
+    page_size: int | None = Query(None, ge=1, le=500),
+    cursor: str | None = Query(None),
     start_time: int | None = Query(None),
     end_time: int | None = Query(None),
 ):
     """Devuelve un histórico identificado; el fallback sin rango es TEST_ONLY/1m."""
+    # Mutual exclusivity: legacy 'limit' and new 'page_size'/'cursor' must not mix
+    if page_size is not None or cursor is not None:
+        if limit != 100:  # default value
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot use 'page_size' or 'cursor' with 'limit'; use one or the other",
+            )
     _validate_symbol(symbol)
     candles = []
     engine = _engine_for_symbol(symbol)
@@ -239,7 +286,38 @@ async def get_candles(
     _validate_range(start_time, end_time, interval_ms)
     candles = [c for c in candles if (start_time is None or c["open_time"] >= start_time)
                and (end_time is None or c["open_time"] < end_time)]
-    candles = candles[-limit:]
+    if page_size is not None and cursor is None:
+        page_size_value = page_size
+    elif page_size is not None and cursor is not None:
+        page_size_value = page_size
+    else:
+        page_size_value = 100
+
+    # ``limit`` remains a compatibility parameter.  New callers use
+    # page_size/cursor; their ordering is keyset-based and deterministic.
+    keyset_mode = page_size is not None or cursor is not None
+    next_cursor = None
+    if keyset_mode:
+        cursor_key = (
+            _decode_candle_cursor(cursor, symbol=symbol, interval=metadata["interval"])
+            if cursor is not None
+            else None
+        )
+        ordered = sorted(candles, key=lambda item: (item["open_time"], item["close_time"]))
+        if cursor_key is not None:
+            ordered = [
+                candle
+                for candle in ordered
+                if (candle["open_time"], candle["close_time"]) > cursor_key
+            ]
+        page = ordered[:page_size_value]
+        if len(ordered) > page_size_value:
+            next_cursor = _encode_candle_cursor(
+                page[-1], symbol=symbol, interval=metadata["interval"]
+            )
+        candles = page
+    else:
+        candles = candles[-limit:]
     complete = False if has_range and not engine_has_data else _range_complete(
         candles, start_time, end_time, interval_ms,
         engine if metadata["data_source"] == "market_engine" else None,
@@ -253,7 +331,10 @@ async def get_candles(
             "restart_count": 0,
         }
     return CandleHistoryResponse(
-        **metadata, candles=[CandleData(**c) for c in candles], complete=complete,
+        **metadata,
+        candles=[CandleData(**c) for c in candles],
+        complete=complete,
+        next_cursor=next_cursor,
     )
 
 

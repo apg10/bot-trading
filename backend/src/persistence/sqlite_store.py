@@ -46,7 +46,8 @@ Schema versions:
           concurrency revision.
      v17 — adds immutable, normalized experiment-result records.
      v18 — adds immutable causal replay decisions and candle snapshots.
-      v20 — adds immutable N02 advisory audit records.
+     v20 — adds immutable N02 advisory audit records.
+     v21 — adds generic research request audit records.
 """
 
 from __future__ import annotations
@@ -77,6 +78,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from src.models.dataset_ref import DatasetRef
 from src.models.audit_contract import CausalDecision, CandleSnapshot, N02AuditRecord
+from src.models.research_audit import ResearchRequestAuditRecord
 from src.models.experiment_contracts import (
     ExperimentDefinition,
     ExperimentRef,
@@ -179,7 +181,7 @@ def _asset_balance_construct(asset: str, total: Decimal, available: Decimal, res
 
 # ── Schema version ────────────────────────────────────────────────────────────────
 
-_SCHEMA_VERSION = 20
+_SCHEMA_VERSION = 21
 _DATASET_REF_ADAPTER = TypeAdapter(DatasetRef)
 _PAPER_FILL_ADAPTER = TypeAdapter(PaperFill)
 _PAPER_ACCOUNT_OPENING_ADAPTER = TypeAdapter(PaperAccountOpening)
@@ -496,6 +498,14 @@ class N02AuditRecordIntegrityError(ValueError):
     """Stored N02 audit JSON does not match its indexed identity."""
 
 
+class ResearchRequestAuditRecordConflictError(ValueError):
+    """Same research request id with different immutable content."""
+
+
+class ResearchRequestAuditRecordIntegrityError(ValueError):
+    """Stored research audit JSON does not match its indexed fields."""
+
+
 class PaperAccountOpeningConflictError(ValueError):
     """Account already has a different immutable opening snapshot."""
 
@@ -725,6 +735,7 @@ _SCHEMA_V17_TABLES = _SCHEMA_V16_TABLES | {"normalized_experiment_results"}
 _SCHEMA_V18_TABLES = _SCHEMA_V17_TABLES | {"audit_decisions"}
 _SCHEMA_V19_TABLES = _SCHEMA_V18_TABLES
 _SCHEMA_V20_TABLES = _SCHEMA_V19_TABLES | {"n02_audit_records"}
+_SCHEMA_V21_TABLES = _SCHEMA_V20_TABLES | {"research_request_audit_records"}
 
 _NORMALIZED_EXPERIMENT_RESULT_DDL_STATEMENTS = (
     """CREATE TABLE IF NOT EXISTS normalized_experiment_results (
@@ -773,6 +784,32 @@ _N02_AUDIT_RECORD_DDL_STATEMENTS = (
         ON n02_audit_records (snapshot_id)""",
     """CREATE INDEX IF NOT EXISTS idx_n02_audit_records_captured
         ON n02_audit_records (captured_at_ms)""",
+)
+
+_RESEARCH_REQUEST_AUDIT_DDL_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS research_request_audit_records (
+        request_id TEXT PRIMARY KEY,
+        tool_id TEXT NOT NULL,
+        method TEXT NOT NULL,
+        canonical_route TEXT NOT NULL,
+        allowlist_decision TEXT NOT NULL,
+        sanitized_params TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        public_result_metadata TEXT,
+        error_code TEXT,
+        timing_ms REAL NOT NULL,
+        captured_at_ms INTEGER NOT NULL,
+        snapshot_id TEXT,
+        result_id TEXT,
+        UNIQUE(request_id)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_research_audit_tool_id
+        ON research_request_audit_records(tool_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_research_audit_route
+        ON research_request_audit_records(canonical_route)""",
+    """CREATE INDEX IF NOT EXISTS idx_research_audit_captured
+        ON research_request_audit_records(captured_at_ms)""",
 )
 
 _PAPER_FILL_DDL_STATEMENTS = (
@@ -1638,6 +1675,52 @@ class SQLiteStore:
         if not isinstance(snapshot_id, str) or not snapshot_id.strip():
             raise ValueError("snapshot_id must be a non-empty string")
         return await self._read(self._load_n02_audit_records_inner, snapshot_id)
+
+    async def save_research_request_audit_record(
+        self, record: ResearchRequestAuditRecord
+    ) -> None:
+        """Persist one generic research request audit record idempotently."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(record, ResearchRequestAuditRecord):
+            raise TypeError("record must be a ResearchRequestAuditRecord instance")
+        await self._write(
+            lambda conn: self._save_research_request_audit_record_inner(conn, record)
+        )
+
+    async def load_research_request_audit_record(
+        self, request_id: str
+    ) -> ResearchRequestAuditRecord | None:
+        """Load and JSON-revalidate one generic request audit record."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise ValueError("request_id must be a non-empty string")
+        return await self._read(self._load_research_request_audit_record_inner, request_id)
+
+    async def load_research_request_audit_records(
+        self, tool_id: str | None, route: str | None, limit: int
+    ) -> list[ResearchRequestAuditRecord]:
+        """List generic request audits using exact tool/route filters."""
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        if tool_id is not None and (not isinstance(tool_id, str) or not tool_id.strip()):
+            raise ValueError("tool_id must be a non-empty string when supplied")
+        if route is not None and (not isinstance(route, str) or not route.strip()):
+            raise ValueError("route must be a non-empty string when supplied")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit must be a non-negative integer")
+        return await self._read(
+            lambda conn: self._load_research_request_audit_records_inner(
+                conn, tool_id, route, limit
+            )
+        )
 
     async def get_paper_lifecycle_snapshot(
         self, account_id: str, session_id: str
@@ -2689,6 +2772,168 @@ class SQLiteStore:
                     f"stored N02 audit record {row[0]} does not match indexed identity"
                 )
             records.append(record)
+        return records
+
+    @staticmethod
+    def _research_request_audit_payload(record: ResearchRequestAuditRecord) -> dict[str, Any]:
+        """Return the table's JSON-bearing fields from one validated record."""
+        return {
+            "schema_version": record.schema_version,
+            "request_id": record.request_id,
+            "tool_id": record.tool_id,
+            "method": record.method,
+            "canonical_route": record.canonical_route,
+            "allowlist_decision": record.allowlist_decision,
+            "sanitized_params": record.sanitized_params,
+            "provenance": record.provenance,
+            "outcome": record.outcome,
+            "public_result_metadata": record.public_result_metadata,
+            "error_code": record.error_code,
+            "timing_ms": record.timing_ms,
+            "captured_at_ms": record.captured_at_ms,
+            "snapshot_id": record.snapshot_id,
+            "result_id": record.result_id,
+        }
+
+    @classmethod
+    async def _save_research_request_audit_record_inner(
+        cls, conn: aiosqlite.Connection, record: ResearchRequestAuditRecord
+    ) -> None:
+        payload = cls._research_request_audit_payload(record)
+        encoded = {
+            key: (
+                None
+                if value is None
+                else json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            )
+            for key, value in (
+                ("sanitized_params", payload["sanitized_params"]),
+                ("provenance", payload["provenance"]),
+                ("public_result_metadata", payload["public_result_metadata"]),
+            )
+        }
+        existing_cursor = await conn.execute(
+            "SELECT tool_id, method, canonical_route, allowlist_decision, "
+            "sanitized_params, provenance, outcome, public_result_metadata, "
+            "error_code, timing_ms, captured_at_ms, snapshot_id, result_id "
+            "FROM research_request_audit_records WHERE request_id = ?",
+            (record.request_id,),
+        )
+        existing = await existing_cursor.fetchone()
+        if existing is not None:
+            try:
+                existing_record = cls._research_request_audit_from_row(
+                    (record.request_id, *existing)
+                )
+            except Exception as exc:
+                raise ResearchRequestAuditRecordIntegrityError(
+                    f"stored research audit record {record.request_id} is corrupt"
+                ) from exc
+            if existing_record == record:
+                return
+            raise ResearchRequestAuditRecordConflictError(
+                f"research audit record {record.request_id} already exists with different content"
+            )
+        await conn.execute(
+            "INSERT INTO research_request_audit_records "
+            "(request_id, tool_id, method, canonical_route, allowlist_decision, "
+            "sanitized_params, provenance, outcome, public_result_metadata, error_code, "
+            "timing_ms, captured_at_ms, snapshot_id, result_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.request_id,
+                record.tool_id,
+                record.method,
+                record.canonical_route,
+                record.allowlist_decision,
+                encoded["sanitized_params"],
+                encoded["provenance"],
+                record.outcome,
+                encoded["public_result_metadata"],
+                record.error_code,
+                record.timing_ms,
+                record.captured_at_ms,
+                record.snapshot_id,
+                record.result_id,
+            ),
+        )
+
+    @staticmethod
+    def _research_request_audit_from_row(row: tuple[Any, ...]) -> ResearchRequestAuditRecord:
+        request_id, tool_id, method, route, decision, params, provenance, outcome, metadata, error_code, timing, captured, snapshot_id, result_id = row
+        try:
+            params_obj = json.loads(params)
+            provenance_obj = json.loads(provenance)
+            metadata_obj = json.loads(metadata) if metadata is not None else None
+            return ResearchRequestAuditRecord(
+                request_id=request_id,
+                tool_id=tool_id,
+                method=method,
+                canonical_route=route,
+                allowlist_decision=decision,
+                sanitized_params=params_obj,
+                provenance=provenance_obj,
+                outcome=outcome,
+                public_result_metadata=metadata_obj,
+                error_code=error_code,
+                timing_ms=timing,
+                captured_at_ms=captured,
+                snapshot_id=snapshot_id,
+                result_id=result_id,
+            )
+        except Exception as exc:
+            raise ResearchRequestAuditRecordIntegrityError(
+                f"stored research audit record {request_id} is corrupt"
+            ) from exc
+
+    @classmethod
+    async def _load_research_request_audit_record_inner(
+        cls, conn: aiosqlite.Connection, request_id: str
+    ) -> ResearchRequestAuditRecord | None:
+        cursor = await conn.execute(
+            "SELECT request_id, tool_id, method, canonical_route, allowlist_decision, "
+            "sanitized_params, provenance, outcome, public_result_metadata, error_code, "
+            "timing_ms, captured_at_ms, snapshot_id, result_id "
+            "FROM research_request_audit_records WHERE request_id = ?",
+            (request_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            record = cls._research_request_audit_from_row(row)
+        except ResearchRequestAuditRecordIntegrityError:
+            raise
+        if record.request_id != request_id:
+            raise ResearchRequestAuditRecordIntegrityError(
+                f"stored research audit record {request_id} does not match indexed identity"
+            )
+        return record
+
+    @classmethod
+    async def _load_research_request_audit_records_inner(
+        cls, conn: aiosqlite.Connection, tool_id: str | None, route: str | None, limit: int
+    ) -> list[ResearchRequestAuditRecord]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if tool_id is not None:
+            clauses.append("tool_id = ?")
+            args.append(tool_id)
+        if route is not None:
+            clauses.append("canonical_route = ?")
+            args.append(route)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor = await conn.execute(
+            "SELECT request_id, tool_id, method, canonical_route, allowlist_decision, "
+            "sanitized_params, provenance, outcome, public_result_metadata, error_code, "
+            "timing_ms, captured_at_ms, snapshot_id, result_id "
+            f"FROM research_request_audit_records{where} "
+            "ORDER BY captured_at_ms, request_id LIMIT ?",
+            (*args, limit),
+        )
+        records: list[ResearchRequestAuditRecord] = []
+        for row in await cursor.fetchall():
+            records.append(cls._research_request_audit_from_row(row))
         return records
 
     # ── paper fill helpers (v6) ────────────────────────────────────────────
@@ -5847,9 +6092,9 @@ class SQLiteStore:
         version = row[0]
 
         # Reject unknown versions before touching anything.
-        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, _SCHEMA_VERSION):
+        if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, _SCHEMA_VERSION):
             raise SchemaVersionMismatchError(
-                f"expected schema version 0 through 18 or {_SCHEMA_VERSION}, got {version}"
+                f"expected schema version 0 through 18, 20, or {_SCHEMA_VERSION}, got {version}"
             )
 
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -5862,6 +6107,9 @@ class SQLiteStore:
             for statement in _N02_AUDIT_RECORD_DDL_STATEMENTS:
                 await conn.execute(statement)
             table_names.add("n02_audit_records")
+            for statement in _RESEARCH_REQUEST_AUDIT_DDL_STATEMENTS:
+                await conn.execute(statement)
+            table_names.add("research_request_audit_records")
 
         async def create_ui_preferences_table() -> None:
             for statement in _UI_PREFERENCES_DDL_STATEMENTS:
@@ -5898,13 +6146,24 @@ class SQLiteStore:
             for statement in _AUDIT_DECISION_DDL_STATEMENTS:
                 await conn.execute(statement)
 
-        # Already at v20 — just verify completeness.
+        # Already at v21 — just verify completeness.
         if version == _SCHEMA_VERSION:
-            if not _SCHEMA_V20_TABLES <= table_names:
+            if not _SCHEMA_V21_TABLES <= table_names:
                 raise SchemaVersionMismatchError(
-                    "schema version is 20 but required tables are missing"
+                    "schema version is 21 but required tables are missing"
                 )
             await create_ui_preferences_table()
+            return
+
+        # v20 → v21: add generic research request audit records.
+        if version == 20:
+            if not _SCHEMA_V20_TABLES <= table_names:
+                raise SchemaVersionMismatchError(
+                    "schema version is 20 but required v20 tables are missing"
+                )
+            for statement in _RESEARCH_REQUEST_AUDIT_DDL_STATEMENTS:
+                await conn.execute(statement)
+            await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             return
 
         # v18 → v20: add immutable N02 advisory audit records.
