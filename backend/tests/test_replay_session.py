@@ -1,4 +1,4 @@
-"""Bounded replay session acceptance tests for ACT-L-001-T8."""
+"""Bounded replay session acceptance tests for ACT-L-001-T9."""
 
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -49,7 +49,7 @@ class TestReplaySession:
 
     def test_session_produces_buy_and_sell(self):
         """Fixture produces exactly one BUY and one SELL."""
-        from src.replay_session import run_replay_session
+        from src.replay_session import SessionContext, run_replay_session
 
         segment = _segment(
             "seg-session-001",
@@ -62,12 +62,19 @@ class TestReplaySession:
 
         result = run_replay_session(
             segment,
-            "acct-test",
-            "session-test",
-            None,
-            None,
-            None,
-            None,
+            SessionContext(
+                account_id="acct-test",
+                session_id="session-test",
+                quantity=Decimal("1"),
+                entry_price=Decimal("105"),
+                exit_price=Decimal("100"),
+                strategy_ref={"source_id": "TEST_ONLY", "source_version": "v1"},
+                risk_snapshot={},
+                capacity_snapshot={},
+                fee_snapshot={},
+                lifecycle_state="running",
+                market_snapshot={},
+            ),
             None,
         )
 
