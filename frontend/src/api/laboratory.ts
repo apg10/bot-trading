@@ -68,6 +68,59 @@ export interface ExperimentComparisonReport {
   readonly aggregates: readonly NormalizedMetricAggregate[]
 }
 
+export type LaboratoryProjectionStatus = "available" | "insufficient_data"
+
+export interface CapitalCurvePoint {
+  readonly timestamp_ms: number
+  readonly fill_id: string
+  readonly balance: string
+  readonly peak_balance: string
+  readonly drawdown: string
+}
+
+export interface CapitalCurveReport {
+  readonly schema_version: "capital_curve_report.v1"
+  readonly account_id: string
+  readonly session_id: string
+  readonly quote_asset: string
+  readonly balance_kind: "cash"
+  readonly status: LaboratoryProjectionStatus
+  readonly initial_balance: string
+  readonly points: readonly CapitalCurvePoint[]
+  readonly reason: string | null
+}
+
+export interface CostValue {
+  readonly amount?: string | null
+  readonly value?: string | null
+  readonly status: LaboratoryProjectionStatus
+  readonly reason: string | null
+}
+
+export interface FillCostRow {
+  readonly fill_id: string
+  readonly order_id: string
+  readonly timestamp_ms: number
+  readonly side: string
+  readonly qty: string
+  readonly price: string
+  readonly notional: string
+  readonly commission: CostValue | null
+  readonly slippage: CostValue
+  readonly total_cost: CostValue | null
+  readonly cost_model: "UNMODELLED" | "MODELLED" | "UNKNOWN"
+}
+
+export interface CostBreakdownReport {
+  readonly schema_version: "cost_breakdown_report.v1"
+  readonly account_id: string
+  readonly session_id: string
+  readonly quote_asset: string
+  readonly status: LaboratoryProjectionStatus
+  readonly fills: readonly FillCostRow[]
+  readonly reason: string | null
+}
+
 export type LaboratoryErrorCode = "http" | "unavailable" | "invalid_response"
 
 /** Public errors are bounded and never contain an HTTP response body. */
@@ -145,6 +198,55 @@ function normalizedResult(value: unknown): value is NormalizedExperimentResult {
 
 function decimalOrNull(value: unknown): value is string | null {
   return value === null || nonEmptyString(value)
+}
+
+function projectionStatus(value: unknown): value is LaboratoryProjectionStatus {
+  return value === "available" || value === "insufficient_data"
+}
+
+function costValue(value: unknown): value is CostValue {
+  return isRecord(value) && (decimalOrNull(value.amount) || decimalOrNull(value.value))
+    && projectionStatus(value.status)
+    && (value.status === "available"
+      ? (value.reason === null || nonEmptyString(value.reason))
+      : nonEmptyString(value.reason))
+    && (value.status === "available"
+      ? (value.amount !== null && value.amount !== undefined) || (value.value !== null && value.value !== undefined)
+      : (value.amount === null || value.amount === undefined)
+        && (value.value === null || value.value === undefined))
+}
+
+function capitalPoint(value: unknown): value is CapitalCurvePoint {
+  return isRecord(value) && integer(value.timestamp_ms) && value.timestamp_ms >= 0
+    && nonEmptyString(value.fill_id) && nonEmptyString(value.balance)
+    && nonEmptyString(value.peak_balance) && nonEmptyString(value.drawdown)
+}
+
+function capitalCurve(value: unknown): value is CapitalCurveReport {
+  return isRecord(value) && value.schema_version === "capital_curve_report.v1"
+    && nonEmptyString(value.account_id) && nonEmptyString(value.session_id)
+    && nonEmptyString(value.quote_asset) && value.balance_kind === "cash"
+    && projectionStatus(value.status) && nonEmptyString(value.initial_balance)
+    && Array.isArray(value.points) && value.points.every(capitalPoint)
+    && (value.reason === null || nonEmptyString(value.reason))
+}
+
+function fillCostRow(value: unknown): value is FillCostRow {
+  return isRecord(value) && nonEmptyString(value.fill_id) && nonEmptyString(value.order_id)
+    && integer(value.timestamp_ms) && value.timestamp_ms >= 0 && nonEmptyString(value.side)
+    && nonEmptyString(value.qty) && nonEmptyString(value.price) && nonEmptyString(value.notional)
+    && (value.commission === null || costValue(value.commission))
+    && costValue(value.slippage)
+    && (value.total_cost === null || costValue(value.total_cost))
+    && ["UNMODELLED", "MODELLED", "UNKNOWN"].includes(String(value.cost_model))
+}
+
+function costBreakdown(value: unknown): value is CostBreakdownReport {
+  return isRecord(value) && value.schema_version === "cost_breakdown_report.v1"
+    && nonEmptyString(value.account_id) && nonEmptyString(value.session_id)
+    && nonEmptyString(value.quote_asset) && projectionStatus(value.status)
+    && Array.isArray(value.fills) && value.fills.every(fillCostRow)
+    && (value.reason === null || nonEmptyString(value.reason))
 }
 
 function aggregate(value: unknown): value is NormalizedMetricAggregate {
@@ -234,4 +336,28 @@ export async function getComparison(
   const path = `/api/laboratory/comparisons/${encodeURIComponent(experimentId)}/${encodeURIComponent(experimentVersion)}`
     + `?comparison_id=${encodeURIComponent(comparisonId)}&comparison_version=${encodeURIComponent(comparisonVersion)}`
   return validateComparison(await request(path))
+}
+
+export async function getCapitalCurve(
+  accountId: string,
+  sessionId: string,
+  quoteAsset = "USDT",
+): Promise<CapitalCurveReport> {
+  const path = `/api/laboratory/capital-curves/${encodeURIComponent(accountId)}/${encodeURIComponent(sessionId)}`
+    + `?quote_asset=${encodeURIComponent(quoteAsset)}`
+  const value = await request(path)
+  if (!capitalCurve(value)) invalidResponse()
+  return value
+}
+
+export async function getCostBreakdown(
+  accountId: string,
+  sessionId: string,
+  quoteAsset = "USDT",
+): Promise<CostBreakdownReport> {
+  const path = `/api/laboratory/cost-breakdowns/${encodeURIComponent(accountId)}/${encodeURIComponent(sessionId)}`
+    + `?quote_asset=${encodeURIComponent(quoteAsset)}`
+  const value = await request(path)
+  if (!costBreakdown(value)) invalidResponse()
+  return value
 }

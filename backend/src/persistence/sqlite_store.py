@@ -2085,6 +2085,29 @@ class SQLiteStore:
             lambda conn: self._load_paper_fill_evaluation_inner(conn, evaluation_id)
         )
 
+    async def get_paper_fill_evaluations(
+        self, account_id: str, session_id: str | None = None
+    ) -> list[PaperFillEvaluationRecord]:
+        """List durable fill evaluations for one account/session.
+
+        This is deliberately a raw, validated reader.  Laboratory projections
+        use the journaled fills and orders as their accounting authority and
+        consult these records only for execution-cost provenance.
+        """
+        self._validate_paper_read_context(account_id, session_id)
+        if self._closed:
+            raise StoreClosedError("store is closed")
+        if not self._initialized:
+            raise RuntimeError("store must be initialized before use")
+        return await self._read(
+            lambda conn: self._get_paper_fill_evaluations_inner(
+                conn, account_id, session_id
+            )
+        )
+
+    # Explicit list spelling for callers that name collection readers as lists.
+    list_paper_fill_evaluations = get_paper_fill_evaluations
+
     async def save_ui_preferences(self, raw_text: str, expected_revision: int) -> int:
         """Persist preferences only when *expected_revision* is current.
 
@@ -5251,6 +5274,43 @@ class SQLiteStore:
                 "stored paper fill evaluation does not match indexed identity"
             )
         return record
+
+    @staticmethod
+    async def _get_paper_fill_evaluations_inner(
+        conn: aiosqlite.Connection,
+        account_id: str,
+        session_id: str | None,
+    ) -> list[PaperFillEvaluationRecord]:
+        sql = (
+            "SELECT evaluation_id, order_id, account_id, paper_session_id, "
+            "environment, status_code, result_json, evaluated_at_ms, "
+            "fill_candidate_fill_id, fill_candidate_fill_qty, "
+            "fill_candidate_fill_price, fill_candidate_commission_json "
+            "FROM paper_fill_evaluations WHERE account_id = ?"
+        )
+        args: list[str] = [account_id]
+        if session_id is not None:
+            sql += " AND paper_session_id = ?"
+            args.append(session_id)
+        sql += " ORDER BY evaluated_at_ms, evaluation_id"
+        cursor = await conn.execute(sql, args)
+        rows = await cursor.fetchall()
+        result: list[PaperFillEvaluationRecord] = []
+        for row in rows:
+            record = PaperFillEvaluationRecord(
+                evaluation_id=row[0], order_id=row[1], account_id=row[2],
+                paper_session_id=row[3], environment=row[4], status_code=row[5],
+                result_json=row[6], evaluated_at_ms=row[7],
+                fill_candidate_fill_id=row[8], fill_candidate_fill_qty=row[9],
+                fill_candidate_fill_price=row[10],
+                fill_candidate_commission_json=row[11],
+            )
+            if record.account_id != account_id or (
+                session_id is not None and record.paper_session_id != session_id
+            ):
+                raise StoreCorruptionError("fill evaluation context does not match its query")
+            result.append(record)
+        return result
 
     async def _cancel_paper_sell_order_inner(
         conn: aiosqlite.Connection,

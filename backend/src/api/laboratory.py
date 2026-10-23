@@ -12,6 +12,12 @@ from src.persistence.sqlite_store import (
     StoreClosedError,
     StoreCorruptionError,
 )
+from src.models.laboratory_metrics import (
+    MetricsInconsistencyError,
+    MetricsInsufficientDataError,
+    build_capital_curve,
+    build_cost_breakdown,
+)
 
 
 router = APIRouter(prefix="/api/laboratory", tags=["laboratory-read"])
@@ -52,6 +58,68 @@ def _store_unavailable(exc: Exception) -> HTTPException:
             "message": str(exc),
         },
     )
+
+
+async def _metrics_inputs(
+    store: SQLiteStore, account_id: str, session_id: str, quote_asset: str
+):
+    if not account_id.strip() or await store.load_paper_account_opening(account_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LABORATORY_ACCOUNT_NOT_FOUND", "account_id": account_id, "available": False},
+        )
+    if not session_id.strip():
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LABORATORY_SESSION_NOT_FOUND", "account_id": account_id, "session_id": session_id, "available": False},
+        )
+    orders = await store.get_paper_orders(account_id, session_id)
+    fills = await store.get_paper_fills(account_id, session_id)
+    evaluations = await store.get_paper_fill_evaluations(account_id, session_id)
+    if not orders and not fills and not evaluations:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LABORATORY_SESSION_NOT_FOUND", "account_id": account_id, "session_id": session_id, "available": False},
+        )
+    if not quote_asset.strip():
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LABORATORY_INSUFFICIENT_DATA", "reason": "quote_asset is required", "available": False},
+        )
+    opening = await store.load_paper_account_opening(account_id)
+    assert opening is not None
+    initial = next((balance.total for balance in opening.balances if balance.asset == quote_asset), None)
+    if initial is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LABORATORY_QUOTE_ASSET_INCONSISTENT", "quote_asset": quote_asset, "available": False},
+        )
+    return initial, fills, {item["order_id"]: item for item in orders}, evaluations
+
+
+def _metrics_error(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "LABORATORY_INSUFFICIENT_DATA"
+            if isinstance(exc, MetricsInsufficientDataError)
+            else "LABORATORY_DATA_INCONSISTENCY",
+            "reason": str(exc),
+            "available": False,
+        },
+    )
+
+
+async def _run_metrics(request: Request, account_id: str, session_id: str, quote_asset: str):
+    store = _store_for(request)
+    try:
+        return store, await _metrics_inputs(store, account_id, session_id, quote_asset)
+    except HTTPException:
+        raise
+    except (StoreClosedError, RuntimeError) as exc:
+        raise _store_unavailable(exc) from exc
+    except (StoreCorruptionError, ValueError) as exc:
+        raise _metrics_error(exc) from exc
 
 
 @router.get("/results/{result_id}")
@@ -134,5 +202,55 @@ async def get_experiment_comparison(
                 "experiment_version": experiment_version,
                 "available": False,
             },
+        )
+    return report.model_dump(mode="json")
+
+
+@router.get("/capital-curves/{account_id}/{session_id}")
+async def get_capital_curve(
+    account_id: str,
+    session_id: str,
+    request: Request,
+    quote_asset: str = Query(default="USDT"),
+) -> dict:
+    """Return the cash-balance curve derived from applied PAPER fills."""
+    store, (initial, fills, orders, _evaluations) = await _run_metrics(
+        request, account_id, session_id, quote_asset
+    )
+    try:
+        report = build_capital_curve(
+            account_id, session_id, quote_asset, initial, fills, orders
+        )
+    except (MetricsInconsistencyError, MetricsInsufficientDataError) as exc:
+        raise _metrics_error(exc) from exc
+    if report.status != "available":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LABORATORY_INSUFFICIENT_DATA", "reason": report.reason, "available": False},
+        )
+    return report.model_dump(mode="json")
+
+
+@router.get("/cost-breakdowns/{account_id}/{session_id}")
+async def get_cost_breakdown(
+    account_id: str,
+    session_id: str,
+    request: Request,
+    quote_asset: str = Query(default="USDT"),
+) -> dict:
+    """Return per-fill commission and explicitly modelled slippage."""
+    store, (_initial, fills, orders, evaluations) = await _run_metrics(
+        request, account_id, session_id, quote_asset
+    )
+    try:
+        report = build_cost_breakdown(
+            account_id, session_id, quote_asset, fills, orders, evaluations
+        )
+    except (MetricsInconsistencyError, MetricsInsufficientDataError) as exc:
+        raise _metrics_error(exc) from exc
+    if report.status != "available":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LABORATORY_INSUFFICIENT_DATA", "reason": report.reason, "available": False},
         )
     return report.model_dump(mode="json")

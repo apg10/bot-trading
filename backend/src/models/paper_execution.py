@@ -317,8 +317,15 @@ class PaperFillCandidateResult(_ExecutionDTO):
     # When MODELLED, the modelled execution price is captured
     modelled_execution_price: Optional[Decimal] = None
     latency_ms: Optional[int] = None
+    # Optional benchmark retained with the evaluation.  Older evaluations do
+    # not have this information and therefore yield unknown MODELLED slippage.
+    reference_price: Optional[Decimal] = None
+    reference_price_kind: Optional[str] = None
 
-    @field_validator("fill_qty", "fill_price", "modelled_execution_price", mode="before")
+    @field_validator(
+        "fill_qty", "fill_price", "modelled_execution_price", "reference_price",
+        mode="before",
+    )
     @classmethod
     def decimal_only(cls, value: Optional[object]) -> Optional[Decimal]:
         if value is None:
@@ -364,6 +371,8 @@ def _build_result(
     commission: Optional[Commission] = None,
     modelled_execution_price: Optional[Decimal] = None,
     latency_ms: Optional[int] = None,
+    reference_price: Optional[Decimal] = None,
+    reference_price_kind: Optional[str] = None,
     capacity_source_id: str = "",
     capacity_source_version: str = "",
     capacity_symbol: str = "",
@@ -385,6 +394,8 @@ def _build_result(
         commission=commission,
         modelled_execution_price=modelled_execution_price,
         latency_ms=latency_ms,
+        reference_price=reference_price,
+        reference_price_kind=reference_price_kind,
         capacity_source_id=capacity_source_id,
         capacity_source_version=capacity_source_version,
         capacity_symbol=capacity_symbol,
@@ -680,6 +691,8 @@ def evaluate_fill_candidate(
     fee_snapshot: Optional[PaperFeeSnapshot] = None,
     protection_snapshot: Optional[PaperProtectionSnapshot] = None,
     modelled_execution: Optional[PaperModelledExecution] = None,
+    reference_price: Optional[Decimal] = None,
+    reference_price_kind: Optional[str] = None,
 ) -> PaperFillCandidateResult:
     """Pure, deterministic fill-candidate evaluator.
 
@@ -1076,5 +1089,17 @@ def evaluate_fill_candidate(
         commission=commission,
         modelled_execution_price=modelled_execution.modelled_execution_price if modelled_execution else None,
         latency_ms=latency_ms,
+        reference_price=(
+            reference_price
+            if reference_price is not None
+            else (
+                market_exec_snapshot.ask
+                if order.side == PaperOrderSide.BUY
+                else market_exec_snapshot.bid
+            )
+        ) if exec_policy_snapshot.latency_slippage_mode == "MODELLED" else None,
+        reference_price_kind=(
+            reference_price_kind or "market_snapshot"
+        ) if exec_policy_snapshot.latency_slippage_mode == "MODELLED" else None,
         **_cap_kwargs(market_capacity_snapshot),
     )

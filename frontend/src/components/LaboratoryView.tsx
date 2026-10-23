@@ -1,6 +1,10 @@
 import { useState, type ChangeEvent, type FormEvent } from "react"
 import {
+  getCapitalCurve,
   getComparison,
+  getCostBreakdown,
+  type CapitalCurveReport,
+  type CostBreakdownReport,
   type ExperimentComparisonReport,
   type NormalizedExperimentResult,
   type NormalizedMetric,
@@ -12,6 +16,9 @@ type FormValues = {
   experimentVersion: string
   comparisonId: string
   comparisonVersion: string
+  accountId: string
+  sessionId: string
+  quoteAsset: string
 }
 
 const initialForm: FormValues = {
@@ -19,6 +26,9 @@ const initialForm: FormValues = {
   experimentVersion: "",
   comparisonId: "",
   comparisonVersion: "",
+  accountId: "",
+  sessionId: "",
+  quoteAsset: "USDT",
 }
 
 export function metricState(metric: NormalizedMetric): string {
@@ -28,6 +38,61 @@ export function metricState(metric: NormalizedMetric): string {
 
 export function aggregateValue(value: string | null, availableCount: number): string {
   return availableCount === 0 || value === null ? "—" : value
+}
+
+export function LaboratoryCapitalCurve({ report }: { report: CapitalCurveReport }) {
+  return (
+    <section className="card" aria-label="Curva de capital y drawdown">
+      <div className="card-title">Capital cash · {report.quote_asset}</div>
+      {report.status !== "available" ? (
+        <p role="status">{report.status}{report.reason ? `: ${report.reason}` : ""}</p>
+      ) : (
+        <>
+          <svg aria-label="Capital curve" role="img" viewBox="0 0 320 70" width="100%" height="70">
+            <polyline
+              fill="none" stroke="currentColor" strokeWidth="2"
+              points={report.points.map((_point, index) => `${index * (report.points.length > 1 ? 300 / (report.points.length - 1) : 0) + 10},25`).join(" ")}
+            />
+            {report.points.map((point, index) => (
+              <circle key={point.fill_id} cx={index * (report.points.length > 1 ? 300 / (report.points.length - 1) : 0) + 10} cy="25" r="3"
+                data-balance={point.balance} data-drawdown={point.drawdown} aria-label={`${point.fill_id} ${point.balance}`} />
+            ))}
+          </svg>
+          <div className="card-detail">Saldo inicial: {report.initial_balance}</div>
+          <table>
+            <thead><tr><th>Fill</th><th>Saldo cash</th><th>Peak</th><th>Drawdown</th></tr></thead>
+            <tbody>{report.points.map(point => (
+              <tr key={point.fill_id}><th scope="row">{point.fill_id}</th><td>{point.balance}</td><td>{point.peak_balance}</td><td>{point.drawdown}</td></tr>
+            ))}</tbody>
+          </table>
+        </>
+      )}
+    </section>
+  )
+}
+
+export function LaboratoryCostBreakdown({ report }: { report: CostBreakdownReport }) {
+  return (
+    <section className="card" aria-label="Cost breakdown">
+      <div className="card-title">Costes por fill · {report.quote_asset}</div>
+      {report.status !== "available" && <p role="status">{report.status}{report.reason ? `: ${report.reason}` : ""}</p>}
+      {report.fills.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table>
+            <thead><tr><th>Fill</th><th>Side</th><th>Qty</th><th>Price</th><th>Commission</th><th>Slippage</th><th>Total</th></tr></thead>
+            <tbody>{report.fills.map(fill => (
+              <tr key={fill.fill_id}>
+                <th scope="row">{fill.fill_id}</th><td>{fill.side}</td><td>{fill.qty}</td><td>{fill.price}</td>
+                <td>{fill.commission?.amount ?? fill.commission?.value ?? "unknown"}</td>
+                <td>{fill.slippage.amount ?? fill.slippage.value ?? fill.slippage.reason ?? fill.slippage.status}</td>
+                <td>{fill.total_cost?.amount ?? fill.total_cost?.value ?? "unknown"}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
 }
 
 function VariantCard({ result }: { result: NormalizedExperimentResult }) {
@@ -113,21 +178,37 @@ export function LaboratoryView() {
   const [report, setReport] = useState<ExperimentComparisonReport | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [capitalCurve, setCapitalCurve] = useState<CapitalCurveReport | null>(null)
+  const [costBreakdown, setCostBreakdown] = useState<CostBreakdownReport | null>(null)
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (Object.values(form).some(value => value.trim() === "")) {
+    if ([form.experimentId, form.experimentVersion, form.comparisonId, form.comparisonVersion].some(value => value.trim() === "")) {
       setReport(null)
       setError("Completa los cuatro identificadores.")
       return
     }
     setLoading(true)
     setError(null)
+    setCapitalCurve(null)
+    setCostBreakdown(null)
     try {
-      const next = await getComparison(
+      const comparison = getComparison(
         form.experimentId, form.experimentVersion, form.comparisonId, form.comparisonVersion,
       )
-      setReport(next)
+      const hasMetricsContext = form.accountId.trim() !== "" && form.sessionId.trim() !== ""
+      if (hasMetricsContext) {
+        const [next, curve, costs] = await Promise.all([
+          comparison,
+          getCapitalCurve(form.accountId, form.sessionId, form.quoteAsset || "USDT"),
+          getCostBreakdown(form.accountId, form.sessionId, form.quoteAsset || "USDT"),
+        ])
+        setReport(next)
+        setCapitalCurve(curve)
+        setCostBreakdown(costs)
+      } else {
+        setReport(await comparison)
+      }
     } catch (reason: unknown) {
       setReport(null)
       setError(reason instanceof Error ? reason.message : "No se pudo cargar la comparación")
@@ -136,7 +217,7 @@ export function LaboratoryView() {
     }
   }
 
-  const update = (key: keyof FormValues) => (event: ChangeEvent<HTMLInputElement>) => {
+      const update = (key: keyof FormValues) => (event: ChangeEvent<HTMLInputElement>) => {
     setForm(current => ({ ...current, [key]: event.target.value }))
   }
 
@@ -148,6 +229,9 @@ export function LaboratoryView() {
           ["experimentVersion", "Experiment version"],
           ["comparisonId", "Comparison ID"],
           ["comparisonVersion", "Comparison version"],
+          ["accountId", "Account (optional)"],
+          ["sessionId", "Session (optional)"],
+          ["quoteAsset", "Quote asset (optional)"],
         ] as const).map(([key, label]) => (
           <label key={key} style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)", flex: "1 1 180px" }}>
             <span>{label}</span>
@@ -162,7 +246,13 @@ export function LaboratoryView() {
         {loading && <p role="status">Cargando comparación…</p>}
         {error && <p role="alert" style={{ color: "var(--color-negative)" }}>{error}</p>}
       </div>
-      {report ? <LaboratoryComparisonResult report={report} /> : !loading && !error ? (
+      {report ? <>
+        <LaboratoryComparisonResult report={report} />
+        {(capitalCurve || costBreakdown) && <div style={{ display: "grid", gap: "var(--space-sm)", padding: "0 var(--space-lg) var(--space-lg)" }}>
+          {capitalCurve && <LaboratoryCapitalCurve report={capitalCurve} />}
+          {costBreakdown && <LaboratoryCostBreakdown report={costBreakdown} />}
+        </div>}
+      </> : !loading && !error ? (
         <p role="status" style={{ padding: "var(--space-lg)", color: "var(--color-text-muted)" }}>
           Sin resultados. Introduce los identificadores para consultar una comparación.
         </p>
