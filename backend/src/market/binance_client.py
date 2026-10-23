@@ -23,6 +23,56 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Stable provenance identity.  This client intentionally implements only the
+# unauthenticated Spot market-data API; credentials are never read by the
+# transport and no signed/private endpoint is exposed.
+BINANCE_SPOT_PUBLIC = "BINANCE_SPOT_PUBLIC"
+
+
+class BinanceRateLimitError(ValueError):
+    """Binance rejected a public request because its rate budget was exceeded."""
+
+    def __init__(self, status_code: int, message: str = "Binance rate limit"):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class BinanceWSProtocolError(RuntimeError):
+    """A Binance WebSocket protocol error which requires a fresh connection."""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+_BINANCE_RATE_LIMIT_CODES = frozenset({-1003, -1008, -1015})
+
+
+def _decimal_field(value: Any, field: str, *, positive: bool = False) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid Binance {field}")
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid Binance {field}") from exc
+    if not parsed.is_finite() or (positive and parsed <= 0) or (not positive and parsed < 0):
+        raise ValueError(f"Invalid Binance {field}")
+    return parsed
+
+
+def _raise_for_public_response(resp: httpx.Response) -> None:
+    """Translate Binance rate-limit responses without exposing response data."""
+    if resp.status_code in (418, 429):
+        raise BinanceRateLimitError(resp.status_code)
+    try:
+        payload = resp.json()
+    except (ValueError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict) and payload.get("code") in _BINANCE_RATE_LIMIT_CODES:
+        raise BinanceRateLimitError(resp.status_code or 429)
+    resp.raise_for_status()
+
 
 def _normalize_symbol(symbol: str) -> str:
     """Símbolo Spot nativo para el transporte; no acepta notación de derivados."""
@@ -70,8 +120,16 @@ class BinanceConfig:
 class BinanceHTTPClient:
     """Cliente ligero para llamadas REST a Binance."""
 
+    source_identity = BINANCE_SPOT_PUBLIC
+    source = BINANCE_SPOT_PUBLIC
+
     def __init__(self, config: BinanceConfig):
         self.config = config
+        base = urlsplit(config.base_url)
+        if (base.scheme not in ("http", "https") or not base.hostname
+                or base.username is not None or base.password is not None
+                or base.query or base.fragment):
+            raise ValueError("base_url debe ser una base HTTP(S) pública sin credenciales")
         self._client = httpx.AsyncClient(
             base_url=config.base_url,
             timeout=httpx.Timeout(30.0),
@@ -91,10 +149,21 @@ class BinanceHTTPClient:
         Retorna lista de dicts con keys:
         open_time, open, high, low, close, volume, close_time, ...
         """
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("Binance kline limit must be an integer between 1 and 1000")
+        if start_ts is not None and (type(start_ts) is not int or start_ts < 0):
+            raise ValueError("Invalid Binance kline start timestamp")
+        if end_ts is not None and (type(end_ts) is not int or end_ts < 0):
+            raise ValueError("Invalid Binance kline end timestamp")
+        if start_ts is not None and end_ts is not None and start_ts > end_ts:
+            raise ValueError("Binance kline start must not exceed end")
+        if not isinstance(interval, str) or not interval or not interval.isascii():
+            raise ValueError("Invalid Binance kline interval")
+
         params: dict[str, Any] = {
             "symbol": _normalize_symbol(symbol),
             "interval": interval,
-            "limit": min(limit, 1000),  # Binance max = 1000
+            "limit": limit,
         }
         if start_ts is not None:
             params["startTime"] = start_ts
@@ -102,41 +171,101 @@ class BinanceHTTPClient:
             params["endTime"] = end_ts
 
         resp = await self._client.get("/api/v3/klines", params=params)
-        resp.raise_for_status()
-        raw = resp.json()
+        _raise_for_public_response(resp)
+        try:
+            raw = resp.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid Binance klines response") from exc
+        if not isinstance(raw, list) or len(raw) > limit:
+            raise ValueError("Invalid Binance klines response")
 
         # Normalizar a dicts con keys claras
-        return [
-            {
-                "open_time": int(row[0]),
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume": float(row[5]),
-                "close_time": int(row[6]),
-                "quote_volume": float(row[7]),
-                "trades": int(row[8]),
-            }
-            for row in raw
-        ]
+        normalized: list[dict[str, Any]] = []
+        previous_open: int | None = None
+        for row in raw:
+            if not isinstance(row, (list, tuple)) or len(row) < 9:
+                raise ValueError("Invalid Binance kline row")
+            if any(isinstance(row[index], bool) for index in (0, 6, 8)):
+                raise ValueError("Invalid Binance kline row")
+            try:
+                open_time = int(row[0])
+                close_time = int(row[6])
+                trades = int(row[8])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Invalid Binance kline row") from exc
+            if open_time < 0 or close_time < open_time or trades < 0:
+                raise ValueError("Invalid Binance kline row")
+            values = [_decimal_field(row[index], name, positive=index in (1, 2, 3, 4))
+                      for index, name in ((1, "open"), (2, "high"), (3, "low"),
+                                          (4, "close"), (5, "volume"), (7, "quote volume"))]
+            open_price, high, low, close, volume, quote_volume = values
+            if low > min(open_price, close) or high < max(open_price, close) or low > high:
+                raise ValueError("Invalid Binance OHLC values")
+            if previous_open is not None and open_time <= previous_open:
+                raise ValueError("Binance klines are not strictly ordered")
+            previous_open = open_time
+            normalized.append({
+                "open_time": open_time,
+                "open": float(open_price),
+                "high": float(high),
+                "low": float(low),
+                "close": float(close),
+                "volume": float(volume),
+                "close_time": close_time,
+                "quote_volume": float(quote_volume),
+                "trades": trades,
+            })
+            if not all(math.isfinite(normalized[-1][field])
+                       for field in ("open", "high", "low", "close", "volume", "quote_volume")):
+                raise ValueError("Invalid Binance numeric payload")
+        return normalized
 
     async def get_symbol_info(self, symbol: str) -> dict[str, Any]:
         """Obtener información del símbolo (tickSize, stepSize, etc.)."""
         native_symbol = _normalize_symbol(symbol)
         resp = await self._client.get("/api/v3/exchangeInfo", params={"symbol": native_symbol})
-        resp.raise_for_status()
-        data = resp.json()
-        for s in data.get("symbols", []):
-            if s["symbol"] == native_symbol:
-                filters = {f["filterType"]: f for f in s.get("filters", [])}
+        _raise_for_public_response(resp)
+        try:
+            data = resp.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid Binance exchange info response") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("symbols"), list):
+            raise ValueError("Invalid Binance exchange info response")
+        for s in data["symbols"]:
+            if not isinstance(s, dict):
+                raise ValueError("Invalid Binance exchange info symbol")
+            if s.get("symbol") == native_symbol:
+                if not all(isinstance(s.get(key), str) and s[key].strip()
+                           for key in ("symbol", "baseAsset", "quoteAsset")):
+                    raise ValueError("Invalid Binance exchange info symbol")
+                raw_filters = s.get("filters", [])
+                if not isinstance(raw_filters, list):
+                    raise ValueError("Invalid Binance exchange info filters")
+                filters: dict[str, dict[str, Any]] = {}
+                for item in raw_filters:
+                    if not isinstance(item, dict) or not isinstance(item.get("filterType"), str):
+                        raise ValueError("Invalid Binance exchange info filter")
+                    filters[item["filterType"]] = item
+                # Some Binance-compatible public fixtures omit filters.  Keep
+                # the historical defaults in that case, but reject malformed
+                # values whenever a filter is supplied.
+                def filter_decimal(filter_type: str, key: str, default: str) -> float:
+                    item = filters.get(filter_type, {})
+                    if filter_type in filters and key not in item:
+                        raise ValueError("Invalid Binance exchange info filter")
+                    value = item.get(key, default)
+                    return float(_decimal_field(value, key, positive=True))
+
                 return {
                     "symbol": symbol,
                     "base_asset": s.get("baseAsset"),
                     "quote_asset": s.get("quoteAsset"),
-                    "tick_size": float(filters.get("PRICE_FILTER", {}).get("tickSize", 0.01)),
-                    "step_size": float(filters.get("LOT_SIZE", {}).get("stepSize", 0.001)),
-                    "min_notional": float(filters.get("NOTIONAL", {}).get("minNotional", 5.0)),
+                    "tick_size": filter_decimal("PRICE_FILTER", "tickSize", "0.01"),
+                    "step_size": filter_decimal("LOT_SIZE", "stepSize", "0.001"),
+                    "min_notional": filter_decimal(
+                        "NOTIONAL" if "NOTIONAL" in filters else "MIN_NOTIONAL",
+                        "minNotional", "5.0",
+                    ),
                 }
         return {}
 
@@ -146,11 +275,17 @@ class BinanceHTTPClient:
         resp = await self._client.get(
             "/api/v3/ticker/bookTicker", params={"symbol": native_symbol},
         )
-        resp.raise_for_status()
-        data = resp.json()
+        _raise_for_public_response(resp)
+        try:
+            data = resp.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid Binance book ticker response") from exc
         if not isinstance(data, dict):
             raise ValueError("Invalid Binance book ticker response")
         try:
+            if any(isinstance(data.get(key), bool) for key in
+                   ("bidPrice", "bidQty", "askPrice", "askQty")):
+                raise ValueError("boolean quote")
             quote_symbol = data["symbol"]
             bid_price = Decimal(data["bidPrice"])
             bid_qty = Decimal(data["bidQty"])
@@ -158,9 +293,12 @@ class BinanceHTTPClient:
             ask_qty = Decimal(data["askQty"])
         except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
             raise ValueError("Invalid Binance book ticker response") from exc
-        if not isinstance(quote_symbol, str) or not quote_symbol.strip():
+        if (not isinstance(quote_symbol, str) or not quote_symbol.strip()
+                or _normalize_symbol(quote_symbol) != native_symbol):
             raise ValueError("Invalid Binance book ticker response")
-        if any(not value.is_finite() for value in (bid_price, bid_qty, ask_price, ask_qty)):
+        if (any(not value.is_finite() or value <= 0
+                for value in (bid_price, bid_qty, ask_price, ask_qty))
+                or bid_price > ask_price):
             raise ValueError("Invalid Binance book ticker response")
 
         return {
@@ -184,6 +322,9 @@ class BinanceWSClient:
 
     Maneja reconexión con backoff exponencial automático.
     """
+
+    source_identity = BINANCE_SPOT_PUBLIC
+    source = BINANCE_SPOT_PUBLIC
 
     def __init__(self, config: BinanceConfig):
         self.config = config
@@ -303,22 +444,55 @@ class BinanceWSClient:
                             if not self._running:
                                 break
                             msg = json.loads(raw)
+                            if not isinstance(msg, dict):
+                                raise ValueError("Invalid Binance WebSocket frame")
+                            if "code" in msg:
+                                code = msg.get("code")
+                                if type(code) is int:
+                                    raise BinanceWSProtocolError(
+                                        code, "Binance WebSocket protocol error"
+                                    )
                             if "k" not in msg:
                                 continue
                             kline = msg["k"]
+                            if not isinstance(kline, dict):
+                                raise ValueError("Invalid Binance kline payload")
                             if _normalize_symbol(kline.get("s", native_symbol)) != native_symbol:
                                 continue
+                            required = ("t", "T", "o", "h", "l", "c", "v", "x")
+                            if any(key not in kline for key in required) or type(kline["x"]) is not bool:
+                                raise ValueError("Invalid Binance kline payload")
+                            try:
+                                open_time = int(kline["t"])
+                                close_time = int(kline["T"])
+                            except (TypeError, ValueError) as exc:
+                                raise ValueError("Invalid Binance kline payload") from exc
+                            if open_time < 0 or close_time < open_time:
+                                raise ValueError("Invalid Binance kline timestamps")
+                            values = {
+                                name: _decimal_field(kline[key], name, positive=name != "volume")
+                                for name, key in (("open", "o"), ("high", "h"),
+                                                  ("low", "l"), ("close", "c"),
+                                                  ("volume", "v"))
+                            }
+                            if (values["low"] > min(values["open"], values["close"])
+                                    or values["high"] < max(values["open"], values["close"])
+                                    or values["low"] > values["high"]):
+                                raise ValueError("Invalid Binance OHLC values")
                             normalized = {
                                 "symbol": symbol,
-                                "open_time": int(kline["t"]),
-                                "close_time": int(kline["T"]),
-                                "open": float(kline["o"]),
-                                "high": float(kline["h"]),
-                                "low": float(kline["l"]),
-                                "close": float(kline["c"]),
-                                "volume": float(kline["v"]),
+                                "open_time": open_time,
+                                "close_time": close_time,
+                                "open": float(values["open"]),
+                                "high": float(values["high"]),
+                                "low": float(values["low"]),
+                                "close": float(values["close"]),
+                                "volume": float(values["volume"]),
                                 "is_closed": kline["x"],
                             }
+                            if not all(math.isfinite(normalized[field])
+                                       for field in ("open", "high", "low", "close", "volume")):
+                                raise ValueError("Invalid Binance numeric payload")
                             retries = 0
                             delay = min(base_delay, 60.0)
                             self._notify(self._on_message, normalized)

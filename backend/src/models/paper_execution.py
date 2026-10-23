@@ -215,7 +215,14 @@ class PaperFeeSnapshot(_ExecutionDTO):
     quantity: Decimal = Field(..., ge=Decimal("0"))
     commission: Commission
 
-    @field_validator("fee_id", "fee_version")
+    # Fee provenance is optional on the wire for legacy TEST_ONLY snapshots.
+    # Defaults deliberately preserve construction of pre-ACT-B-001 snapshots.
+    source: Literal["BINANCE_SPOT_PUBLIC", "TEST_ONLY"] = "TEST_ONLY"
+    version: str = Field(default="v1", min_length=1)
+    fee_type: Literal["maker", "taker"] = "taker"
+    rate: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+
+    @field_validator("fee_id", "fee_version", "version")
     @classmethod
     def nonblank(cls, value: str) -> str:
         if not value.strip():
@@ -226,6 +233,95 @@ class PaperFeeSnapshot(_ExecutionDTO):
     @classmethod
     def decimal_only(cls, value: object) -> Decimal:
         return _required_decimal(value)
+
+    @field_validator("rate", mode="before")
+    @classmethod
+    def valid_rate(cls, value: object, info) -> Decimal:
+        rate = _required_decimal(value)
+        if rate < 0 or rate > 1:
+            raise ValueError("fee rate must be between zero and one")
+        if info.data.get("source") == "BINANCE_SPOT_PUBLIC" and rate != Decimal("0.001"):
+            raise ValueError("unsupported Binance Spot public fee rate")
+        return rate
+
+    @classmethod
+    def from_binance_spot(
+        cls,
+        *,
+        quantity: Decimal,
+        price: Decimal,
+        quote_asset: str,
+        fee_type: Literal["maker", "taker"] = "taker",
+        version: str = "v1",
+    ) -> "PaperFeeSnapshot":
+        """Build a versioned public Binance Spot fee snapshot for PAPER."""
+        return make_binance_spot_fee_snapshot(
+            quantity=quantity,
+            price=price,
+            quote_asset=quote_asset,
+            fee_type=fee_type,
+            version=version,
+        )
+
+    @classmethod
+    def binance_spot(cls, **kwargs: object) -> "PaperFeeSnapshot":
+        """Compatibility spelling for callers constructing a policy snapshot."""
+        return cls.from_binance_spot(**kwargs)  # type: ignore[arg-type]
+
+
+BINANCE_SPOT_FEE_VERSION = "v1"
+BINANCE_SPOT_FEE_RATE = Decimal("0.001")
+
+
+def calculate_binance_spot_commission(
+    quantity: Decimal,
+    price: Decimal,
+    fee_type: Literal["maker", "taker"] = "taker",
+) -> Decimal:
+    """Return exact Binance Spot public commission policy.
+
+    This intentionally models neither account tiers nor discounts.  Both
+    maker and taker use the same public-policy rate and the result is not
+    rounded, matching the PAPER accounting contract.
+    """
+    if fee_type not in ("maker", "taker"):
+        raise ValueError("fee_type must be maker or taker")
+    quantity = _required_decimal(quantity)
+    price = _required_decimal(price)
+    if quantity <= 0 or price <= 0:
+        raise ValueError("quantity and price must be positive")
+    return _exact_product(_exact_product(quantity, price), BINANCE_SPOT_FEE_RATE)
+
+
+def make_binance_spot_fee_snapshot(
+    *,
+    quantity: Decimal,
+    price: Decimal,
+    quote_asset: str,
+    fee_type: Literal["maker", "taker"] = "taker",
+    version: str = BINANCE_SPOT_FEE_VERSION,
+) -> PaperFeeSnapshot:
+    """Create a QUOTE-denominated, provenance-bound Binance fee snapshot."""
+    if not isinstance(quote_asset, str) or not quote_asset.strip():
+        raise ValueError("quote_asset must be non-blank")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("fee policy version must be non-blank")
+    amount = calculate_binance_spot_commission(quantity, price, fee_type)
+    return PaperFeeSnapshot(
+        fee_id="binance_spot_public",
+        fee_version=version,
+        quantity=_required_decimal(quantity),
+        commission=Commission(amount=amount, asset=quote_asset),
+        source="BINANCE_SPOT_PUBLIC",
+        version=version,
+        fee_type=fee_type,
+        rate=BINANCE_SPOT_FEE_RATE,
+    )
+
+
+# Short, descriptive alias for callers that use “fee” rather than
+# “commission” in their domain vocabulary.
+calculate_binance_spot_fee = calculate_binance_spot_commission
 
 
 class PaperModelledExecution(_ExecutionDTO):

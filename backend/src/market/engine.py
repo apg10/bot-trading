@@ -12,7 +12,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
-from .binance_client import BinanceHTTPClient, BinanceWSClient, BinanceConfig, _normalize_symbol
+from .binance_client import (
+    BINANCE_SPOT_PUBLIC,
+    BinanceHTTPClient,
+    BinanceWSClient,
+    BinanceConfig,
+    BinanceWSProtocolError,
+    _normalize_symbol,
+)
 from .candle_builder import CandleBuilder, BarEvent, BarEventType
 from .paper_snapshot import PaperMarketExecutionSnapshot, bar_identity
 
@@ -56,6 +63,9 @@ class MarketEngine:
     - Orquestar eventos del builder y propagarlos
     - Mantener estado actualizado
     """
+
+    source_identity = BINANCE_SPOT_PUBLIC
+    source = BINANCE_SPOT_PUBLIC
 
     def __init__(
         self, config: BinanceConfig, *, freshness_margin_seconds: float = 30.0,
@@ -225,7 +235,12 @@ class MarketEngine:
                         self._state.recovering = True
                     self._emit_state_change()
 
-            def on_error(_error: Exception) -> None:
+            def on_error(error: Exception) -> None:
+                # Binance protocol/rate-limit errors are transport failures,
+                # not market data.  Keep the engine fail-closed and force REST
+                # verification after the client's reconnect succeeds.
+                if isinstance(error, BinanceWSProtocolError):
+                    logger.warning("Binance WebSocket error code %s", error.code)
                 connection_state(False, True)
 
             ws_client.on_message(on_message)
@@ -477,6 +492,7 @@ class MarketEngine:
     def _state_snapshot(self) -> dict[str, Any]:
         self._refresh_state()
         return {
+            "source": self.source_identity,
             "symbol": self._state.symbol,
             "connected": self._state.connected,
             "reconnecting": self._state.reconnecting,
@@ -646,9 +662,16 @@ class MarketEngine:
             await asyncio.sleep(1)
 
     def _validated_candle(self, row: dict[str, Any], *, streaming: bool = False) -> dict[str, Any] | None:
+        if not isinstance(row, dict):
+            raise ValueError("Kline payload must be an object")
         interval = self._interval_ms(self.config.kline_interval)
+        required = ("open_time", "close_time", "open", "high", "low", "close", "volume")
+        if any(field not in row for field in required):
+            raise ValueError("Kline payload is missing required fields")
         start, end = row["open_time"], row["close_time"]
         if type(start) is not int or type(end) is not int or end != start + interval - 1:
+            raise ValueError("Timestamps de vela inválidos")
+        if start < 0:
             raise ValueError("Timestamps de vela inválidos")
         if streaming and self.config.kline_interval == "1m" and start % interval:
             return None
@@ -663,6 +686,8 @@ class MarketEngine:
             return None
         candle = {"open_time": start, "close_time": end, "is_closed": closed}
         for field in ("open", "high", "low", "close", "volume"):
+            if isinstance(row[field], bool):
+                raise ValueError("OHLCV inválido")
             value = float(row[field])
             if not math.isfinite(value) or value < 0 or (field != "volume" and value == 0):
                 raise ValueError("OHLCV inválido")
@@ -707,7 +732,17 @@ class MarketEngine:
             self._coverage_end = end
 
     def _merge_candles(self, candles: list[dict[str, Any]], *, streaming: bool = False) -> None:
+        if not isinstance(candles, list):
+            raise ValueError("Candle batch must be a list")
+        # Validate the complete batch before mutating the bounded buffer.  A
+        # malformed REST page must never leave a partially incorporated page.
+        validated = []
         for candle in candles:
+            normalized = self._validated_candle(candle, streaming=streaming)
+            if normalized is None:
+                continue
+            validated.append(normalized)
+        for candle in validated:
             # Un cierre WS confirmado mientras REST estaba pendiente prevalece
             # sobre ese snapshot REST: la respuesta tardía no deshace el evento.
             if streaming or candle["open_time"] not in self._stream_closed:
